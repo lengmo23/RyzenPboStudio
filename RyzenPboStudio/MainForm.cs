@@ -24,6 +24,8 @@ internal sealed class MainForm : Form
     private readonly TextBox _logBoxTesting = new();   // TESTING 页日志（与 _logBox 内容镜像）
     private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer _offsetTimer = new() { Interval = 1000 };
+    private LinkLabel _updateLink = null!;   // 状态条「检查更新」
+    private bool _updateBusy;                // 更新流程进行中，避免重入
 
     // TESTING 页测试设置卡内各段的统一宽度：下拉框、模式按钮、调整方式按钮、
     // 以及底部开始/停止两键之和都对齐到这个值，改宽度只需改这里一处。
@@ -100,6 +102,8 @@ internal sealed class MainForm : Form
         BuildUi();
         SetStatus("就绪", Theme.Success);
         Shown += (_, _) => InitCoEditor();
+        // 启动后静默查一次更新：有新版才弹窗，无更新或网络不通都不打扰
+        Shown += async (_, _) => await RunUpdateFlowAsync(manual: false);
         Load += (_, _) => FitToScreen();
 
         Log.OnLine += line => _logQueue.Enqueue(line);
@@ -271,8 +275,8 @@ internal sealed class MainForm : Form
         _statusLabel.BackColor = Theme.Bg;
         // 高度 40 以容纳右端版本 + 作者两行文字
         var statusBar = new Panel { Dock = DockStyle.Bottom, Height = 40, BackColor = Theme.Bg, Padding = new Padding(4, 4, 0, 0) };
-        statusBar.Controls.Add(_statusLabel);   // Dock=Fill 先加
-        statusBar.Controls.Add(BuildVersionLabel());   // Dock=Right 后加，占右端
+        statusBar.Controls.Add(_statusLabel);    // Dock=Fill 先加
+        statusBar.Controls.Add(BuildVersionPanel());   // Dock=Right 后加，占右端
 
         var holder = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
         holder.Controls.Add(top);          // Dock=Fill 先加
@@ -552,26 +556,208 @@ internal sealed class MainForm : Form
         }
     }
 
-    /// <summary>停靠在 TESTING 页底部状态条右端：第一行版本 + 构建日期，第二行作者署名。</summary>
-    private static Label BuildVersionLabel()
+    /// <summary>停靠在 TESTING 页底部状态条右端：第一行版本 + 构建日期 + 检查更新，
+    /// 第二行作者署名 + 抖音主页链接。</summary>
+    private Control BuildVersionPanel()
     {
         string buildDate = typeof(MainForm).Assembly
             .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
             .Cast<System.Reflection.AssemblyMetadataAttribute>()
             .FirstOrDefault(a => a.Key == "BuildDate")?.Value ?? "?";
         string version = typeof(MainForm).Assembly.GetName().Version?.ToString(3) ?? "?";
-        return new Label
+
+        var grid = new TableLayoutPanel
         {
-            Text = $"版本 v{version} · 构建 {buildDate}\n制作：DY冷漠_OC调试",
             Dock = DockStyle.Right,
-            AutoSize = false,
-            Width = 240,
+            Width = 350,
+            ColumnCount = 2,
+            RowCount = 2,
+            BackColor = Theme.Bg,
+            Margin = new Padding(0),
             Padding = new Padding(0, 0, 6, 0),
-            ForeColor = Theme.TextLo,
+        };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 文本右对齐
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));       // 链接贴最右
+        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+
+        grid.Controls.Add(DimText($"版本 v{version} · 构建 {buildDate}"), 0, 0);
+        _updateLink = FootLink("检查更新", () => _ = RunUpdateFlowAsync(manual: true));
+        grid.Controls.Add(_updateLink, 1, 0);
+
+        grid.Controls.Add(DimText("制作：DY冷漠_OC调试"), 0, 1);
+        grid.Controls.Add(FootLink("抖音 冷漠OC", () => OpenUrl(DouyinUrl)), 1, 1);
+        return grid;
+    }
+
+    private const string DouyinUrl = "https://v.douyin.com/6VGnQBTxwIQ/";
+
+    private static Label DimText(string text) => new()
+    {
+        Text = text,
+        Dock = DockStyle.Fill,
+        ForeColor = Theme.TextLo,
+        BackColor = Theme.Bg,
+        Font = new Font(Theme.FontFamily, 8.5F),
+        TextAlign = ContentAlignment.MiddleRight,
+    };
+
+    /// <summary>状态条上的小号超链接。</summary>
+    private static LinkLabel FootLink(string text, Action onClick)
+    {
+        var link = new LinkLabel
+        {
+            Text = text,
+            AutoSize = true,
             BackColor = Theme.Bg,
             Font = new Font(Theme.FontFamily, 8.5F),
-            TextAlign = ContentAlignment.MiddleRight,
+            LinkColor = Theme.Accent,
+            ActiveLinkColor = Theme.AccentHover,
+            VisitedLinkColor = Theme.Accent,
+            LinkBehavior = LinkBehavior.HoverUnderline,
+            Margin = new Padding(8, 0, 0, 0),
+            Anchor = AnchorStyles.Right,
         };
+        link.LinkClicked += (_, _) => onClick();
+        return link;
+    }
+
+    // ── 在线更新 ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 检查 GitHub Release 并在用户确认后完成更新。manual=false 为启动时的静默检查：
+    /// 无更新或网络异常都不打扰用户；manual=true 由「检查更新」触发，各种结果都给回应。
+    /// </summary>
+    private async Task RunUpdateFlowAsync(bool manual)
+    {
+        if (_updateBusy) return;
+
+        // 压测期间不允许更新：更新要退出程序，中途退出会留下脏标记，
+        // 且 CO 已下发到 CPU，应当先让测试正常收尾。
+        if (_testTask is { IsCompleted: false })
+        {
+            if (manual)
+                MessageBox.Show("测试进行中，无法更新。\n\n请先停止测试，待其安全收尾后再试。",
+                    "正在测试", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        _updateBusy = true;
+        _updateLink.Enabled = false;
+        try
+        {
+            UpdateInfo? info;
+            try
+            {
+                info = await Updater.CheckAsync();
+            }
+            catch (Exception e)
+            {
+                if (manual)
+                    MessageBox.Show($"检查更新失败：{e.Message}", "检查更新",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (IsDisposed) return;
+
+            if (info == null)
+            {
+                if (manual)
+                    MessageBox.Show($"当前已是最新版本 v{Updater.CurrentVersion}。", "检查更新",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            Log.Write($"发现新版本 {info.Tag}（当前 v{Updater.CurrentVersion}）");
+            string notes = info.Notes.Length > 600 ? info.Notes[..600] + "\n..." : info.Notes;
+            var choice = MessageBox.Show(
+                $"发现新版本 {info.Tag}，当前为 v{Updater.CurrentVersion}。\n\n" +
+                $"{notes}\n\n" +
+                $"下载大小约 {info.Size / 1024.0 / 1024.0:F1} MB。\n" +
+                "更新会关闭程序、覆盖安装目录后自动重启；\n" +
+                "logs 与 profiles 文件夹（负压历史与恢复数据）不会被改动。\n\n" +
+                "现在更新吗？",
+                "发现新版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (choice != DialogResult.Yes) return;
+
+            await DownloadAndApplyAsync(info);
+        }
+        finally
+        {
+            _updateBusy = false;
+            if (!IsDisposed) _updateLink.Enabled = true;
+        }
+    }
+
+    /// <summary>下载并解压新版本；两步都成功才关闭程序交给替换脚本。</summary>
+    private async Task DownloadAndApplyAsync(UpdateInfo info)
+    {
+        string zipPath;
+        try
+        {
+            var progress = new Progress<int>(p =>
+            {
+                if (!IsDisposed) _updateLink.Text = $"下载中 {p}%";
+            });
+            SetStatus($"正在下载更新 {info.Tag}...", Theme.Warn);
+            zipPath = await Updater.DownloadAsync(info, progress);
+        }
+        catch (Exception e)
+        {
+            _updateLink.Text = "检查更新";
+            SetStatus("更新下载失败", Theme.Accent);
+            Log.Write($"更新下载失败：{e.Message}", "WARN");
+            MessageBox.Show($"下载更新失败：{e.Message}", "更新",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        string newRoot;
+        try
+        {
+            _updateLink.Text = "解压中...";
+            SetStatus("正在解压更新...", Theme.Warn);
+            newRoot = await Task.Run(() => Updater.ExtractAndVerify(zipPath));
+        }
+        catch (Exception e)
+        {
+            _updateLink.Text = "检查更新";
+            SetStatus("更新包校验失败", Theme.Accent);
+            Log.Write($"更新包解压/校验失败：{e.Message}", "WARN");
+            MessageBox.Show($"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // 到这一步新文件已就绪，剩下的覆盖必须等本进程退出后由脚本执行
+        try
+        {
+            Updater.LaunchReplacerAndExit(newRoot);
+        }
+        catch (Exception e)
+        {
+            _updateLink.Text = "检查更新";
+            MessageBox.Show($"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        Log.Write("更新就绪，正在退出以完成替换");
+        Close();
+    }
+
+    /// <summary>用系统默认浏览器打开链接。</summary>
+    private static void OpenUrl(string url)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception e)
+        {
+            MessageBox.Show($"无法打开链接：{e.Message}\n\n{url}", "提示",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
     }
 
     /// <summary>运行日志卡片。AMD PBO 页与 TESTING 页各建一个实例（一个 TextBox 无法同时挂在两页），

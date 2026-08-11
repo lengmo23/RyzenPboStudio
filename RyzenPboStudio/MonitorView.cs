@@ -266,15 +266,16 @@ internal sealed class MonitorView : UserControl
             }
         }
 
-        // 金银核：全局 CPPC 最高的「一个」核=金(★)、次高的「一个」核=银(✦)，只标这两个（不标铜核）。
-        // 按核索引定位而非按数值匹配，避免并列同分时标出多个。同分取核号小的。
+        // 金银核：按 CPPC 全局排名取前两个，先银后金 —— 排名第一的标银(✦)，第二的标金(★)，
+        // 只标这两个（不标铜核）。CPPC 并列同分时按核号从小到大，即同分中的第一个为银、第二个为金。
+        // 按核索引定位而非按数值匹配，避免并列同分时标出多个。
         int goldCore = -1, silverCore = -1;
         var ranked = Enumerable.Range(0, (int)cores)
             .Where(i => (slotDisabled.Length <= i || !slotDisabled[i]) && perf[i] > 0)
             .OrderByDescending(i => perf[i]).ThenBy(i => i)
             .ToList();
-        if (ranked.Count > 0) goldCore = ranked[0];
-        if (ranked.Count > 1) silverCore = ranked[1];
+        if (ranked.Count > 0) silverCore = ranked[0];
+        if (ranked.Count > 1) goldCore = ranked[1];
 
         // 始终显示两栏（与上下两条等宽对齐）；单 CCD 机型时 CCD#1 显示空表而非隐藏。
         int displayCcds = (int)Math.Max(2u, ccds);
