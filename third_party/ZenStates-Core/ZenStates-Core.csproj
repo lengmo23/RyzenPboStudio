@@ -1,0 +1,103 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>ZenStates.Core</RootNamespace>
+    <TargetFrameworks>net20;netstandard2.1;net8.0-windows</TargetFrameworks>
+    <AssemblyTitle>ZenStates.Core</AssemblyTitle>
+    <Company>irusanov</Company>
+    <Product>ZenStates.Core</Product>
+    <Copyright>Copyright © 2026</Copyright>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <IsWindows Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Windows)))' == 'true'">true</IsWindows> 
+    <IsLinux Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Linux)))' == 'true'">true</IsLinux> 
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugType>full</DebugType>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ApplicationIcon />
+    <ErrorReport>none</ErrorReport>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|netstandard2.1|AnyCPU'">
+    <WarningLevel>4</WarningLevel>
+    <CheckForOverflowUnderflow>True</CheckForOverflowUnderflow>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|netstandard2.1|AnyCPU'">
+    <WarningLevel>4</WarningLevel>
+    <CheckForOverflowUnderflow>True</CheckForOverflowUnderflow>
+  </PropertyGroup>
+<PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net8.0-windows|AnyCPU'">
+	<WarningLevel>4</WarningLevel>
+	<CheckForOverflowUnderflow>True</CheckForOverflowUnderflow>
+</PropertyGroup>
+<PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|net8.0-windows|AnyCPU'">
+	<WarningLevel>4</WarningLevel>
+	<CheckForOverflowUnderflow>True</CheckForOverflowUnderflow>
+</PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net20|AnyCPU'">
+    <CheckForOverflowUnderflow>True</CheckForOverflowUnderflow>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|net20|AnyCPU'">
+    <CheckForOverflowUnderflow>True</CheckForOverflowUnderflow>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net20'">
+    <Reference Include="System.Management" />
+    <Reference Include="System.ServiceProcess" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Remove="Resources\PawnIo\AMDFamily0F.bin" />
+    <None Remove="Resources\PawnIo\AMDFamily10.bin" />
+    <None Remove="Resources\PawnIo\AMDFamily17.bin" />
+    <None Remove="Resources\PawnIo\IntelMSR.bin" />
+    <None Remove="Resources\PawnIo\LpcACPIEC.bin" />
+    <None Remove="Resources\PawnIo\LpcIO.bin" />
+    <None Remove="Resources\PawnIo\RyzenSMU.bin" />
+    <None Remove="Resources\PawnIo\SmbusI801.bin" />
+    <None Remove="Resources\PawnIo\SmbusNCT6793.bin" />
+    <None Remove="Resources\PawnIo\SmbusPIIX4.bin" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="External\InpOut\DLPortIO.txt" />
+    <None Include="External\InpOut\license.txt" />
+    <None Include="External\InpOut\ReadMe.txt" />
+    <None Include="External\InpOut\Win32\inpout32.dll" />
+    <None Include="External\InpOut\Win32\inpout32.h" />
+    <None Include="External\InpOut\Win32\InstallDriver.exe" />
+    <None Include="External\InpOut\x64\inpout32.h" />
+    <None Include="External\InpOut\x64\inpoutx64.dll" />
+    <None Include="External\WinIo\LICENSE.txt" />
+    <EmbeddedResource Include="Resources\PawnIo\AMDFamily17.bin" />
+    <EmbeddedResource Include="Resources\PawnIo\RyzenSMU.bin" />
+    <EmbeddedResource Include="Resources\PawnIo\SmbusPIIX4.bin" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="External\InpOut\Win32\inpout32.lib" />
+    <None Include="External\InpOut\x64\inpoutx64.lib" />
+    <None Include="External\WinIo\WinIo32.dll" />
+    <None Include="External\WinIo\WinIo32.sys" />
+    <None Include="LICENSE">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Include="README.md">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' != 'net20'">
+    <PackageReference Include="System.Management" Version="6.0.0">
+    </PackageReference>
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="6.0.0">
+    </PackageReference>
+    <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
+    <PackageReference Include="System.Threading.AccessControl" Version="6.0.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+    <PackageReference Include="Microsoft.Win32.Registry">
+      <Version>5.0.0</Version>
+    </PackageReference>
+  </ItemGroup>
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(isWindows)' == 'true'">
+    <Exec Command="xcopy /s /d /y &quot;$(ProjectDir)External\InpOut\x64\inpoutx64.dll&quot; &quot;$(OutDir)..\&quot;&#xD;&#xA;xcopy /s /d /y &quot;$(ProjectDir)External\WinIo\WinIo32.dll&quot; &quot;$(OutDir)..\&quot;&#xD;&#xA;xcopy /s /d /y &quot;$(ProjectDir)External\WinIo\WinIo32.sys&quot; &quot;$(OutDir)..\&quot;&#xD;&#xA;copy &quot;$(ProjectDir)External\InpOut\license.txt&quot; &quot;$(OutDir)..\InpOut.LICENSE.txt&quot;&#xD;&#xA;copy &quot;$(ProjectDir)External\WinIo\LICENSE.txt&quot; &quot;$(OutDir)..\WinIo32.LICENSE.txt&quot;" />
+  </Target>
+</Project>
