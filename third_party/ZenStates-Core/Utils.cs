@@ -1,0 +1,596 @@
+using Microsoft.Win32;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+
+namespace ZenStates.Core
+{
+    public static class Utils
+    {
+        public static bool Is64Bit => OpenHardwareMonitor.Hardware.OperatingSystem.Is64BitOperatingSystem;
+
+        public static uint SetBits(uint val, int offset, int n, uint newVal)
+        {
+            return val & ~(((1U << n) - 1) << offset) | (newVal << offset);
+        }
+
+        public static uint SetBit(uint val, int offset) => SetBits(val, offset, 1, 1);
+
+        public static uint ClearBit(uint val, int offset) => SetBits(val, offset, 1, 0);
+
+        public static uint GetBits(uint val, int offset, int n)
+        {
+            return (val >> offset) & ~(~0U << n);
+        }
+
+        public static uint GetBit(uint value, int bitOffset) => GetBits(value, bitOffset, 1);
+
+        public static uint BitSlice(uint val, int hi, int lo)
+        {
+            uint mask = (2U << hi - lo) - 1U;
+            return val >> lo & mask;
+        }
+
+        public static uint CountSetBits(uint v)
+        {
+            uint result = 0;
+
+            while (v > 0)
+            {
+                v &= v - 1;
+                result++;
+            }
+
+            return result;
+        }
+
+        // https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/blob/master/LibreHardwareMonitorLib/Hardware/SMBios.cs#L918
+        public static bool IsBitSet(byte b, int pos)
+        {
+            return (b & (1 << pos)) != 0;
+        }
+
+        public static string GetStringPart(uint val)
+        {
+            return val != 0 ? Convert.ToChar(val).ToString() : "";
+        }
+
+        public static string IntToStr(uint val)
+        {
+            uint part1 = val & 0xff;
+            uint part2 = val >> 8 & 0xff;
+            uint part3 = val >> 16 & 0xff;
+            uint part4 = val >> 24 & 0xff;
+
+            return $"{GetStringPart(part1)}{GetStringPart(part2)}{GetStringPart(part3)}{GetStringPart(part4)}";
+        }
+
+        public static double VidToVoltage(uint vid)
+        {
+            return 1.55 - vid * 0.00625;
+        }
+
+        public static double VidToVoltageSVI3(uint vid)
+        {
+            return Math.Round(0.245 + vid * 0.005, 3);
+        }
+
+        public static uint VoltageToVidSVI3(double targetVoltage)
+        {
+            if (targetVoltage < 0.245)
+                return 0;
+            return (uint)Math.Round((targetVoltage - 0.245) / 0.005);
+        }
+
+        private static bool CheckAllZero<T>(T[] typedArray)
+        {
+            if (typedArray == null)
+                return true;
+
+            var comparer = EqualityComparer<T>.Default;
+            T zero = default;
+            foreach (var value in typedArray)
+            {
+                if (!comparer.Equals(value, zero))
+                    return false;
+            }
+
+            return true;
+        }
+
+        public static bool AllZero(byte[] arr) => CheckAllZero(arr);
+
+        public static bool AllZero(int[] arr) => CheckAllZero(arr);
+
+        public static bool AllZero(uint[] arr) => CheckAllZero(arr);
+
+        public static bool AllZero(float[] arr) => CheckAllZero(arr);
+
+        public static uint[] MakeCmdArgs(uint[] args, uint maxArgs = Constants.DEFAULT_MAILBOX_ARGS)
+        {
+            uint[] cmdArgs = new uint[maxArgs];
+            int length = (int)Math.Min(maxArgs, (uint)args.Length);
+            Array.Copy(args, cmdArgs, length);
+            return cmdArgs;
+        }
+
+        public static uint[] MakeCmdArgs(uint arg = 0, uint maxArgs = Constants.DEFAULT_MAILBOX_ARGS)
+        {
+            return MakeCmdArgs(new uint[] { arg }, maxArgs);
+        }
+
+        // CO margin range from -30 to 30 before Zen 4, and from -50 to 50 on Zen 4 and newer
+        // Margin arg 16 bits (lowest 16 bits of the command arg)
+        public static uint MakePsmMarginArg(int margin)
+        {
+            int offset = margin < 0 ? 0x100000 : 0;
+            return (uint)(offset + margin) & 0xffff;
+        }
+
+        public static uint CurveOptimizerToVid(int co)
+        {
+            if (co < -50) co = -50;
+            if (co > 50)  co = 50;
+
+            const double baseVoltage = 1.30;
+            const double maxOffset   = 0.200;
+            const double gamma       = 1.7;
+
+            double normalized = Math.Abs(co) / 50.0;
+            double curve = Math.Pow(normalized, gamma);
+
+            double delta = curve * maxOffset;
+
+            if (co < 0)
+                delta = -delta;
+
+            double targetVoltage = baseVoltage + delta;
+
+            return VoltageToVidSVI3(targetVoltage);
+        }
+
+        public static T ByteArrayToStructure<T>(byte[] byteArray) where T : new()
+        {
+            if (byteArray == null)
+                return default;
+
+            T structure;
+            GCHandle handle = GCHandle.Alloc(byteArray, GCHandleType.Pinned);
+            try
+            {
+                structure = (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T));
+            }
+            finally
+            {
+                handle.Free();
+            }
+            return structure;
+        }
+
+        public static T CreateFromByteArray<T>(byte[] byteArray, Dictionary<string, int> fieldDictionary) where T : new()
+        {
+            T data = new T();
+
+            if (byteArray == null)
+                return data;
+
+            foreach (var entry in fieldDictionary)
+            {
+                try
+                {
+                    string fieldName = entry.Key;
+                    int fieldOffset = entry.Value;
+
+                    PropertyInfo property = typeof(T).GetProperty(fieldName);
+                    if (property == null)
+                        continue;
+
+                    if (fieldOffset < 0 || fieldOffset > byteArray.Length - sizeof(int))
+                        continue;
+
+                    int rawValue = BitConverter.ToInt32(byteArray, fieldOffset);
+                    Type propertyType = property.PropertyType;
+                    object fieldValue;
+
+                    if (propertyType == typeof(string))
+                    {
+                        fieldValue = rawValue.ToString();
+                    }
+                    else if (!propertyType.IsValueType)
+                    {
+                        fieldValue = Activator.CreateInstance(propertyType, rawValue);
+                    }
+                    else
+                    {
+                        fieldValue = Convert.ChangeType(rawValue, propertyType);
+                    }
+
+                    property.SetValue(data, fieldValue, null);
+                }
+                catch (Exception e)
+                {
+                    Debug.WriteLine(e.ToString(), e.Message);
+                }
+            }
+
+            return data;
+        }
+
+        public static uint ReverseBytes(uint value)
+        {
+            return (value & 0x000000FFU) << 24 | (value & 0x0000FF00U) << 8 |
+                (value & 0x00FF0000U) >> 8 | (value & 0xFF000000U) >> 24;
+        }
+
+        public static string GetStringFromBytes(uint value)
+        {
+            byte[] bytes = BitConverter.GetBytes(value);
+            return GetStringFromBytes(bytes);
+        }
+
+        public static string GetStringFromBytes(ulong value)
+        {
+            byte[] bytes = BitConverter.GetBytes(value);
+            return GetStringFromBytes(bytes);
+        }
+
+        public static string GetStringFromBytes(byte[] value)
+        {
+            return Encoding.ASCII.GetString(value).Replace("\0", " ");
+        }
+
+        public static uint ReadUInt32(byte[] data, int offset)
+        {
+            if (data == null || offset < 0 || data.Length < offset + 4)
+                return 0;
+
+            return (uint)(data[offset]
+                | (data[offset + 1] << 8)
+                | (data[offset + 2] << 16)
+                | (data[offset + 3] << 24));
+        }
+
+        /// <summary>Looks for the next occurrence of a sequence in a byte array</summary>
+        /// <param name="source">Array that will be scanned</param>
+        /// <param name="start">Index in the array at which scanning will begin</param>
+        /// <param name="pattern">Sequence the array will be scanned for</param>
+        /// <returns>
+        ///   The index of the next occurrence of the sequence of -1 if not found
+        /// </returns>
+        public static int FindSequence(byte[] source, int start, byte[] pattern)
+        {
+            if (source == null || source.Length == 0 || pattern == null || pattern.Length == 0)
+                return -1;
+
+            if (pattern.Length > source.Length)
+                return -1;
+
+            if (start < 0 || start >= source.Length)
+                return -1;
+
+            int end = source.Length - pattern.Length;
+            byte firstByte = pattern[0];
+
+            while (start <= end)
+            {
+                if (source[start] == firstByte)
+                {
+                    int offset;
+                    for (offset = 1; offset < pattern.Length; offset++)
+                    {
+                        if (source[start + offset] != pattern[offset])
+                        {
+                            break;
+                        }
+                    }
+
+                    if (offset == pattern.Length)
+                        return start;
+                }
+
+                start++;
+            }
+
+            return -1;
+        }
+
+        public static int FindLastSequence(byte[] source, int start, byte[] pattern)
+        {
+            int lastIndex = -1;
+            int current = start;
+
+            while (true)
+            {
+                int found = FindSequence(source, current, pattern);
+                if (found == -1)
+                    break;
+                lastIndex = found;
+                current = found + 1;
+            }
+
+            return lastIndex;
+        }
+
+        public static bool ArrayMembersEqual(float[] array1, float[] array2, int numElements)
+        {
+            if (array1 == null || array2 == null)
+                return false;
+
+            if (array1.Length < numElements || array2.Length < numElements)
+            {
+                Debug.WriteLine("Arrays are not long enough to compare the specified number of elements.");
+                return false;
+            }
+
+            for (int i = 0; i < numElements; i++)
+            {
+                if (array1[i] != array2[i])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public static bool PartialStringMatch(string str, string[] arr)
+        {
+            foreach (var item in arr)
+            {
+                if (str.Contains(item))
+                    return true;
+            }
+            return false;
+        }
+
+        public static float ToNanoseconds(uint value, float frequency)
+        {
+            if (frequency != 0)
+            {
+                float refiValue = value;
+                float trefins = refiValue * 2000f / frequency;
+                if (trefins > refiValue) trefins /= 2;
+                return trefins;
+            }
+            return 0;
+        }
+
+        public static byte[] ToBytes2<T>(T value, bool littleEndian = true) where T : struct
+        {
+            long number = Convert.ToInt64(value);
+            byte low = Convert.ToByte(number & 0xFF);
+            byte high = Convert.ToByte((number >> 8) & 0xFF);
+
+            return littleEndian
+                ? new byte[] { low, high }
+                : new byte[] { high, low };
+        }
+
+        public static void RemoveRegistryKey(string keyPath)
+        {
+            try
+            {
+                using (var key = Registry.LocalMachine.OpenSubKey(keyPath, true))
+                {
+                    if (key != null)
+                    {
+                        Registry.LocalMachine.DeleteSubKeyTree(keyPath);
+                        Console.WriteLine($"Deleted registry key: HKEY_LOCAL_MACHINE\\{keyPath}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Registry key not found: HKEY_LOCAL_MACHINE\\{keyPath}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to delete registry key: {ex.Message}");
+            }
+        }
+
+        public class CommandExecutionResult
+        {
+            public bool Success { get; set; }
+            public string StandardOutput { get; set; }
+            public string StandardError { get; set; }
+            public int ExitCode { get; set; }
+            public string State { get; set; }
+        }
+
+        private static readonly Regex StateRegex = new Regex(@"STATE\s+:\s+\d+\s+(\w+)", RegexOptions.Compiled);
+
+        public static CommandExecutionResult ExecuteCommand(string command)
+        {
+            var processInfo = new ProcessStartInfo("cmd.exe", "/c " + command)
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            var result = new CommandExecutionResult();
+            var standardOutput = new StringBuilder();
+            var standardError = new StringBuilder();
+
+            using (var process = Process.Start(processInfo))
+            {
+                if (process == null)
+                {
+                    result.Success = false;
+                    result.StandardError = "Failed to start process.";
+                    return result;
+                }
+
+                process.OutputDataReceived += (sender, e) => { if (e.Data != null) standardOutput.AppendLine(e.Data); };
+                process.BeginOutputReadLine();
+                process.ErrorDataReceived += (sender, e) => { if (e.Data != null) standardError.AppendLine(e.Data); };
+                process.BeginErrorReadLine();
+                process.WaitForExit();
+
+                result.Success = process.ExitCode == 0;
+                result.StandardOutput = standardOutput.ToString();
+                result.StandardError = standardError.ToString();
+                result.ExitCode = process.ExitCode;
+
+                // Parse the state from the standard output
+                var stateMatch = StateRegex.Match(result.StandardOutput);
+                if (stateMatch.Success)
+                {
+                    result.State = stateMatch.Groups[1].Value;
+                }
+                else
+                {
+                    result.State = "Unknown";
+                }
+            }
+
+            return result;
+        }
+
+        public static bool DeleteFile(string filePath)
+        {
+            try
+            {
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                    Console.WriteLine($"Deleted file: {filePath}");
+                }
+                else
+                {
+                    Console.WriteLine($"File not found: {filePath}");
+                }
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        public static bool HasDependentServices(string serviceName)
+        {
+            CommandExecutionResult result = ExecuteCommand($"sc.exe qc {serviceName}");
+            string output = result.StandardOutput;
+            bool hasDependents = false;
+            foreach (var line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Trim().StartsWith("DEPENDENCIES"))
+                {
+                    string dependencies = line.Split(new[] { ':' }, 2)[1].Trim();
+                    if (!string.IsNullOrEmpty(dependencies))
+                    {
+                        hasDependents = true;
+                        Console.WriteLine($"Dependent services: {dependencies}");
+                    }
+                }
+            }
+            return hasDependents;
+        }
+
+        public static int GetServiceProcessId(string serviceName)
+        {
+            CommandExecutionResult result = ExecuteCommand($"sc.exe queryex {serviceName}");
+            string output = result.StandardOutput;
+
+            foreach (var line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Trim().StartsWith("PID"))
+                {
+                    if (int.TryParse(line.Split(':')[1].Trim(), out int pid))
+                    {
+                        return pid;
+                    }
+                }
+            }
+            return -1;
+        }
+
+        public static void KillProcess(int processId)
+        {
+            try
+            {
+                Process process = Process.GetProcessById(processId);
+                process.Kill();
+                process.WaitForExit();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to kill process {processId}: {ex.Message}");
+            }
+        }
+
+        public static bool ServiceExists(string serviceName)
+        {
+            CommandExecutionResult result = ExecuteCommand($"sc query {serviceName}");
+            string output = result.StandardOutput;
+
+            return !output.Contains("FAILED 1060");
+        }
+
+        /// <summary>
+        /// Attempts to convert a value to the specified target type.
+        /// Supports implicit/explicit operators, enums, primitives, and nullable types.
+        /// </summary>
+        public static object ConvertValue(object value, Type targetType)
+        {
+            if (value == null)
+                return null;
+
+            Type sourceType = value.GetType();
+            Type underlyingTarget = Nullable.GetUnderlyingType(targetType) ?? targetType;
+
+            if (underlyingTarget.IsAssignableFrom(sourceType))
+                return value;
+
+            try
+            {
+                if (underlyingTarget.IsEnum)
+                    return Enum.ToObject(underlyingTarget, value);
+
+                if (underlyingTarget.IsPrimitive)
+                    return Convert.ChangeType(value, underlyingTarget);
+
+                MethodInfo op = underlyingTarget.GetMethod("op_Implicit", new[] { sourceType });
+                if (op != null)
+                    return op.Invoke(null, new[] { value });
+
+                MethodInfo opExplicit = underlyingTarget.GetMethod("op_Explicit", new[] { sourceType });
+                if (opExplicit != null)
+                    return opExplicit.Invoke(null, new[] { value });
+            }
+            catch
+            {
+                // ignored
+            }
+
+            return null;
+        }
+
+        public static void DelayMicroseconds(int microseconds)
+        {
+            if (microseconds <= 0)
+                return;
+
+            long waitTicks = (Stopwatch.Frequency * microseconds) / 1000000L;
+
+            if (waitTicks <= 0)
+                waitTicks = 1;
+
+            long start = Stopwatch.GetTimestamp();
+
+            while ((Stopwatch.GetTimestamp() - start) < waitTicks)
+            {
+                Thread.SpinWait(10);
+            }
+        }
+    }
+}
