@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>RyzenPboStudio</RootNamespace>
+    <AssemblyName>AMD Ryzen PBO Studio</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\ICON.ico</ApplicationIcon>
+    <Version>2.0.1</Version>
+    <!-- 作者信息：显示在 EXE 右键「属性 → 详细信息」中 -->
+    <Product>AMD Ryzen PBO Studio</Product>
+    <Authors>DY冷漠_OC调试</Authors>
+    <Company>DY冷漠_OC调试</Company>
+    <Copyright>Copyright © 2026 DY冷漠_OC调试. Licensed under GPL-3.0.</Copyright>
+    <Description>AMD Ryzen Curve Optimizer 负压测试与自动调整工具</Description>
+    <!-- 编译期固定构建日期，避免运行时读文件时间导致每次打开都变 -->
+    <BuildDate>$([System.DateTime]::Now.ToString("yyyy-MM-dd"))</BuildDate>
+    <!-- 不依赖 wmic：CPU 信息走注册表 + GetLogicalProcessorInformation -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ToolBundlePath>obj\$(Configuration)\$(TargetFramework)\tool-bundle.zip</ToolBundlePath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\third_party\ZenStates-Core\ZenStates-Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 把构建日期写入程序集元数据，运行时读取，保证同一版本 EXE 时间固定 -->
+    <AssemblyMetadata Include="BuildDate" Value="$(BuildDate)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 内嵌包只放 inpoutx64.dll（ZenStates-Core 的 IODriver 硬依赖）：它会被释放到
+         %ProgramData% 下的受保护目录并逐文件校验 SHA-256，放在 EXE 旁的可写目录会有
+         DLL 劫持风险。y-cruncher 体积大且是外部进程，改为随发布目录放在 tools\y-cruncher\。 -->
+    <ToolBundleSource Include="..\ryzen-smu-cli-0.1.3\inpoutx64.dll" />
+    <ToolBundleSource Include="..\ryzen-smu-cli-0.1.3\InpOut.LICENSE.txt" />
+    <ToolBundleSource Include="..\THIRD-PARTY-NOTICES.txt" />
+    <EmbeddedResource Include="$(ToolBundlePath)"
+                      LogicalName="RyzenPboStudio.Resources.tool-bundle.zip" />
+    <!-- 单文件发布时磁盘无 ICON.ico，内嵌以便运行时设置窗口/任务栏图标 -->
+    <EmbeddedResource Include="..\ICON.ico" LogicalName="RyzenPboStudio.ICON.ico" />
+  </ItemGroup>
+
+  <Target Name="GenerateEmbeddedToolBundle"
+          BeforeTargets="PrepareResources"
+          Inputs="@(ToolBundleSource);..\Scripts\build-tool-bundle.ps1"
+          Outputs="$(ToolBundlePath)">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\Scripts\build-tool-bundle.ps1&quot; -ProjectRoot &quot;$(MSBuildProjectDirectory)\..&quot; -OutputPath &quot;$(MSBuildProjectDirectory)\$(ToolBundlePath)&quot;" />
+  </Target>
+
+  <Target Name="CleanEmbeddedToolBundle" AfterTargets="Clean">
+    <Delete Files="$(ToolBundlePath)" />
+  </Target>
+
+  <!-- y-cruncher 随发布目录分发到 tools\y-cruncher\。开源仓库不含 y-cruncher，
+       本地缺失时该目标自动跳过，构建照常成功，由用户自行下载放置（见 README）。 -->
+  <Target Name="CopyYCruncherToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <YCruncherFile Include="..\y-cruncher v0.8.7.9547b\**\*" />
+    </ItemGroup>
+    <Copy Condition="'@(YCruncherFile)' != ''"
+          SourceFiles="@(YCruncherFile)"
+          DestinationFiles="@(YCruncherFile->'$(PublishDir)tools\y-cruncher\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Message Condition="'@(YCruncherFile)' == ''" Importance="high"
+             Text="y-cruncher not found locally; published without it (user supplies it in tools\y-cruncher\)." />
+  </Target>
+
+</Project>

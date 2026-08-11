@@ -1,0 +1,65 @@
+Third-Party Notices
+===================
+
+AMD Ryzen PBO Studio is released under the GNU General Public License version 3
+(see LICENSE). It incorporates or interoperates with the components below.
+
+ZenStates-Core
+--------------
+Copyright (c) Ivan Rusanov.
+Project: https://github.com/irusanov/ZenStates-Core
+
+ZenStates-Core is distributed under the GNU General Public License version 3.
+The full license text is included as "third_party/ZenStates-Core/LICENSE".
+
+This application links ZenStates-Core directly (it is compiled into the shipped
+executable) and uses it for SMU access, Curve Optimizer / Curve Shaper reads and
+writes, PM Table access, and PBO limit control. Because of this linkage, the
+combined work is likewise licensed under the GPL version 3.
+
+SMUDebugTool
+------------
+Copyright (c) Ivan Rusanov.
+Project: https://github.com/irusanov/SMUDebugTool
+
+Used as reference for SMU command identifiers and PM Table field offsets.
+Distributed under the GNU General Public License version 3.
+
+ryzen-smu-cli 0.1.3
+-------------------
+Project mirror and corresponding source:
+https://github.com/rawhide-kobayashi/ryzen-smu-cli/tree/0.1.3
+
+ryzen-smu-cli is distributed under the GNU General Public License version 3.
+The full license text is included as "ryzen-smu-cli-0.1.3/LICENSE.txt". License
+notices for InpOut, WinIo32, and WinRing0 are included beside their binaries.
+
+Only "inpoutx64.dll" (an IODriver dependency) and its license notice are shipped
+with this application.
+
+y-cruncher
+----------
+Copyright 2008-2025 Alexander J. Yee.
+Website: https://www.numberworld.org/y-cruncher/
+
+y-cruncher is NOT distributed with this repository. Users download it themselves
+from the official website and place it next to the application executable; see
+README.md.
+
+y-cruncher is not open-source software. Its own license governs its use and
+redistribution, and it may change at any time; the authoritative text is at
+https://www.numberworld.org/y-cruncher/license.html. y-cruncher remains the
+property of its author and is provided without warranty as stated in the vendor
+notice ("Read Me.txt" inside the y-cruncher distribution).
+
+PawnIO
+------
+Website: https://pawnio.eu
+
+PawnIO is a required runtime dependency (kernel driver) installed separately by
+the user. It is not distributed with this application.
+
+---
+
+The third-party programs listed as separate executables are launched as
+independent processes. They are not modified by this application.
