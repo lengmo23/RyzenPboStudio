@@ -1,0 +1,1515 @@
+using OpenHardwareMonitor.Hardware;
+using System;
+using System.Diagnostics;
+
+#if !NET20
+using System.Globalization;
+#endif
+using System.Reflection;
+using System.Text.RegularExpressions;
+using ZenStates.Core.DRAM;
+using ZenStates.Core.Drivers;
+using ZenStates.Core.SMUCommands;
+
+namespace ZenStates.Core
+{
+    public class Cpu : IDisposable
+    {
+        private readonly CpuInitSettings _settings;
+        private readonly AmdFamily17 _pawnAmd;
+        private readonly RyzenSmu _pawnRyzenSmu;
+        private readonly SmbusDriverBase _smbusPiix4;
+        private bool disposedValue;
+        private const string InitializationExceptionText = "CPU module initialization failed.";
+
+        public readonly Version Version = Assembly.GetExecutingAssembly().GetName().Version;
+
+        public RyzenSmu RyzenSmu => _pawnRyzenSmu;
+
+        public enum Family
+        {
+            UNSUPPORTED = 0x0,
+            FAMILY_0FH = 0x0F,
+            FAMILY_10H = 0x10,
+            FAMILY_12H = 0x12,
+            FAMILY_15H = 0x15,
+            FAMILY_16H = 0x16,
+            FAMILY_17H = 0x17,
+            FAMILY_18H = 0x18,
+            FAMILY_19H = 0x19,
+            FAMILY_1AH = 0x1A,
+        };
+
+        public enum CodeName
+        {
+            Unsupported = 0,
+            DEBUG,
+            K8,
+            K10,
+            K12,
+            K16,
+            BristolRidge,
+            Vishera,
+            SummitRidge,
+            Whitehaven,
+            Naples,
+            RavenRidge,
+            PinnacleRidge,
+            Colfax,
+            Picasso,
+            FireFlight,
+            Matisse,
+            CastlePeak,
+            Rome,
+            Dali,
+            Renoir,
+            VanGogh,
+            Vermeer,
+            Chagall,
+            Milan,
+            Cezanne,
+            Rembrandt,
+            Lucienne,
+            Raphael,
+            Phoenix,
+            Phoenix2,
+            Mendocino,
+            Genoa,
+            StormPeak,
+            DragonRange,
+            Mero,
+            HawkPoint,
+            StrixPoint,
+            GraniteRidge,
+            KrackanPoint,
+            KrackanPoint2,
+            StrixHalo,
+            Turin,
+            TurinD,
+            Bergamo,
+            ShimadaPeak,
+        };
+
+
+        // CPUID_Fn80000001_EBX [BrandId Identifier] (BrandId)
+        // [31:28] PkgType: package type.
+        // Socket FP5/FP6 = 0
+        // Socket AM4 = 2
+        // Socket SP3 = 4
+        // Socket TR4/TRX4 (SP3r2/SP3r3) = 7
+        public enum PackageType
+        {
+            FPX = 0,
+            AM4 = 2,
+            SP3 = 4,
+            TRX = 7,
+        }
+
+        public struct SVI2
+        {
+            public uint coreAddress;
+            public uint socAddress;
+        }
+
+        public struct CpuTopology
+        {
+            public uint ccds;
+            public uint ccxs;
+            public uint coresPerCcx;
+            public uint cores;
+            public uint logicalCores;
+            public uint physicalCores;
+            public uint threadsPerCore;
+            public uint cpuNodes;
+            public uint[] coreDisableMap;
+            public uint ccdEnableMap;
+            public uint ccdDisableMap;
+            public uint fuse1;
+            public uint fuse2;
+            public uint ccdsPresent;
+            public uint ccdsDown;
+            public uint[] performanceOfCore;
+        }
+
+        public struct CPUInfo
+        {
+            public uint cpuid;
+            public Family family;
+            public CodeName codeName;
+            public string cpuName;
+            public string vendor;
+            public PackageType packageType;
+            public uint baseModel;
+            public uint extModel;
+            public uint model;
+            public uint patchLevel;
+            public uint stepping;
+            public CpuTopology topology;
+            public SVI2 svi2;
+            public AOD aod;
+            public Apob apob;
+        }
+
+        public readonly IODriver io = new IODriver();
+        private readonly AMD_MMIO mmio;
+        public readonly CPUInfo info;
+        public readonly SystemInfo systemInfo;
+        public readonly SMU smu;
+        public readonly PowerTable powerTable;
+        public readonly MemoryConfig memoryConfig;
+
+        public IODriver.LibStatus Status { get; }
+        public Exception LastError { get; }
+
+        /**
+         * Core fuse
+         * Summit: 0x5D25C
+         * Colfax: 0x5D25C
+         * Pinnacle: 0x5D25C
+         * Threadripper: 0x5D25C
+         * 
+         * Matisse: 0x30081A38
+         * CastlePeak: 0x30081A38
+         * Chagall: 0x30081D98
+         * Vermeer: 0x30081D98
+         * Raphael: 0x30081CD0
+         * ShimadaPeak: 0x3820094 ?
+         * 
+         * Raven:  0x5D254
+         * Raven2: 0x5D254
+         * Picasso: 0x5D254
+         * Cezanne: 0x5D449
+         * Renoir: 0x5D3E8
+         * Rembrandt: 0x5D4DC
+         * Phoenix: 0x5D528
+         * StrixPoint: 0x3820AB0
+         * KrackanPoint: 0x3820AB0
+         */
+
+        // TODO: Refactor topology retrieval and fix for known fuse addresses
+        private CpuTopology GetCpuTopology(Family family, CodeName codeName, uint model)
+        {
+            CpuTopology topology = new CpuTopology();
+
+            if (Opcode.Cpuid(0x00000001, 0, out uint eax, out uint ebx, out uint ecx, out uint edx))
+                topology.logicalCores = Utils.GetBits(ebx, 16, 8);
+            else
+                throw new ApplicationException(InitializationExceptionText);
+
+            if (Opcode.Cpuid(0x8000001E, 0, out eax, out ebx, out ecx, out edx))
+            {
+                topology.threadsPerCore = Utils.GetBits(ebx, 8, 4) + 1;
+                topology.cpuNodes = ((ecx >> 8) & 0x7) + 1;
+
+                if (topology.threadsPerCore == 0)
+                    topology.cores = topology.logicalCores;
+                else
+                    topology.cores = topology.logicalCores / topology.threadsPerCore;
+
+                topology.coresPerCcx = topology.cores > 8 ? 8 : topology.cores;
+            }
+            else
+            {
+                throw new ApplicationException(InitializationExceptionText);
+            }
+
+            try
+            {
+                topology.performanceOfCore = new uint[topology.cores];
+
+                for (int i = 0; i < topology.logicalCores; i += (int)topology.threadsPerCore)
+                {
+                    uint _eax = default; uint _edx = default;
+                    if (ReadMsrTx(0xC00102B3, ref _eax, ref _edx, GroupAffinity.Single(0, i)))
+                        topology.performanceOfCore[i / topology.threadsPerCore] = _eax & 0xff;
+                    else
+                        topology.performanceOfCore[i / topology.threadsPerCore] = 0;
+                }
+            }
+            catch { }
+
+            uint ccdsPresent = 0, ccdsDown = 0, coreFuse = 0;
+            uint fuse1 = 0x5D218;
+            uint fuse2 = 0x5D21C;
+            uint offset = 0x238;
+            uint ccxPerCcd = 2;
+
+            // Get CCD and CCX configuration
+            // https://gitlab.com/leogx9r/ryzen_smu/-/blob/master/userspace/monitor_cpu.c
+            if (family == Family.FAMILY_19H)
+            {
+                offset = 0x598;
+                ccxPerCcd = 1;
+                if (codeName == CodeName.Raphael || codeName == CodeName.DragonRange)
+                {
+                    offset = 0x4D0;
+                    fuse1 += 0x1A4;
+                    fuse2 += 0x1A4;
+                }
+            }
+            else if (family == Family.FAMILY_17H && model != 0x71 && model != 0x31)
+            {
+                fuse1 += 0x40; // 0x5D258
+                fuse2 += 0x40; // 0x5D25C
+            }
+            else if (family == Family.FAMILY_1AH)
+            {
+                ccxPerCcd = 1;
+                fuse1 += 0x1A4;
+                fuse2 += 0x1A4;
+            }
+
+            if (Mutexes.WaitPciBus(5000))
+            {
+                try
+                {
+                    if (ReadDwordExNoLock(fuse1, ref ccdsPresent) && ReadDwordExNoLock(fuse2, ref ccdsDown))
+                    {
+                        uint ccdEnableMap = Utils.BitSlice(ccdsPresent, 23, 22);
+                        uint ccdDisableMap = Utils.BitSlice(ccdsPresent, 31, 30) | (Utils.BitSlice(ccdsDown, 5, 0) << 2);
+                        uint coreDisableMapAddress = family == Family.FAMILY_1AH ? 0x304A03DC : 0x30081800 + offset;
+                        uint enabledCcd = Utils.CountSetBits(ccdEnableMap);
+
+                        topology.ccds = enabledCcd > 0 ? enabledCcd : 1;
+                        topology.ccxs = topology.ccds * ccxPerCcd;
+                        topology.physicalCores = topology.ccxs * 8 / ccxPerCcd;
+                        topology.ccdEnableMap = ccdEnableMap;
+                        topology.ccdDisableMap = ccdDisableMap;
+                        topology.fuse1 = fuse1;
+                        topology.fuse2 = fuse2;
+                        topology.ccdsPresent = ccdsPresent;
+                        topology.ccdsDown = ccdsDown;
+
+                        if (ReadDwordExNoLock(coreDisableMapAddress, ref coreFuse))
+                        {
+                            var coresPerCcx = (8 - Utils.CountSetBits(coreFuse & 0xff)) / ccxPerCcd;
+                            if (coresPerCcx > 0)
+                            {
+                                topology.coresPerCcx = coresPerCcx;
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine("Could not read core fuse!");
+                        }
+
+                        topology.coreDisableMap = new uint[topology.ccds];
+
+                        for (int i = 0; i < topology.ccds; i++)
+                        {
+                            if (Utils.GetBits(ccdEnableMap, i, 1) == 1)
+                            {
+                                if (ReadDwordExNoLock(((uint)i << 25) + coreDisableMapAddress, ref coreFuse))
+                                    topology.coreDisableMap[i] = coreFuse & 0xff;
+                                else
+                                    Console.WriteLine($"Could not read core fuse for CCD{i}!");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Could not read CCD fuse!");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error retrieving CPU topology. {ex}");
+                }
+                finally
+                {
+                    Mutexes.ReleasePciBus();
+                }
+            }
+
+            return topology;
+        }
+
+        public Cpu(CpuInitSettings settings = null)
+        {
+            _settings = settings ?? CpuInitSettings.defaultSetttings;
+
+#if !NET20
+            CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+#endif
+            Mutexes.Open();
+
+            if (!PawnIo.IsInstalled)
+            {
+                throw new ApplicationException("PawnIO is not installed.");
+            }
+
+            Opcode.Open();
+
+            info.vendor = GetVendor();
+            if (info.vendor != Constants.VENDOR_AMD && info.vendor != Constants.VENDOR_HYGON)
+                throw new Exception("Not an AMD CPU");
+
+            try
+            {
+                _pawnAmd = new AmdFamily17();
+                _pawnRyzenSmu = new RyzenSmu();
+                _smbusPiix4 = SmbusProvider.Instance;
+            }
+            catch (Exception ex)
+            {
+                throw new ApplicationException("Error initializing PawnIO AMD module.", ex);
+            }
+
+            mmio = new AMD_MMIO(io);
+
+            if (Opcode.Cpuid(0x00000001, 0, out uint eax, out uint ebx, out uint ecx, out uint edx))
+            {
+                info.cpuid = eax;
+                info.family = (Family)(((eax & 0xf00) >> 8) + ((eax & 0xff00000) >> 20));
+                info.baseModel = (eax & 0xf0) >> 4;
+                info.extModel = (eax & 0xf0000) >> 16;
+                info.model = info.baseModel + info.extModel * 0x10;
+                info.stepping = eax & 0xf;
+                // info.logicalCores = Utils.GetBits(ebx, 16, 8);
+            }
+            else
+            {
+                throw new ApplicationException(InitializationExceptionText);
+            }
+
+            info.cpuName = GetCpuName();
+
+            // Package type
+            if (Opcode.Cpuid(0x80000001, 0, out eax, out ebx, out ecx, out edx))
+            {
+                info.packageType = (PackageType)(ebx >> 28);
+                info.codeName = GetCodeName(info);
+                SMU.SetRyzenSmu(_pawnRyzenSmu);
+                smu = GetMaintainedSettings.GetByType(info.codeName);
+                smu.Hsmp.Init(this);
+                smu.Version = GetSmuVersion();
+                var tableVersionResult = GetTableVersion();
+                smu.TableVersion = tableVersionResult.TableVersion;
+                // Temporary workaround for pmt not refreshing with PawnIO module
+                // TODO: Fix in PawnIO RyzenSmu module and remove this
+                if (smu.SMU_TYPE <= SMU.SmuType.TYPE_CPU1)
+                {
+                    var result = new CmdResult(6);
+                    smu.SendRsmuCommand(0xE, ref result.args);
+                }
+            }
+            else
+            {
+                throw new ApplicationException(InitializationExceptionText);
+            }
+
+            // Non-critical block
+            try
+            {
+                info.topology = GetCpuTopology(info.family, info.codeName, info.model);
+            }
+            catch (Exception ex)
+            {
+                LastError = ex;
+                Status = IODriver.LibStatus.PARTIALLY_OK;
+            }
+
+            try
+            {
+                memoryConfig = new MemoryConfig(this);
+            }
+            catch { }
+
+            try
+            {
+                info.patchLevel = GetPatchLevel();
+                info.svi2 = GetSVI2Info(info.codeName);
+                info.aod = new AOD(io, this);
+                info.apob = new Apob(info.codeName);
+                systemInfo = new SystemInfo(info, smu, GetAgesaVersion());
+                powerTable = new PowerTable(_pawnRyzenSmu, info.codeName);
+
+                if (!SendTestMessage())
+                    LastError = new ApplicationException("SMU is not responding to test message!");
+
+                powerTable.Refresh();
+
+                Status = IODriver.LibStatus.OK;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex;
+                Status = IODriver.LibStatus.PARTIALLY_OK;
+            }
+        }
+
+        // [31-28] ccd index
+        // [27-24] ccx index (always 0 for Zen3 where each ccd has just one ccx)
+        // [23-20] core index
+        public uint MakeCoreMask(uint core = 0, uint ccd = 0, uint ccx = 0)
+        {
+            if (info.family > Family.FAMILY_17H)
+            {
+                return (ccd << 28) | ((core % 8) << 20);
+            }
+
+            return (ccd << 28) | ((ccx % 2) << 24) | ((core % 4) << 20);
+        }
+
+        public bool ReadDwordExNoLock(uint addr, ref uint data, int maxRetries = 10)
+        {
+            for (int retry = 0; retry < maxRetries; retry++)
+            {
+                try
+                {
+                    return _pawnAmd.ReadSmnNoLock(addr, out data);
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        public bool ReadDwordEx(uint addr, ref uint data, int maxRetries = 10)
+        {
+            using (new PciBusLock())
+            {
+                return ReadDwordExNoLock(addr, ref data, maxRetries);
+            }
+        }
+
+        public bool IoReadDwordEx(uint addr, ref uint data, int maxRetries = 10)
+        {
+            if (!Mutexes.WaitPciBus(5000))
+                return false;
+
+            try
+            {
+                io.DlPortWritePortUlong(0x0CF8, addr);
+                data = unchecked((uint)(io.DlPortReadPortUlong(0x0CFC)));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                Mutexes.ReleasePciBus();
+            }
+        }
+
+        public uint ReadDwordNoLock(uint addr, int maxRetries = 10)
+        {
+            uint data = 0;
+            ReadDwordExNoLock(addr, ref data, maxRetries);
+            return data;
+        }
+
+        public uint ReadDword(uint addr, int maxRetries = 10)
+        {
+            using (new PciBusLock())
+            {
+                return ReadDwordNoLock(addr, maxRetries);
+            }
+        }
+
+        public bool WriteDwordEx(uint addr, uint data, int maxRetries = 10)
+        {
+            throw new NotSupportedException("WriteDwordEx is currently not supported by PawnIO");
+
+            //for (int retry = 0; retry < maxRetries; retry++)
+            //{
+            //    if (Mutexes.WaitPciBus(10))
+            //    {
+            //        if (Ring0.WritePciConfig(smu.SMU_PCI_ADDR, (byte)smu.SMU_OFFSET_ADDR, addr) &&
+            //            Ring0.WritePciConfig(smu.SMU_PCI_ADDR, (byte)smu.SMU_OFFSET_DATA, data))
+            //        {
+            //            Mutexes.ReleasePciBus();
+            //            return true;
+            //        }
+
+            //        Mutexes.ReleasePciBus();
+            //    }
+            //}
+
+            //return false;
+        }
+
+        public double GetCoreMulti(int index = 0)
+        {
+            HwPstateStatus status = GetHwPstateStatus(index);
+
+            if (info.family < Family.FAMILY_1AH)
+            {
+                double fid = status.CurCpuFid;
+                double dfs = status.CurCpuDfsId;
+
+                if (dfs == 0) return 0;
+
+                double multi = 25 * fid / (12.5 * dfs);
+                return Math.Round(multi * 4, MidpointRounding.ToEven) / 4;
+            }
+
+            return Utils.BitSlice(status.Value, 11, 0) * 5;
+        }
+
+        public struct HwPstateStatus
+        {
+            private uint _value;
+
+            public uint Value
+            {
+                get { return _value; }
+                set { _value = value; }
+            }
+
+            public byte CurCpuFid
+            {
+                get { return (byte)Utils.BitSlice(_value, 7, 0); }
+                set { _value = Utils.SetBits(_value, 0, 8, value); }
+            }
+
+            public byte CurCpuDfsId
+            {
+                get { return (byte)Utils.BitSlice(_value, 13, 8); }
+                set { _value = Utils.SetBits(_value, 8, 6, value); }
+            }
+
+            public byte CurCpuVid
+            {
+                get { return (byte)Utils.BitSlice(_value, 21, 14); }
+                set { _value = Utils.SetBits(_value, 14, 8, value); }
+            }
+
+            public byte CurHwPstate
+            {
+                get { return (byte)Utils.BitSlice(_value, 24, 22); }
+                set { _value = Utils.SetBits(_value, 22, 3, value); }
+            }
+        }
+
+        public HwPstateStatus GetHwPstateStatus(int index = 0)
+        {
+            ulong group = info.topology.cores > 8 ? (ulong)Math.Pow(4, index) : 1UL << index;
+            if (_pawnAmd.ReadMsrTx(Constants.MSR_HW_PSTATE_STATUS, out uint _eax, out _, new GroupAffinity(0, group)))
+            {
+                return new HwPstateStatus { Value = _eax };
+            }
+            return new HwPstateStatus();
+        }
+
+        public bool Cpuid(uint index, ref uint eax, ref uint ebx, ref uint ecx, ref uint edx)
+        {
+            return Opcode.Cpuid(index, 0, out eax, out ebx, out ecx, out edx);
+        }
+
+        public bool ReadMsr(uint index, ref uint eax, ref uint edx)
+        {
+            return _pawnAmd.ReadMsr(index, out eax, out edx);
+        }
+
+        public bool ReadMsrTx(uint index, ref uint eax, ref uint edx, GroupAffinity affinity)
+        {
+            return _pawnAmd.ReadMsrTx(index, out eax, out edx, affinity);
+        }
+
+        public bool WriteMsr(uint msr, uint eax, uint edx)
+        {
+            bool res = true;
+
+            for (var i = 0; i < info.topology.logicalCores; i++)
+            {
+                res &= _pawnAmd.WriteMsrTx(msr, eax, edx, GroupAffinity.Single(0, i));
+            }
+
+            return res;
+        }
+
+        //public void WriteIoPort(uint port, byte value) => Ring0.WriteIoPort(port, value);
+        //public byte ReadIoPort(uint port) => Ring0.ReadIoPort(port);
+        //public bool ReadPciConfig(uint pciAddress, uint regAddress, ref uint value) => Ring0.ReadPciConfig(pciAddress, regAddress, out value);
+        //public bool WritePciConfig(uint pciAddress, uint regAddress, uint value) => Ring0.WritePciConfig(pciAddress, regAddress, value);
+        //public uint GetPciAddress(byte bus, byte device, byte function) => Ring0.GetPciAddress(bus, device, function);
+
+        // https://en.wikichip.org/wiki/amd/cpuid
+        public CodeName GetCodeName(CPUInfo cpuInfo)
+        {
+            CodeName codeName = CodeName.Unsupported;
+
+            if (cpuInfo.family == Family.FAMILY_0FH)
+            {
+                codeName = CodeName.K8;
+            }
+            else if (cpuInfo.family == Family.FAMILY_10H)
+            {
+                codeName = CodeName.K10;
+            }
+            else if (cpuInfo.family == Family.FAMILY_12H)
+            {
+                codeName = CodeName.K12;
+            }
+            else if (cpuInfo.family == Family.FAMILY_15H)
+            {
+                switch (cpuInfo.model)
+                {
+                    case 0x65:
+                        codeName = CodeName.BristolRidge;
+                        break;
+                    case 0x2:
+                        codeName = CodeName.Vishera;
+                        break;
+                }
+            }
+            else if (cpuInfo.family == Family.FAMILY_16H)
+            {
+                codeName = CodeName.K16;
+            }
+            else if (cpuInfo.family == Family.FAMILY_17H)
+            {
+                switch (cpuInfo.model)
+                {
+                    // Zen
+                    case 0x1:
+                        if (cpuInfo.packageType == PackageType.SP3)
+                            codeName = CodeName.Naples;
+                        else if (cpuInfo.packageType == PackageType.TRX)
+                            codeName = CodeName.Whitehaven;
+                        else
+                            codeName = CodeName.SummitRidge;
+                        break;
+                    case 0x11:
+                        codeName = CodeName.RavenRidge;
+                        break;
+                    case 0x20:
+                        // Dali seems to be a newer stepping (B1) of RavenRidge (B0), otherwise identical
+                        codeName = CodeName.Dali;
+                        break;
+                    // Zen+
+                    case 0x8:
+                        if (cpuInfo.packageType == PackageType.SP3 || cpuInfo.packageType == PackageType.TRX)
+                            codeName = CodeName.Colfax;
+                        else
+                            codeName = CodeName.PinnacleRidge;
+                        break;
+                    case 0x18:
+                        // Some APUs that have the CPUID of Picasso are in fact Dali
+                        if (Utils.PartialStringMatch(info.cpuName, Constants.MISIDENTIFIED_DALI_APU))
+                            codeName = CodeName.Dali;
+                        else
+                            codeName = CodeName.Picasso;
+                        break;
+                    case 0x50: // Subor Z+, CPUID 0x00850F00
+                        codeName = CodeName.FireFlight;
+                        break;
+                    // Zen2
+                    case 0x31:
+                        if (cpuInfo.packageType == PackageType.TRX)
+                            codeName = CodeName.CastlePeak;
+                        else
+                            codeName = CodeName.Rome;
+                        break;
+                    case 0x60:
+                        codeName = CodeName.Renoir;
+                        break;
+                    case 0x68:
+                        codeName = CodeName.Lucienne;
+                        break;
+                    case 0x71:
+                        codeName = CodeName.Matisse;
+                        break;
+                    case 0x90:
+                    case 0x91: // 0x00890F10 https://github.com/InstLatx64/InstLatx64/commit/2fe88fb370d1d71a96a8e78a523891e83f86fc17
+                        codeName = CodeName.VanGogh;
+                        break;
+                    case 0x98:
+                        codeName = CodeName.Mero;
+                        break;
+                    case 0xa0:
+                        codeName = CodeName.Mendocino;
+                        break;
+
+                    default:
+                        codeName = CodeName.Unsupported;
+                        break;
+                }
+            }
+            else if (cpuInfo.family == Family.FAMILY_19H)
+            {
+                switch (cpuInfo.model)
+                {
+                    case 0x1:
+                        codeName = CodeName.Milan;
+                        break;
+                    case 0x8:
+                        codeName = CodeName.Chagall;
+                        break;
+                    case 0x11:
+                        codeName = CodeName.Genoa;
+                        break;
+                    case 0x18:
+                        codeName = CodeName.StormPeak;
+                        break;
+                    case 0x21:
+                        codeName = CodeName.Vermeer;
+                        break;
+                    case 0x44:
+                        codeName = CodeName.Rembrandt;
+                        break;
+                    case 0x50:
+                        codeName = CodeName.Cezanne;
+                        break;
+                    case 0x61:
+                        if ((int)cpuInfo.packageType == 1)
+                            codeName = CodeName.DragonRange;
+                        else
+                            codeName = CodeName.Raphael;
+                        break;
+                    case 0x74:
+                    case 0x75:
+                        bool isHawkPoint = Regex.IsMatch(cpuInfo.cpuName, @"\b80\d{2}\b", RegexOptions.Compiled | RegexOptions.CultureInvariant)
+                            || Regex.IsMatch(cpuInfo.cpuName, @"Ryzen [3579](?:\s+PRO)?\s+2\d{2}\s", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+                        codeName = isHawkPoint ? CodeName.HawkPoint : CodeName.Phoenix;
+                        break;
+                    case 0x78:
+                        codeName = CodeName.Phoenix2;
+                        break;
+                    // https://github.com/InstLatx64/InstLatx64/commit/d3fd3cddc85b9a32966c54b59477b1c8eb3a60a3
+                    case 0x7C:
+                        codeName = CodeName.HawkPoint;
+                        break;
+
+                    default:
+                        codeName = CodeName.Unsupported;
+                        break;
+                }
+            }
+            else if (cpuInfo.family == Family.FAMILY_1AH)
+            {
+                switch (cpuInfo.model)
+                {
+                    case 0x2:
+                        codeName = CodeName.Turin;
+                        break;
+                    // https://github.com/InstLatx64/InstLatx64/commit/9e87330a805eb78a8c74f0b63fa767c0571c9e8b
+                    case 0x8:
+                        codeName = CodeName.ShimadaPeak;
+                        break;
+                    case 0x11:
+                        codeName = CodeName.TurinD;
+                        break;
+                    case 0x20:
+                    case 0x24:
+                        codeName = CodeName.StrixPoint;
+                        break;
+                    case 0x44:
+                        codeName = CodeName.GraniteRidge;
+                        break;
+                    case 0x60:
+                        codeName = CodeName.KrackanPoint;
+                        break;
+                    // https://github.com/InstLatx64/InstLatx64/commit/66e13a582b9a7ca1b284ea03dd1e3299b8260f24
+                    case 0x68:
+                        codeName = CodeName.KrackanPoint2;
+                        break;
+                    case 0x70:
+                        codeName = CodeName.StrixHalo;
+                        break;
+                    case 0xA0:
+                        codeName = CodeName.Bergamo;
+                        break;
+
+                    default:
+                        codeName = CodeName.Unsupported;
+                        break;
+                }
+            }
+
+            return codeName;
+        }
+
+        // SVI2 interface
+        public SVI2 GetSVI2Info(CodeName codeName)
+        {
+            var svi = new SVI2();
+
+            switch (codeName)
+            {
+                case CodeName.BristolRidge:
+                    break;
+
+                //Zen, Zen+
+                case CodeName.SummitRidge:
+                case CodeName.PinnacleRidge:
+                case CodeName.RavenRidge:
+                case CodeName.FireFlight:
+                case CodeName.Dali:
+                    svi.coreAddress = Constants.F17H_M01H_SVI_TEL_PLANE0;
+                    svi.socAddress = Constants.F17H_M01H_SVI_TEL_PLANE1;
+                    break;
+
+                // Zen Threadripper/EPYC
+                case CodeName.Whitehaven:
+                case CodeName.Naples:
+                case CodeName.Colfax:
+                    svi.coreAddress = Constants.F17H_M01H_SVI_TEL_PLANE1;
+                    svi.socAddress = Constants.F17H_M01H_SVI_TEL_PLANE0;
+                    break;
+
+                // Zen2 Threadripper/EPYC
+                case CodeName.CastlePeak:
+                case CodeName.Rome:
+                    svi.coreAddress = Constants.F17H_M30H_SVI_TEL_PLANE0;
+                    svi.socAddress = Constants.F17H_M30H_SVI_TEL_PLANE1;
+                    break;
+
+                // Picasso
+                case CodeName.Picasso:
+                    if ((smu.Version & 0xFF000000) > 0)
+                    {
+                        svi.coreAddress = Constants.F17H_M01H_SVI_TEL_PLANE0;
+                        svi.socAddress = Constants.F17H_M01H_SVI_TEL_PLANE1;
+                    }
+                    else
+                    {
+                        svi.coreAddress = Constants.F17H_M01H_SVI_TEL_PLANE1;
+                        svi.socAddress = Constants.F17H_M01H_SVI_TEL_PLANE0;
+                    }
+                    break;
+
+                // Zen2
+                case CodeName.Matisse:
+                    svi.coreAddress = Constants.F17H_M70H_SVI_TEL_PLANE0;
+                    svi.socAddress = Constants.F17H_M70H_SVI_TEL_PLANE1;
+                    break;
+
+                // Zen2 APU, Zen3 APU ?
+                case CodeName.Renoir:
+                case CodeName.Lucienne:
+                case CodeName.Mendocino:
+                case CodeName.Cezanne:
+                case CodeName.VanGogh:
+                case CodeName.Mero:
+                case CodeName.Rembrandt:
+                case CodeName.Phoenix:
+                case CodeName.Phoenix2:
+                case CodeName.HawkPoint:
+                case CodeName.StrixPoint:
+                case CodeName.KrackanPoint:
+                case CodeName.KrackanPoint2:
+                case CodeName.StrixHalo:
+                    svi.coreAddress = Constants.F17H_M60H_SVI_TEL_PLANE0;
+                    svi.socAddress = Constants.F17H_M60H_SVI_TEL_PLANE1;
+                    break;
+
+                // Zen3, Zen3 Threadripper/EPYC ?
+                case CodeName.Vermeer:
+                case CodeName.Raphael: // Unknown
+                    svi.coreAddress = Constants.F19H_M21H_SVI_TEL_PLANE0;
+                    svi.socAddress = Constants.F19H_M21H_SVI_TEL_PLANE1;
+                    break;
+                case CodeName.Chagall:
+                case CodeName.Milan:
+                    svi.coreAddress = Constants.F19H_M01H_SVI_TEL_PLANE1;
+                    svi.socAddress = Constants.F19H_M01H_SVI_TEL_PLANE0;
+                    break;
+
+                default:
+                    svi.coreAddress = Constants.F17H_M01H_SVI_TEL_PLANE0;
+                    svi.socAddress = Constants.F17H_M01H_SVI_TEL_PLANE1;
+                    break;
+            }
+
+            return svi;
+        }
+
+        public string GetVendor()
+        {
+            if (Opcode.Cpuid(0, 0, out uint _eax, out uint ebx, out uint ecx, out uint edx))
+                return Utils.IntToStr(ebx) + Utils.IntToStr(edx) + Utils.IntToStr(ecx);
+            return "";
+        }
+
+        public string GetCpuName()
+        {
+            string model = "";
+
+            if (Opcode.Cpuid(0x80000002, 0, out uint eax, out uint ebx, out uint ecx, out uint edx))
+                model = model + Utils.IntToStr(eax) + Utils.IntToStr(ebx) + Utils.IntToStr(ecx) + Utils.IntToStr(edx);
+
+            if (Opcode.Cpuid(0x80000003, 0, out eax, out ebx, out ecx, out edx))
+                model = model + Utils.IntToStr(eax) + Utils.IntToStr(ebx) + Utils.IntToStr(ecx) + Utils.IntToStr(edx);
+
+            if (Opcode.Cpuid(0x80000004, 0, out eax, out ebx, out ecx, out edx))
+                model = model + Utils.IntToStr(eax) + Utils.IntToStr(ebx) + Utils.IntToStr(ecx) + Utils.IntToStr(edx);
+
+            return model.Trim();
+        }
+
+        public uint GetPatchLevel()
+        {
+            if (_pawnAmd.ReadMsr(0x8b, out uint eax, out _))
+                return eax;
+
+            return 0;
+        }
+
+        public bool GetOcMode()
+        {
+            if (info.codeName == CodeName.SummitRidge)
+            {
+                if (_pawnAmd.ReadMsr(0xC0010063, out uint eax, out _))
+                {
+                    // Summit Ridge, Raven Ridge
+                    return Convert.ToBoolean((eax >> 1) & 1);
+                }
+                return false;
+            }
+
+            if (info.family <= Family.FAMILY_15H)
+            {
+                return false;
+            }
+
+            return Equals(GetPBOScalar(), 0.0f);
+        }
+
+        public float GetPBOScalar()
+        {
+            var cmd = new GetPBOScalar(smu);
+            cmd.Execute();
+
+            return cmd.Scalar;
+        }
+
+        public bool SendTestMessage(uint arg = 1, Mailbox mbox = null)
+        {
+            var cmd = new SendTestMessage(smu, mbox);
+            CmdResult result = cmd.Execute(arg);
+            return result.Success && cmd.IsSumCorrect;
+        }
+
+        public uint GetSmuVersion() => _pawnRyzenSmu.GetSmuVersion();
+
+        public double? GetBclk() => mmio.GetBclk();
+
+        public AMD_MMIO.ClkGen GetStrapStatus() => mmio.GetStrapStatus();
+
+        public bool SetBclk(double blck) => mmio.SetBclk(blck);
+
+        public SMU.Status TransferTableToDram() => new TransferTableToDram(smu).Execute().status;
+
+        public struct TableVersionResult
+        {
+            public uint TableVersion;
+            public uint TableSize;
+        }
+
+        public TableVersionResult GetTableVersion()
+        {
+            return new TableVersionResult { TableVersion = _pawnRyzenSmu.PmTableVersion, TableSize = _pawnRyzenSmu.PmTableSize };
+        }
+
+        public uint GetDramBaseAddress() => new GetDramAddress(smu).Execute().args[0];
+
+        public long GetDramBaseAddress64()
+        {
+            CmdResult result = new GetDramAddress(smu).Execute();
+            return (long)result.args[1] << 32 | result.args[0];
+        }
+        public bool GetLN2Mode() => new GetLN2Mode(smu).Execute().args[0] == 1;
+
+        public bool? IsExpoProfileActive()
+        {
+            var cmd = new GetEXPOProfileActive(smu);
+            cmd.Execute();
+            return cmd.IsEXPOProfileActive;
+        }
+
+        public SMU.Status SetStapmLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetStapmLimit,
+                smu.Mp1Smu.SMU_MSG_SetStapmLimit, arg).status;
+
+        public SMU.Status SetFastLimit(uint arg = 0U) => SetPPTLimit(arg);
+
+        public SMU.Status SetSlowLimit(uint arg = 0U)
+        {
+            SMU.Status status;
+            if (smu.SMU_TYPE == SMU.SmuType.TYPE_CPU9)
+            {
+                status = new SetBristolSmuLimit(smu)
+                    .Execute(smu.Mp1Smu.SMU_MSG_SetSlowLimit, arg, arg).status;
+            }
+            else
+            {
+                status = new SetSmuLimit(smu)
+                    .Execute(smu.Rsmu.SMU_MSG_SetSlowLimit,
+                        smu.Mp1Smu.SMU_MSG_SetSlowLimit, arg).status;
+            }
+
+            return status;
+        }
+
+        public SMU.Status SetSlowTime(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetSlowTime,
+                smu.Mp1Smu.SMU_MSG_SetSlowTime, arg).status;
+
+        public SMU.Status SetStapmTime(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetStapmTime,
+                smu.Mp1Smu.SMU_MSG_SetStapmTime, arg).status;
+
+        public SMU.Status SetSttLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetSkinTempPowerLimit,
+                smu.Mp1Smu.SMU_MSG_SetSkinTempPowerLimit, arg).status;
+
+        public SMU.Status SetApuSkinTempLimit(uint arg = 0U) => new SetGpuSttLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetApuSkinTempLimit,
+                smu.Mp1Smu.SMU_MSG_SetApuSkinTempLimit, arg).status;
+
+        public SMU.Status SetGpuSkinTempLimit(uint arg = 0U) => new SetGpuSttLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetDgpuSkinTempLimit,
+                smu.Mp1Smu.SMU_MSG_SetDgpuSkinTempLimit, arg).status;
+
+        public SMU.Status SetApuSlowLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetApuSlowLimit,
+                smu.Mp1Smu.SMU_MSG_SetApuSlowLimit, arg).status;
+
+        public SMU.Status SetTctlMax(uint arg = 0U) => new SetTctlMax(smu)
+            .Execute(arg).status;
+
+        public SMU.Status SetPPTLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetFastLimit,
+                smu.Mp1Smu.SMU_MSG_SetFastLimit, arg).status;
+
+        public SMU.Status SetEDCVDDLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetEDCVDDLimit,
+                smu.Mp1Smu.SMU_MSG_SetEDCVDDLimit, arg).status;
+
+        public SMU.Status SetEDCSOCLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetEDCSocLimit,
+                smu.Mp1Smu.SMU_MSG_SetEDCSocLimit, arg).status;
+
+        public SMU.Status SetTDCVDDLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetTDCVDDLimit,
+                smu.Mp1Smu.SMU_MSG_SetTDCVDDLimit, arg).status;
+
+        public SMU.Status SetTDCSOCLimit(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetTDCSocLimit,
+                smu.Mp1Smu.SMU_MSG_SetTDCSocLimit, arg).status;
+
+        public SMU.Status SetPsi0Current(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetPsi0Current,
+                smu.Mp1Smu.SMU_MSG_SetPsi0Current, arg).status;
+
+        public SMU.Status SetPsi0SocCurrent(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetPsi0SocCurrent,
+                smu.Mp1Smu.SMU_MSG_SetPsi0SocCurrent, arg).status;
+
+        public SMU.Status Psi3CpuCurrent(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetPsi3CpuCurrent,
+                smu.Mp1Smu.SMU_MSG_SetPsi3CpuCurrent, arg).status;
+
+        public SMU.Status Psi3GfxCurrent(uint arg = 0U) => new SetSmuLimit(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetPsi3GfxCurrent,
+                smu.Mp1Smu.SMU_MSG_SetPsi3GfxCurrent, arg).status;
+
+        public SMU.Status SetProchotDeassertionRamp(uint arg = 0U) => new SetProchotDeassertionRamp(smu)
+            .Execute(smu.Rsmu.SMU_MSG_SetProchotDeassertionRamp,
+                smu.Mp1Smu.SMU_MSG_SetProchotDeassertionRamp, arg).status;
+
+        public SMU.Status SetBristolStapmLimit(uint stapmLimit, uint stapmTime) => new SetBristolSustainPowerLimit(smu)
+            .Execute(smu.Mp1Smu.SMU_MSG_SetStapmLimit, stapmLimit, stapmTime).status;
+
+        public SMU.Status SetBristolTdcLimit(uint vddCurrent, uint socCurrent) => new SetBristolSmuLimit(smu)
+            .Execute(smu.Mp1Smu.SMU_MSG_SetTDCVDDLimit, vddCurrent, socCurrent).status;
+
+        public SMU.Status SetBristolEdcLimit(uint vddCurrent, uint socCurrent) => new SetBristolSmuLimit(smu)
+            .Execute(smu.Mp1Smu.SMU_MSG_SetEDCVDDLimit, vddCurrent, socCurrent).status;
+
+        public SMU.Status SetBristolPsi0Limit(uint vddCurrent, uint socCurrent) => new SetBristolSmuLimit(smu)
+            .Execute(smu.Mp1Smu.SMU_MSG_SetPsi0Current, vddCurrent, socCurrent).status;
+
+        public SMU.Status SetFixedGfxClkFreq(uint arg) => new SetFixedGfxClk(smu).Execute(arg).status;
+
+        public SMU.Status SetGfxClkOverdrive(uint freq, uint vid) => new SetGfxClkOverdrive(smu).Execute(freq, vid).status;
+
+        public SMU.Status SetOverclockCpuVid(uint arg) => new SetOverclockCpuVid(smu).Execute(arg).status;
+
+        public SMU.Status EnableOcMode() => new SetOcMode(smu).Execute(true).status;
+
+        public SMU.Status DisableOcMode() => new SetOcMode(smu).Execute(false).status;
+
+        public SMU.Status StartBtcMode(uint mode = 0) => new SetBtcMode(smu).Execute(true, mode).status;
+
+        public SMU.Status StopBtcMode() => new SetBtcMode(smu).Execute(false).status;
+
+        public SMU.Status ManageSmuFeatureState(bool enabled, int bit = 0) => new SetSmuFeature(smu).Execute(enabled, bit).status;
+
+        public SMU.Status SetPowerSavingMode(bool maxPerformance) => new SetPowerSavingMode(smu).Execute(maxPerformance).status;
+
+        public SMU.Status SetPBOScalar(uint scalar) => new SetPBOScalar(smu).Execute(scalar).status;
+
+        public SMU.Status RefreshPowerTable() => powerTable != null ? powerTable.Refresh() : SMU.Status.FAILED;
+
+        public int GetCorePerformanceData(uint index)
+        {
+            CmdResult result = new GetCorePerformanceData(smu).Execute(index);
+            if (result.Success)
+            {
+                return (int)result.args[0];
+            }
+            return -1;
+        }
+
+        [Flags]
+        public enum OcCapabilities : uint
+        {
+            None = 0,
+            OverclockingEnabled = 0x1,
+            PowerLimitsAvailable = 0x2,
+            PboAvailable = 0x4,
+            GfxOverclockingAvailable = 0x10,
+            ExpoProfilesAvailable = 0x20,
+            GfxOverclockingEnabled = 0x20000
+        }
+
+        public struct OcCaps
+        {
+            private readonly OcCapabilities _caps;
+
+            public OcCaps(uint raw)
+            {
+                _caps = (OcCapabilities)raw;
+            }
+
+            public bool this[OcCapabilities flag] => (_caps & flag) != 0;
+        }
+
+        public OcCaps GetOverclockingCaps()
+        {
+            GetIsOverclockable cmd = new GetIsOverclockable(smu);
+            CmdResult result = cmd.Execute();
+
+            if (result.Success)
+                return cmd.Capabilities;
+
+            return new OcCaps(0);
+        }
+
+        public struct PboFusedLimits
+        {
+            public int PowerLimit;
+            public int SlowLimit;
+            public int FastLimit;
+            public int ApuSlowLimit;
+            public int VrmVddTdcCurrent;
+            public int VrmSocTdcCurrent;
+        }
+
+        public PboFusedLimits? GetPboFusedLimits()
+        {
+            GetPboFusedLimits cmd = new GetPboFusedLimits(smu);
+            CmdResult result = cmd.Execute();
+
+            if (result.Success)
+                return cmd.Limits;
+
+            return null;
+        }
+
+        public struct SystemPowerLimit
+        {
+            public int PowerLimit;
+            public int TemperatureLimit;
+        }
+
+        public SystemPowerLimit? GetSystemPowerLimit()
+        {
+            GetSystemConfiguredPowerLimit cmd = new GetSystemConfiguredPowerLimit(smu);
+            CmdResult result = cmd.Execute();
+
+            if (result.Success && cmd.Limits.PowerLimit > 0)
+                return cmd.Limits;
+
+            return null;
+        }
+
+        public enum CpuSubsystem
+        {
+            Cpu,
+            Gpu,
+            Soc,
+            Fclk,
+            Vcn,
+            Lclk
+        }
+
+        public SMU.Status SetCpuSubsystemFrequencyLimit(CpuSubsystem subsystem, uint freq, bool maximum = true) => new SetCpuSubsystemFrequency(smu).Execute(subsystem, freq, maximum).status;
+
+        public uint? GetGpuPsmMargin(uint coreMask)
+        {
+            CmdResult result = new GetGpuPsmMargin(smu).Execute();
+            return result.Success ? result.args[0] : (uint?)null;
+        }
+
+        public bool SetGpuPsmMargin(int margin) => new SetGpuPsmMargin(smu)
+            .Execute(margin).Success;
+
+        public bool IsCurveShaperSupported() =>
+            smu.Rsmu.SMU_MSG_SetCurveShaperMargin > 0 && smu.Rsmu.SMU_MSG_GetCurveShaperMargin > 0;
+
+        public SMU.Status SetCurveShaperMargin(int marginHigh, int marginMedium, int marginLow, int frequencyTier) =>
+            new SetCurveShaperMargin(smu).Execute(marginHigh, marginMedium, marginLow, frequencyTier).status;
+
+        public uint[] GetAllCurveShaperMargins() =>
+            new GetAllCurveShaperMargins(smu).Execute().args;
+
+        /// <summary>诊断用：以指定 arg[0] 发送只读的 GetCurveShaperMargin 消息，返回完整响应 args（非破坏性）。</summary>
+        public (SMU.Status status, uint[] args) ProbeCurveShaperGet(uint arg0)
+        {
+            uint[] a = new uint[6];
+            a[0] = arg0;
+            SMU.Status st = smu.SendRsmuCommand(smu.Rsmu.SMU_MSG_GetCurveShaperMargin, ref a);
+            return (st, a);
+        }
+
+        public uint? GetPsmMarginSingleCore(uint coreMask)
+        {
+            CmdResult result = new GetPsmMarginSingleCore(smu).Execute(coreMask);
+            return result.Success ? result.args[0] : (uint?)null;
+        }
+
+        public uint? GetPsmMarginSingleCore(uint core, uint ccd, uint ccx)
+        {
+            if (smu.SMU_TYPE >= SMU.SmuType.TYPE_APU0 && smu.SMU_TYPE <= SMU.SmuType.TYPE_APU2)
+            {
+                return GetPsmMarginSingleCore(core);
+            }
+            return GetPsmMarginSingleCore(MakeCoreMask(core, ccd, ccx));
+        }
+
+        public bool SetPsmMarginAllCores(int margin) => new SetPsmMarginAllCores(smu)
+            .Execute(margin).Success;
+
+        public bool SetPsmMarginSingleCore(uint coreMask, int margin) => new SetPsmMarginSingleCore(smu)
+            .Execute(coreMask, margin).Success;
+
+        public bool SetPsmMarginSingleCore(uint core, uint ccd, uint ccx, int margin) =>
+            SetPsmMarginSingleCore(MakeCoreMask(core, ccd, ccx), margin);
+
+        public bool SetFrequencyAllCore(uint frequency) => new SetFrequencyAllCore(smu)
+            .Execute(frequency).Success;
+
+        public bool SetFrequencySingleCore(uint coreMask, uint frequency) => new SetFrequencySingleCore(smu)
+            .Execute(coreMask, frequency).Success;
+
+        public bool SetFrequencySingleCore(uint core, uint ccd, uint ccx, uint frequency) =>
+            SetFrequencySingleCore(MakeCoreMask(core, ccd, ccx), frequency);
+
+        private bool SetFrequencyMultipleCores(uint mask, uint frequency, int count)
+        {
+            // ((i.CCD << 4 | i.CCX % 2 & 0xF) << 4 | i.CORE % 4 & 0xF) << 20;
+            for (uint i = 0; i < count; i++)
+            {
+                mask = Utils.SetBits(mask, 20, 2, i);
+                if (!SetFrequencySingleCore(mask, frequency))
+                    return false;
+            }
+            return true;
+        }
+
+        public bool SetFrequencyCCX(uint mask, uint frequency) =>
+            SetFrequencyMultipleCores(mask, frequency, 8/*SI.NumCoresInCCX*/);
+
+        public bool SetFrequencyCCD(uint mask, uint frequency)
+        {
+            bool ret = true;
+            for (uint i = 0; i < info.topology.ccxs / info.topology.ccds; i++)
+            {
+                mask = Utils.SetBits(mask, 24, 1, i);
+                ret = SetFrequencyCCX(mask, frequency);
+            }
+
+            return ret;
+        }
+
+        public uint GetFMax() => new GetBoostLimitFrequency(smu).Execute().args[0];
+
+        public bool SetFMax(uint frequency) => new SetBoostLimitAllCore(smu).Execute(frequency).Success;
+
+        public int GetCurrentHwVid()
+        {
+            if (!Mutexes.WaitPciBus(5000))
+            {
+                Console.WriteLine("GetCurrentHwVid: Timeout waiting for PCI bus mutex");
+                return -1;
+            }
+
+            try
+            {
+                uint data = 0;
+                uint address = 0;
+
+                if (smu.SMU_TYPE == SMU.SmuType.TYPE_APU0 || smu.SMU_TYPE < SMU.SmuType.TYPE_CPU2)
+                {
+                    address = 0x5A04C;
+                }
+                else if (smu.SMU_TYPE == SMU.SmuType.TYPE_APU1 || smu.SMU_TYPE == SMU.SmuType.TYPE_APU2)
+                {
+                    address = 0x6F05C;
+                    if (smu.SMU_TYPE == SMU.SmuType.TYPE_APU2)
+                    {
+                        if (ReadDwordExNoLock(address, ref data))
+                            return (int)((data >> 6) & 0x1FF);
+                    }
+                }
+                else if (smu.SMU_TYPE == SMU.SmuType.TYPE_CPU2 || smu.SMU_TYPE == SMU.SmuType.TYPE_CPU3)
+                {
+                    address = (uint)(info.packageType == PackageType.AM4 ? 0x5A050 : 0x5A054);
+                }
+                else if (info.family > Family.FAMILY_17H)
+                {
+                    address = 0x73014;
+                    if (ReadDwordExNoLock(address, ref data))
+                        return (int)((data >> 6) & 0x1FF);
+                }
+
+                if (address != 0 && ReadDwordExNoLock(address, ref data))
+                    return (int)(data >> 24);
+            }
+            finally
+            {
+                Mutexes.ReleasePciBus();
+            }
+            return -1;
+        }
+
+        public bool? IsProchotEnabled()
+        {
+            if (!Mutexes.WaitPciBus(5000))
+            {
+                Console.WriteLine("IsProchotEnabled: Timeout waiting for PCI bus mutex");
+                return null;
+            }
+
+            try
+            {
+                uint data = ReadDwordNoLock(0x59804);
+                return (data & 1) == 1;
+            }
+            finally
+            {
+                Mutexes.ReleasePciBus();
+            }
+        }
+
+        public float? GetCpuTemperature()
+        {
+            if (!Mutexes.WaitPciBus(5000))
+            {
+                Console.WriteLine("GetCpuTemperature: Timeout waiting for PCI bus mutex");
+                return null;
+            }
+
+            try
+            {
+                uint thmData = 0;
+
+                if (ReadDwordExNoLock(Constants.THM_CUR_TEMP, ref thmData))
+                {
+                    float offset = 0.0f;
+
+                    // Get tctl temperature offset
+                    // Offset table: https://github.com/torvalds/linux/blob/master/drivers/hwmon/k10temp.c#L78
+                    if (info.cpuName.Contains("2700X"))
+                        offset = -10.0f;
+                    else if (info.cpuName.Contains("1600X") || info.cpuName.Contains("1700X") || info.cpuName.Contains("1800X"))
+                        offset = -20.0f;
+                    else if (info.cpuName.Contains("Threadripper 19") || info.cpuName.Contains("Threadripper 29"))
+                        offset = -27.0f;
+
+                    // THMx000[31:21] = CUR_TEMP, THMx000[19] = CUR_TEMP_RANGE_SEL
+                    // Range sel = 0 to 255C (Temp = Tctl - offset)
+                    float temperature = (thmData >> 21) * 0.125f + offset;
+
+                    // Range sel = -49 to 206C (Temp = Tctl - offset - 49)
+                    if ((thmData & Constants.THM_CUR_TEMP_RANGE_SEL_MASK) != 0)
+                        temperature -= 49.0f;
+
+                    return temperature;
+                }
+
+                return null;
+            }
+            finally
+            {
+                Mutexes.ReleasePciBus();
+            }
+        }
+
+        public float? GetSingleCcdTemperature(uint ccd)
+        {
+            if (!Mutexes.WaitPciBus(5000))
+            {
+                Console.WriteLine("GetSingleCcdTemperature: Timeout waiting for PCI bus mutex");
+                return null;
+            }
+
+            try
+            {
+                uint thmData = 0;
+                uint register = info.family >= Family.FAMILY_19H ? Constants.F19H_CCD_TEMP : Constants.F17H_CCD_TEMP;
+
+                if (ReadDwordExNoLock(register + (ccd * 0x4), ref thmData))
+                {
+                    float ccdTemp = (thmData & 0xfff) * 0.125f - 305.0f;
+                    if (ccdTemp > 0 && ccdTemp < 125) // Zen 2 reports 95 degrees C max, but it might exceed that.
+                        return ccdTemp;
+                    return 0;
+                }
+
+                return null;
+            }
+            finally
+            {
+                Mutexes.ReleasePciBus();
+            }
+        }
+
+        private string GetAgesaVersion()
+        {
+            try
+            {
+                var data = io.ReadMemory(new IntPtr(0xE0000), (int)(0xFFFFF - 0xE0000));
+                return AgesaUtils.ParseVersion(data);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Could not find AGESA version: {ex.Message}");
+            }
+
+            return string.Empty;
+        }
+
+        public MemoryConfig GetMemoryConfig() => memoryConfig;
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!disposedValue)
+            {
+                if (disposing)
+                {
+                    io.Dispose();
+                    Mutexes.Close();
+                    Opcode.Close();
+                    _pawnAmd?.Close();
+                    _pawnRyzenSmu?.Dispose();
+                    _smbusPiix4?.Dispose();
+                }
+
+                disposedValue = true;
+            }
+        }
+        public void Dispose()
+        {
+            // Do not change this code. Put cleanup code in 'Dispose(bool disposing)' method
+            Dispose(disposing: true);
+            GC.SuppressFinalize(this);
+        }
+    }
+}
