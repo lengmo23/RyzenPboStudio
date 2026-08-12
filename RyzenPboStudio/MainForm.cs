@@ -1181,6 +1181,14 @@ internal sealed class MainForm : Form
         var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
         bool ok = Tuning.Apply(vals, "MANUAL", null, "手动应用");
         Log.Write($"手动应用 CO: [{string.Join(", ", vals)}]" + (ok ? "" : "（写入异常，详见上方）"));
+        // 手动写入即视为用户接管本次恢复：崩溃恢复的基准取自 journal 最后一条，而手动应用
+        // 也会记进同一个 journal，若脏标记还在，下次开始测试会在用户刚设的值上再 +StepOnError
+        // （如崩溃于 -10、手动改 -8，开测后变成 -6）。清除脏标记后走正常分支，从 CPU 实际值起步。
+        if (ok && Workspace.WasInterrupted())
+        {
+            Workspace.ClearInProgress();
+            Log.Write("已手动应用 CO，清除上次测试的中断标记：本次不再自动回退恢复负压", "WARN");
+        }
         SetStatus(ok ? "已手动应用 Curve Optimizer" : "CO 应用失败", ok ? Theme.Success : Theme.Accent);
     }
 
