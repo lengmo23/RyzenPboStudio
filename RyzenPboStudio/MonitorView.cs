@@ -108,13 +108,19 @@ internal sealed class MonitorView : UserControl
     private readonly TelVoltCalib telCalib;
     private const int SingleCcdVoltIdx = 0x4D4 / 4;
     private const int DualCcdVoltIdx   = 0x4F4 / 4;
+    // PM Table 头部的全局 VDDCR_CPU 遥测四元组：0xC0 请求 VID / 0xC4 实测电压(TEL) / 0xC8 电流 / 0xCC 功率。
+    // 由 0xC4×0xC8=0xCC 验证（SOC 组 0xD4.. 与 MISC 组 0xE8.. 结构相同、验算同样成立），
+    // 位于表头，单/双 CCD 版本布局一致。逐核 0x4D4/0x4F4 那组是各核经 LDO 后的 die 电压，
+    // 恒低于上游请求 VID 约 10mV，取其最大值并不等于整体 VID。
+    private const int CpuVidIdx = 0xC0 / 4;
+    private const int CpuTelIdx = 0xC4 / 4;
 
     private Thread? worker;
     private volatile bool running;
 
-    // 身份条（CPU / 主板 / 内存 / 显卡）与限制条（BCLK / TEL/VID / THM / TDC / EDC / PPT / Fmax）数值标签
+    // 身份条（CPU / 主板 / 内存 / 显卡）与限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
     private StatCellControl _cpuVal = null!, _moboVal = null!, _memVal = null!, _gpuVal = null!;
-    private StatCellControl _bclkVal = null!, _telVidVal = null!, _thmVal = null!, _tdcVal = null!, _edcVal = null!, _pptVal = null!, _fmaxVal = null!;
+    private StatCellControl _bclkVal = null!, _telVidVal = null!, _vdroopVal = null!, _thmVal = null!, _tdcVal = null!, _edcVal = null!, _pptVal = null!, _fmaxVal = null!;
     private CcdView[] ccdViews = null!;
 
     public MonitorView()
@@ -196,18 +202,19 @@ internal sealed class MonitorView : UserControl
         return t;
     }
 
-    /// <summary>底部限制条：BCLK / TEL/VID / THM / TDC / EDC / PPT / Fmax 七格。</summary>
+    /// <summary>底部限制条：BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax 八格。</summary>
     private Control BuildLimitStrip()
     {
-        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 7, RowCount = 1, BackColor = MonTheme.Bg, Margin = new Padding(0, 4, 0, 0) };
-        for (int i = 0; i < 7; i++) t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 7f));
+        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 8, RowCount = 1, BackColor = MonTheme.Bg, Margin = new Padding(0, 4, 0, 0) };
+        for (int i = 0; i < 8; i++) t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 8f));
         _bclkVal   = StatCell(t, 0, "BCLK", center: true);
         _telVidVal = StatCell(t, 1, "TEL/VID", center: true);
-        _thmVal    = StatCell(t, 2, "THM/LIMIT", center: true);
-        _tdcVal    = StatCell(t, 3, "TDC/LIMIT", center: true);
-        _edcVal    = StatCell(t, 4, "EDC/LIMIT", center: true);
-        _pptVal    = StatCell(t, 5, "PPT/LIMIT", center: true);
-        _fmaxVal   = StatCell(t, 6, "Fmax LIMIT", center: true);
+        _vdroopVal = StatCell(t, 2, "Vdroop", center: true);
+        _thmVal    = StatCell(t, 3, "THM/LIMIT", center: true);
+        _tdcVal    = StatCell(t, 4, "TDC/LIMIT", center: true);
+        _edcVal    = StatCell(t, 5, "EDC/LIMIT", center: true);
+        _pptVal    = StatCell(t, 6, "PPT/LIMIT", center: true);
+        _fmaxVal   = StatCell(t, 7, "Fmax LIMIT", center: true);
         return t;
     }
 
@@ -383,6 +390,7 @@ internal sealed class MonitorView : UserControl
             var maxVolt = new double[n];
             var psSnap = new ulong[n];
             float[]? ptSnap = null;
+            double maxCpuVid = 0, maxCpuTel = 0;   // 全局 VDDCR_CPU：VID 窗口峰值 + 同帧配对的实测电压
 
             // 窗口起点：各核每个 SMT 线程的 APERF / MPERF / TSC 累计计数
             lock (RyzenSmu.IoLock)
@@ -414,6 +422,13 @@ internal sealed class MonitorView : UserControl
                             {
                                 double v = tbl[perCoreVoltIdx + i];
                                 if (v > maxVolt[i]) maxVolt[i] = v;
+                            }
+                            // TEL 取 VID 峰值那一帧的配对值：两者各自取峰会落在不同帧，
+                            // 噪声放大后会出现 TEL > VID 的倒挂（Vdroop 为负）。
+                            if (tbl.Length > CpuTelIdx && tbl[CpuVidIdx] > maxCpuVid)
+                            {
+                                maxCpuVid = tbl[CpuVidIdx];
+                                maxCpuTel = tbl[CpuTelIdx];
                             }
                             ptSnap = (float[])tbl.Clone();   // 供 TEL 校准/本地读取（lock 外使用）
                         }
@@ -572,20 +587,27 @@ internal sealed class MonitorView : UserControl
                 uclk = cpu.powerTable?.UCLK ?? 0;
             }
 
-            // TEL/VID：取各核峰值电压（PM Table，与 HWiNFO 一致）作为请求 VID
-            double peakVid = 0;
-            for (int i = 0; i < n; i++) if (maxVolt[i] > peakVid) peakVid = maxVolt[i];
+            // TEL/VID：直读 PM Table 头部的全局 VDDCR_CPU 遥测（0xC0 请求 VID / 0xC4 实测电压），
+            // 与 HYDRA 的 VID / TEL 同源，不依赖 HWiNFO。
+            double peakVid = maxCpuVid is > 0.3 and < 2.0 ? maxCpuVid : 0;
+            double telVolt = peakVid > 0 && maxCpuTel is > 0.3 and < 2.0 ? maxCpuTel : 0;
+            // 只有 VID 与 TEL 同源于全局遥测四元组时 Vdroop 才有意义；走回退路径时两者口径不同，不显示。
+            bool vdroopValid = peakVid > 0 && telVolt > 0;
 
-            // TEL：优先本地 PM Table（经 HWiNFO 自动校准锁定偏移后不再依赖 HWiNFO）；
-            // 未校准时用 HWiNFO 的 SVI3 读数，并同时喂给校准器收敛偏移。
-            double telHw = HwInfoReader.ReadCpuTelemetryVoltage() ?? 0;
-            double telVolt = 0;
-            if (ptSnap != null)
+            // 回退：表里读不到全局遥测（非 GraniteRidge / 表布局不同）时，VID 用各核峰值近似，
+            // TEL 用 HWiNFO 的 SVI3 读数并喂给校准器收敛出本地索引。
+            if (peakVid <= 0)
+                for (int i = 0; i < n; i++) if (maxVolt[i] > peakVid) peakVid = maxVolt[i];
+            if (telVolt <= 0)
             {
-                if (telCalib.Index < 0 && telHw > 0) telCalib.Feed(ptSnap, telHw);
-                if (telCalib.Index >= 0 && telCalib.Index < ptSnap.Length) telVolt = ptSnap[telCalib.Index];
+                double telHw = HwInfoReader.ReadCpuTelemetryVoltage() ?? 0;
+                if (ptSnap != null)
+                {
+                    if (telCalib.Index < 0 && telHw > 0) telCalib.Feed(ptSnap, telHw);
+                    if (telCalib.Index >= 0 && telCalib.Index < ptSnap.Length) telVolt = ptSnap[telCalib.Index];
+                }
+                if (telVolt <= 0) telVolt = telHw;
             }
-            if (telVolt <= 0) telVolt = telHw;
 
             var fFreq = busyFreq; var fEff = effFreq; var fVolt = maxVolt; var fCo = co; var fOcc = occ; var fTemp = ccdTemp;
             try
@@ -596,6 +618,7 @@ internal sealed class MonitorView : UserControl
                     _memVal.Text    = FormatMemory(fclk, uclk);
                     _bclkVal.Text   = bclk > 0 ? $"{bclk:F2} MHz" : "--";
                     _telVidVal.Text = $"{(telVolt > 0 ? telVolt.ToString("F3") : "--")} / {(peakVid > 0 ? peakVid.ToString("F3") : "--")} V";
+                    _vdroopVal.Text = vdroopValid ? $"{(peakVid - telVolt) / peakVid * 100.0:F1} %" : "--";
                     _thmVal.Text    = $"{(tctl > 0 ? tctl.ToString("F0") : "--")} / {(thmLimit > 0 ? thmLimit.ToString() : "--")}";
                     _tdcVal.Text    = $"{(tdcCurrent > 0 ? tdcCurrent.ToString("F0") : "--")} / {(tdcLimit > 0 ? tdcLimit.ToString() : "--")}";
                     _edcVal.Text    = $"{(edcCurrent > 0 ? edcCurrent.ToString("F0") : "--")} / {(edcLimit > 0 ? edcLimit.ToString() : "--")}";
