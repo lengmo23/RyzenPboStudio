@@ -114,6 +114,8 @@ internal sealed class MonitorView : UserControl
     // 恒低于上游请求 VID 约 10mV，取其最大值并不等于整体 VID。
     private const int CpuVidIdx = 0xC0 / 4;
     private const int CpuTelIdx = 0xC4 / 4;
+    /// <summary>身份条／CCD 行／限制条共用的栅格列数，取限制条格数；三条共用同一次取整才能逐条对齐。</summary>
+    private const int StripCols = 8;
 
     private Thread? worker;
     private volatile bool running;
@@ -189,24 +191,24 @@ internal sealed class MonitorView : UserControl
         Controls.Add(root);
     }
 
-    /// <summary>顶部身份条：2×2 两行（CPU|主板 / 内存|显卡），主板等长型号可完整显示。</summary>
+    /// <summary>顶部身份条：2×2 两行（CPU|主板 / 内存|显卡），主板等长型号可完整显示。
+    /// 每格跨半条栅格，左右分界与 CCD 面板、限制条对齐。</summary>
     private Control BuildIdentityStrip()
     {
-        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, BackColor = MonTheme.Bg, Margin = new Padding(0, 0, 0, 4) };
-        for (int i = 0; i < 2; i++) t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
-        for (int i = 0; i < 2; i++) t.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
-        _cpuVal  = StatCell(t, 0, "AMD CPU", center: false);
-        _moboVal = StatCell(t, 1, "主板", center: false);
-        _memVal  = StatCellAt(t, 0, 1, "内存", center: false);
-        _gpuVal  = StatCellAt(t, 1, 1, "显卡", center: false);
+        var t = NewStripGrid(rows: 2, bottomMargin: 4);
+        int half = StripCols / 2;
+        _cpuVal  = StatCellAt(t, 0,    0, "AMD CPU", center: false, span: half);
+        _moboVal = StatCellAt(t, half, 0, "主板",    center: false, span: half);
+        _memVal  = StatCellAt(t, 0,    1, "内存",    center: false, span: half);
+        _gpuVal  = StatCellAt(t, half, 1, "显卡",    center: false, span: half);
         return t;
     }
 
-    /// <summary>底部限制条：BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax 八格。</summary>
+    /// <summary>底部限制条：BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax 八格，
+    /// 即 StripCols 栅格的一格一列。身份条与 CCD 行跨 4 列，三条共用同一套取整，竖缝逐条对齐。</summary>
     private Control BuildLimitStrip()
     {
-        var t = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 8, RowCount = 1, BackColor = MonTheme.Bg, Margin = new Padding(0, 4, 0, 0) };
-        for (int i = 0; i < 8; i++) t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 8f));
+        var t = NewStripGrid(rows: 1, topMargin: 4);
         _bclkVal   = StatCell(t, 0, "BCLK", center: true);
         _telVidVal = StatCell(t, 1, "TEL/VID", center: true);
         _vdroopVal = StatCell(t, 2, "Vdroop", center: true);
@@ -215,6 +217,23 @@ internal sealed class MonitorView : UserControl
         _edcVal    = StatCell(t, 5, "EDC/LIMIT", center: true);
         _pptVal    = StatCell(t, 6, "PPT/LIMIT", center: true);
         _fmaxVal   = StatCell(t, 7, "Fmax LIMIT", center: true);
+        return t;
+    }
+
+    /// <summary>建一条 StripCols 列的等宽栅格。三条横条都用它，列边界因而落在同一批像素上——
+    /// 各按自己的列数独立取整时，8 列的第 4 列右缘与 2 列的中缝会差几个像素。</summary>
+    private static TableLayoutPanel NewStripGrid(int rows, int topMargin = 0, int bottomMargin = 0)
+    {
+        var t = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = StripCols,
+            RowCount = rows,
+            BackColor = MonTheme.Bg,
+            Margin = new Padding(0, topMargin, 0, bottomMargin),
+        };
+        for (int i = 0; i < StripCols; i++) t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / StripCols));
+        for (int i = 0; i < rows; i++) t.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rows));
         return t;
     }
 
@@ -242,15 +261,16 @@ internal sealed class MonitorView : UserControl
     /// <summary>单元格：上方暗色标题 + 下方数值。center 时居中（限制条），否则左对齐（身份条）。返回数值标签供刷新。</summary>
     private static StatCellControl StatCell(TableLayoutPanel parent, int col, string title, bool center) => StatCellAt(parent, col, 0, title, center);
 
-    private static StatCellControl StatCellAt(TableLayoutPanel parent, int col, int row, string title, bool center)
+    private static StatCellControl StatCellAt(TableLayoutPanel parent, int col, int row, string title, bool center, int span = 1)
     {
-        bool last = col == parent.ColumnCount - 1;
+        bool last = col + span >= parent.ColumnCount;
         var cell = new StatCellControl(title, center)
         {
             Dock = DockStyle.Fill,
             Margin = new Padding(col == 0 ? 0 : 3, row == 0 ? 0 : 3, last ? 0 : 3, 0),
         };
         parent.Controls.Add(cell, col, row);
+        if (span > 1) parent.SetColumnSpan(cell, span);
         return cell;
     }
 
@@ -285,17 +305,10 @@ internal sealed class MonitorView : UserControl
         if (ranked.Count > 1) goldCore = ranked[1];
 
         // 始终显示两栏（与上下两条等宽对齐）；单 CCD 机型时 CCD#1 显示空表而非隐藏。
+        // 与身份条／限制条共用 StripCols 栅格，每个面板跨 StripCols/CCD 数 列，竖缝逐条对齐。
         int displayCcds = (int)Math.Max(2u, ccds);
-        var grid = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            BackColor = MonTheme.Bg,
-            ColumnCount = displayCcds,
-            RowCount = 1,
-            Margin = new Padding(0),
-        };
-        for (int c = 0; c < displayCcds; c++)
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / displayCcds));
+        var grid = NewStripGrid(rows: 1);
+        int span = Math.Max(1, StripCols / displayCcds);
 
         ccdViews = new CcdView[displayCcds];
         for (int c = 0; c < displayCcds; c++)
@@ -304,7 +317,8 @@ internal sealed class MonitorView : UserControl
             var view = new CcdView((uint)c, coresPerCcd, goldCore, silverCore, perf, exists, slotDisabled);
             view.Container.Dock = DockStyle.Fill;
             view.Container.Margin = new Padding(c == 0 ? 0 : 3, 2, c == displayCcds - 1 ? 0 : 3, 2);
-            grid.Controls.Add(view.Container, c, 0);
+            grid.Controls.Add(view.Container, c * span, 0);
+            grid.SetColumnSpan(view.Container, span);
             ccdViews[c] = view;
         }
         return grid;
@@ -763,6 +777,11 @@ internal sealed class CcdView
         Container.Controls.Add(title);   // Dock=Top 后加，置于顶部
 
         dgv.SizeChanged += (_, _) => LayoutRows();   // 面板高度变化（含 2K/DPI 缩放）时重分配行高
+        // SizeChanged 通常早于 handle 创建，那一次 LayoutRows 会因 !IsHandleCreated 直接返回；
+        // 此后窗口尺寸不变就不会再有 SizeChanged，行高永远停在默认值、面板下方留白。
+        // handle 就绪与面板真正显示时各补算一次，覆盖启动即最终尺寸的情形。
+        dgv.HandleCreated += (_, _) => LayoutRows();
+        dgv.VisibleChanged += (_, _) => { if (dgv.Visible) LayoutRows(); };
     }
 
     /// <summary>把表头以外的可用高度平均分给各数据行，使表格纵向填满面板、消除下方留白。
