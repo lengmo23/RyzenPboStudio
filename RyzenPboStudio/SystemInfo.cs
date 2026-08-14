@@ -101,14 +101,51 @@ internal static class SystemInfo
         catch { return "—"; }
     }
 
-    /// <summary>主显卡型号（注册表显示类驱动键，不依赖 WMI/wmic）。优先返回独显，跳过虚拟/基础适配器。失败返回 "—"。</summary>
+    /// <summary>主显卡型号。先用 EnumDisplayDevices 只枚举当前在用的适配器（换卡后注册表里仍留有旧显卡的
+    /// 驱动键，直接枚举注册表会读到已拆掉的那张卡），拿不到再回退注册表显示类驱动键。失败返回 "—"。</summary>
     public static string GetGpuName()
+    {
+        return GetGpuNameFromDisplayDevices() ?? GetGpuNameFromRegistry() ?? "—";
+    }
+
+    /// <summary>枚举当前系统在用的显示适配器（不含已卸载显卡的残留驱动键）。无可用候选返回 null。</summary>
+    private static string? GetGpuNameFromDisplayDevices()
+    {
+        try
+        {
+            string? best = null;
+            int bestScore = int.MinValue;
+            for (uint i = 0; i < 64; i++)
+            {
+                var dd = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
+                if (!EnumDisplayDevices(null, i, ref dd, 0)) break;
+
+                var desc = (dd.DeviceString ?? "").Trim();
+                int score = ScoreAdapter(desc);
+                if (score == int.MinValue) continue;
+                // 同型号多条目时优先主显示器所在的那条
+                if ((dd.StateFlags & DisplayDevicePrimaryDevice) != 0) score += 2;
+                else if ((dd.StateFlags & DisplayDeviceAttachedToDesktop) != 0) score += 1;
+
+                if (score > bestScore)
+                {
+                    best = desc;
+                    bestScore = score;
+                }
+            }
+            return best;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>回退路径：注册表显示类驱动键（含历史残留，仅在 EnumDisplayDevices 无结果时使用）。</summary>
+    private static string? GetGpuNameFromRegistry()
     {
         try
         {
             using var classKey = Registry.LocalMachine.OpenSubKey(
                 @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}");
-            if (classKey == null) return "—";
+            if (classKey == null) return null;
 
             string? best = null;
             int bestScore = int.MinValue;
@@ -117,17 +154,8 @@ internal static class SystemInfo
                 if (sub.Length != 4 || !int.TryParse(sub, out _)) continue;   // 仅 0000/0001… 适配器实例键
                 using var dev = classKey.OpenSubKey(sub);
                 var desc = (dev?.GetValue("DriverDesc") as string ?? "").Trim();
-                if (desc.Length == 0) continue;
-                var u = desc.ToUpperInvariant();
-                if (u.Contains("BASIC") || u.Contains("REMOTE") || u.Contains("MIRROR") || u.Contains("VIRTUAL"))
-                    continue;   // 跳过 Microsoft Basic Display / 远程桌面 / 虚拟显卡
-
-                // 多显卡机器优先独显，避免先枚举到 Ryzen 核显后把它当成主显卡。
-                int score = 0;
-                if (u.Contains("GEFORCE") || u.Contains("NVIDIA") || u.Contains("RADEON RX")) score = 30;
-                else if (u.Contains("INTEL(R) ARC") || u.Contains("INTEL ARC")) score = 25;
-                else if (u.Contains("RADEON") || u.Contains("AMD") || u.Contains("INTEL")) score = 10;
-                if (u.Contains("RADEON(TM) GRAPHICS") || u.Contains("UHD GRAPHICS") || u.Contains("IRIS")) score -= 5;
+                int score = ScoreAdapter(desc);
+                if (score == int.MinValue) continue;
 
                 if (score > bestScore)
                 {
@@ -135,10 +163,48 @@ internal static class SystemInfo
                     bestScore = score;
                 }
             }
-            return best ?? "—";
+            return best;
         }
-        catch { return "—"; }
+        catch { return null; }
     }
+
+    /// <summary>适配器描述打分：多显卡机器优先独显，避免把 Ryzen 核显当成主显卡。
+    /// 虚拟/基础适配器返回 int.MinValue 表示排除。</summary>
+    private static int ScoreAdapter(string desc)
+    {
+        if (desc.Length == 0) return int.MinValue;
+        var u = desc.ToUpperInvariant();
+        if (u.Contains("BASIC") || u.Contains("REMOTE") || u.Contains("MIRROR") || u.Contains("VIRTUAL"))
+            return int.MinValue;   // 跳过 Microsoft Basic Display / 远程桌面 / 虚拟显卡
+
+        int score = 0;
+        if (u.Contains("GEFORCE") || u.Contains("NVIDIA") || u.Contains("RADEON RX")) score = 30;
+        else if (u.Contains("INTEL(R) ARC") || u.Contains("INTEL ARC")) score = 25;
+        else if (u.Contains("RADEON") || u.Contains("AMD") || u.Contains("INTEL")) score = 10;
+        if (u.Contains("RADEON(TM) GRAPHICS") || u.Contains("UHD GRAPHICS") || u.Contains("IRIS")) score -= 5;
+        return score;
+    }
+
+    // ── EnumDisplayDevices 取当前在用的显示适配器 ──────────────────────────
+
+    private const int DisplayDeviceAttachedToDesktop = 0x1;
+    private const int DisplayDevicePrimaryDevice = 0x4;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DisplayDevice
+    {
+        public int cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+        public int StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum,
+        ref DisplayDevice lpDisplayDevice, uint dwFlags);
 
     /// <summary>SMBIOS 报告的物理内存总容量。失败返回 "—"。</summary>
     public static string GetInstalledMemory()
