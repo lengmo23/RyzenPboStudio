@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace RyzenPboStudio;
 
@@ -76,8 +77,69 @@ internal static class Updater
                        ?? zips.FirstOrDefault();
         if (zip == null) return null;
 
-        string title = release.Name.Length > 0 ? release.Name : release.TagName;
-        return new UpdateInfo(latest, release.TagName, $"{title}\n\n{release.Body}".Trim(), zip.DownloadUrl, zip.Size);
+        return new UpdateInfo(latest, release.TagName, PlainText(release.Body), zip.DownloadUrl, zip.Size);
+    }
+
+    /// <summary>
+    /// 把 Release 正文的 Markdown 压成纯文字。更新提示是个 MessageBox，原样显示
+    /// #、**、` 这些标记只会干扰阅读，这里只保留文字内容与分行。
+    /// </summary>
+    private static string PlainText(string markdown)
+    {
+        var lines = new List<string>();
+        foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.StartsWith("```")) continue;                        // 代码围栏
+            if (line.Length > 0 && line.All(c => c == '-' || c == '='))
+                continue;                                                // 分隔线 / setext 下划线
+            line = line.TrimStart('#', '>').Trim();                      // 标题、引用前缀
+            if (line.StartsWith("- ") || line.StartsWith("* ") || line.StartsWith("+ "))
+                line = "· " + line[2..].Trim();                          // 列表符号统一
+            line = line.Replace("**", "").Replace("__", "").Replace("`", "");
+            line = Regex.Replace(line, @"\[([^\]]*)\]\([^)]*\)", "$1");   // [文字](链接) → 文字
+            lines.Add(line);
+        }
+
+        // 连续空行折叠成一个，避免 Markdown 的空行在纯文本下堆成大片空白
+        var sb = new StringBuilder();
+        bool blank = false;
+        foreach (string line in lines)
+        {
+            if (line.Length == 0) { blank = true; continue; }
+            if (blank && sb.Length > 0) sb.Append('\n');
+            sb.Append(line).Append('\n');
+            blank = false;
+        }
+        return sb.ToString().Trim();
+    }
+
+    // ── 「暂不更新」的版本记忆 ──────────────────────────────────────────────
+
+    private static string SkipFile => Path.Combine(Workspace.ProfilesDir, "update_skip.txt");
+
+    /// <summary>用户在提示里点了「否」：记下这个版本，之后启动不再弹窗。</summary>
+    public static void SkipVersion(Version version)
+    {
+        try { File.WriteAllText(SkipFile, version.ToString()); } catch { /* 记不下最多是下次再弹一次 */ }
+    }
+
+    /// <summary>该版本是否已被用户跳过。只用于启动时的静默检查，手动「检查更新」不受影响。</summary>
+    public static bool IsSkipped(Version version)
+    {
+        try
+        {
+            return File.Exists(SkipFile)
+                && Version.TryParse(File.ReadAllText(SkipFile).Trim(), out Version? skipped)
+                && skipped == version;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>已经是最新版本时清掉记录，避免旧版本号一直留在 profiles 里。</summary>
+    public static void ClearSkip()
+    {
+        try { if (File.Exists(SkipFile)) File.Delete(SkipFile); } catch { }
     }
 
     /// <summary>把 "v2.1.0" / "2.1.0" 解析成 Version。</summary>
