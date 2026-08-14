@@ -26,6 +26,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _offsetTimer = new() { Interval = 1000 };
     private LinkLabel _updateLink = null!;   // 状态条「检查更新」
     private bool _updateBusy;                // 更新流程进行中，避免重入
+    private Version? _knownNewVersion;       // 已检测到的新版本：状态条常驻显示，即使用户点过「否」
 
     // TESTING 页测试设置卡内各段的统一宽度：下拉框、模式按钮、调整方式按钮、
     // 以及底部开始/停止两键之和都对齐到这个值，改宽度只需改这里一处。
@@ -681,6 +682,9 @@ internal sealed class MainForm : Form
 
             if (info == null)
             {
+                _knownNewVersion = null;
+                Updater.ClearSkip();
+                RefreshUpdateLinkText();
                 if (manual)
                     MessageBox.Show($"当前已是最新版本 v{Updater.CurrentVersion}。", "检查更新",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -688,6 +692,13 @@ internal sealed class MainForm : Form
             }
 
             Log.Write($"发现新版本 {info.Tag}（当前 v{Updater.CurrentVersion}）");
+            _knownNewVersion = info.Version;
+            RefreshUpdateLinkText();
+
+            // 用户点过「否」的版本，启动时不再弹窗打扰；状态条仍显示有新版本，
+            // 点「有新版本 vX.Y.Z」照样能走更新流程。
+            if (!manual && Updater.IsSkipped(info.Version)) return;
+
             string notes = info.Notes.Length > 600 ? info.Notes[..600] + "\n..." : info.Notes;
             var choice = MessageBox.Show(
                 $"发现新版本 {info.Tag}，当前为 v{Updater.CurrentVersion}。\n\n" +
@@ -697,7 +708,11 @@ internal sealed class MainForm : Form
                 "logs 与 profiles 文件夹（负压历史与恢复数据）不会被改动。\n\n" +
                 "现在更新吗？",
                 "发现新版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (choice != DialogResult.Yes) return;
+            if (choice != DialogResult.Yes)
+            {
+                Updater.SkipVersion(info.Version);
+                return;
+            }
 
             await DownloadAndApplyAsync(info);
         }
@@ -706,6 +721,13 @@ internal sealed class MainForm : Form
             _updateBusy = false;
             if (!IsDisposed) _updateLink.Enabled = true;
         }
+    }
+
+    /// <summary>状态条链接文字：已检测到新版本时常驻显示版本号，否则显示「检查更新」。</summary>
+    private void RefreshUpdateLinkText()
+    {
+        if (IsDisposed) return;
+        _updateLink.Text = _knownNewVersion != null ? $"有新版本 v{_knownNewVersion}" : "检查更新";
     }
 
     /// <summary>下载并解压新版本；两步都成功才关闭程序交给替换脚本。</summary>
@@ -723,7 +745,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception e)
         {
-            _updateLink.Text = "检查更新";
+            RefreshUpdateLinkText();
             SetStatus("更新下载失败", Theme.Accent);
             Log.Write($"更新下载失败：{e.Message}", "WARN");
             MessageBox.Show($"下载更新失败：{e.Message}", "更新",
@@ -740,7 +762,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception e)
         {
-            _updateLink.Text = "检查更新";
+            RefreshUpdateLinkText();
             SetStatus("更新包校验失败", Theme.Accent);
             Log.Write($"更新包解压/校验失败：{e.Message}", "WARN");
             MessageBox.Show($"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新",
@@ -755,7 +777,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception e)
         {
-            _updateLink.Text = "检查更新";
+            RefreshUpdateLinkText();
             MessageBox.Show($"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
