@@ -11,7 +11,7 @@
     <AssemblyName>AMD Ryzen PBO Studio</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\ICON.ico</ApplicationIcon>
-    <Version>2.0.2</Version>
+    <Version>2.0.3</Version>
     <!-- 作者信息：显示在 EXE 右键「属性 → 详细信息」中 -->
     <Product>AMD Ryzen PBO Studio</Product>
     <Authors>DY冷漠_OC调试</Authors>
