@@ -84,4 +84,37 @@ internal static class HwInfoReader
             return null;
         }
     }
+
+    /// <summary>读取 HWiNFO 的 "Bus Clock"（BCLK）。外置时钟发生器的主板上 CPU 内部 PLL 寄存器
+    /// 读不到真实外频，HWiNFO 的这个读数是准的。不可用时返回 null，调用方回退到自行反推。</summary>
+    public static double? ReadBusClock()
+    {
+        try
+        {
+            using var mmf = MemoryMappedFile.OpenExisting(SmName, MemoryMappedFileRights.Read);
+            using var acc = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+
+            uint offReading = acc.ReadUInt32(32);
+            uint szReading  = acc.ReadUInt32(36);
+            uint numReading = acc.ReadUInt32(40);
+            if (szReading < ValueOffset + 8 || numReading == 0 || numReading > 100000) return null;
+
+            var lbl = new byte[128];
+            for (uint i = 0; i < numReading; i++)
+            {
+                long b = offReading + (long)i * szReading;
+                acc.ReadArray(b + LabelOffset, lbl, 0, 128);
+                int z = Array.IndexOf(lbl, (byte)0);
+                if (z <= 0) continue;
+                if (!Encoding.ASCII.GetString(lbl, 0, z).StartsWith("Bus Clock", StringComparison.Ordinal)) continue;
+                double val = acc.ReadDouble(b + ValueOffset);
+                if (val is > 50 and < 200) return val;
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
