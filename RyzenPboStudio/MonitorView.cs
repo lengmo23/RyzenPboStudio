@@ -43,8 +43,15 @@ internal sealed class DbLabel : Label
 /// <summary>直接绘制标题和数值，避免嵌套 Label 在紧凑 TableLayout 中被压成零高度。</summary>
 internal sealed class StatCellControl : Control
 {
-    private readonly string title;
+    private string title;
     private readonly bool center;
+
+    /// <summary>格子标题。异步外频时 BCLK 格要改标成 "BCLK/BCLK2"，故可写。</summary>
+    public string Title
+    {
+        get => title;
+        set { if (title != value) { title = value; Invalidate(); } }
+    }
     private readonly Font titleFont = new("Consolas", 8f);
     private readonly Font valueFont;
 
@@ -100,7 +107,10 @@ internal sealed class MonitorView : UserControl
     private readonly uint cores, ccds, coresPerCcd;
     private readonly int[] slotOs;        // 槽位 → OS 物理核序号（屏蔽槽 -1）
     private readonly bool[] slotDisabled; // 槽位是否熔丝屏蔽
-    private double bclk;
+    private double bclk;                 // CPU 时钟域外频：异步外频时即 BCLK2，核心频率按它换算
+    private double bclkPll;              // CG PLL 里的基准外频（BCLK1）；与 bclk 不等即为异步外频
+    private readonly double p0DefMHz;    // P0 定义频率（P-state 0 寄存器，按 BCLK=100 参考），用于反推真实外频
+    private readonly double regBaseMHz;  // 注册表 ~MHz：HAL 启动时实测写入，已含外频
     private readonly string installedMemory;
     private readonly double p0BaseMHz;   // P0 标称基频，用于 ΔAPERF/ΔMPERF×P0 算忙时频率（本机 TSC 不可读）
     private readonly bool hasPtVolt;
@@ -143,18 +153,22 @@ internal sealed class MonitorView : UserControl
         try
         {
             lock (RyzenSmu.IoLock)
-                bclk = cpu.GetBclk() ?? 0;
+                p0DefMHz = ReadP0DefMHz();
         }
-        catch { bclk = 0; }
+        catch { p0DefMHz = 0; }
         installedMemory = SystemInfo.GetInstalledMemory();
-        p0BaseMHz   = SystemInfo.GetBaseFrequencyMHz();
-        if (bclk > 0 && p0BaseMHz > 0)
+
+        // 注册表 ~MHz 由 HAL 在启动时以独立时基实测后写入，已经含外频；P0 定义频率是按 BCLK=100
+        // 参考的标称值。两者相除即真实外频，见 ResolveBclk()。
+        regBaseMHz = SystemInfo.GetBaseFrequencyMHz();
+        try
         {
-            // 注册表 ~MHz 按理想 BCLK=100MHz 折算；多数主板实际 BCLK 略高于 100（常见的"免费"超频），
-            // 用 GetBclk() 测得的真实 BCLK 校正标称基频，使 ΔAPERF/ΔMPERF×P0 忙时频率与 HWiNFO 等工具一致。
-            double multiplier = Math.Round(p0BaseMHz / 100.0);
-            if (multiplier > 0) p0BaseMHz = multiplier * bclk;
+            lock (RyzenSmu.IoLock)
+                (bclkPll, bclk) = ResolveBclk();
         }
+        catch { bclkPll = bclk = 0; }
+        p0BaseMHz = regBaseMHz > 0 ? regBaseMHz
+                  : (p0DefMHz > 0 && bclk > 0 ? p0DefMHz * bclk / 100.0 : 0);
         hasPtVolt   = cpu.info.codeName == Cpu.CodeName.GraniteRidge;
         perCoreVoltIdx = ccds == 1 ? SingleCcdVoltIdx : DualCcdVoltIdx;
 
@@ -165,6 +179,49 @@ internal sealed class MonitorView : UserControl
 
         BuildUi();
         FillIdentityStrip();
+    }
+
+    private const uint P0DefMsr = 0xC0010064;   // P-State 0 Definition
+
+    /// <summary>P-state 0 定义寄存器里的标称频率（按 BCLK=100MHz 参考）。Zen5(家族1Ah+) 为
+    /// fid[11:0]×5MHz，更早代际用 fid/dfs 算倍频×100。读不到或该 P-state 未使能返回 0。
+    /// 调用方需持有 IoLock。</summary>
+    private double ReadP0DefMHz()
+    {
+        uint eax = 0, edx = 0;
+        if (!cpu.ReadMsr(P0DefMsr, ref eax, ref edx)) return 0;
+        if ((edx & 0x8000_0000) == 0) return 0;   // PstateEn=0
+        if (cpu.info.family >= Cpu.Family.FAMILY_1AH)
+            return (eax & 0xFFF) * 5.0;
+        double fid = eax & 0xFF, dfs = (eax >> 8) & 0x3F;
+        return dfs > 0 ? 25.0 * fid / (12.5 * dfs) * 100.0 : 0;
+    }
+
+    /// <summary>
+    /// 取 (BCLK1, CPU 时钟域外频)。cpu.GetBclk() 读的是 CG PLL 配置寄存器，即同步域的基准外频；
+    /// 主板走外置时钟发生器时 CPU_CLK 不由该 PLL 定频，异步外频下它仍是 100，与 CPU 实际外频无关。
+    /// CPU 侧因此改用 注册表~MHz ÷ P0定义频率 反推——外频档位都是 0.05MHz 的整数倍，按此吸附掉
+    /// ~MHz 只有整数精度带来的零头；反推不成立时依次退回 HWiNFO 的 Bus Clock 与 PLL 读数。
+    /// 调用方需持有 IoLock。
+    /// </summary>
+    private (double Pll, double Core) ResolveBclk()
+    {
+        double pll = 0;
+        double? raw = cpu.GetBclk();
+        if (raw is > 50 and < 200) pll = raw.Value;
+
+        double core = 0;
+        if (regBaseMHz > 0 && p0DefMHz > 0)
+        {
+            // 范围卡在实际可用的外频区间内：若某代际 P0 定义的不是基频、或 ~MHz 写的是别的口径，
+            // 比值会明显跑飞，此时宁可退回下面两级（至少不比现状差）也不显示一个错的外频。
+            double derived = regBaseMHz / p0DefMHz * 100.0;
+            if (derived is >= 90 and <= 130) core = Math.Round(Math.Round(derived / 0.05) * 0.05, 2);
+        }
+        if (core <= 0 && HwInfoReader.ReadBusClock() is > 50 and < 200 and double hw) core = hw;
+        if (core <= 0) core = pll;
+
+        return (pll, core);
     }
 
     private void BuildUi()
@@ -246,7 +303,17 @@ internal sealed class MonitorView : UserControl
         _moboVal.Text = SystemInfo.GetMotherboard();
         _memVal.Text = installedMemory;
         _gpuVal.Text = SystemInfo.GetGpuName();
-        _bclkVal.Text = bclk > 0 ? $"{bclk:F2} MHz" : "--";
+        UpdateBclkCell();
+    }
+
+    /// <summary>BCLK 格：同步外频只显示一个值；异步外频（CPU 域与 PLL 基准不一致）时
+    /// 标题改成 BCLK/BCLK2，值显示 "基准/CPU 域"。</summary>
+    private void UpdateBclkCell()
+    {
+        bool async = bclkPll > 0 && bclk > 0 && Math.Abs(bclk - bclkPll) >= 0.05;
+        _bclkVal.Title = async ? "BCLK/BCLK2" : "BCLK";
+        _bclkVal.Text = async ? $"{bclkPll:F2}/{bclk:F2}"
+                      : bclk > 0 ? $"{bclk:F2} MHz" : "--";
     }
 
     private string FormatMemory(double fclk, double uclk)
@@ -592,8 +659,9 @@ internal sealed class MonitorView : UserControl
 
                 try
                 {
-                    double? liveBclk = cpu.GetBclk();
-                    if (liveBclk is > 50 and < 200) bclk = liveBclk.Value;
+                    var (livePll, liveCore) = ResolveBclk();
+                    if (liveCore is > 50 and < 200) bclk = liveCore;
+                    if (livePll is > 50 and < 200) bclkPll = livePll;
                 }
                 catch { /* 保留最近一次有效 BCLK */ }
 
@@ -630,7 +698,7 @@ internal sealed class MonitorView : UserControl
                 BeginInvoke(() =>
                 {
                     _memVal.Text    = FormatMemory(fclk, uclk);
-                    _bclkVal.Text   = bclk > 0 ? $"{bclk:F2} MHz" : "--";
+                    UpdateBclkCell();
                     _telVidVal.Text = $"{(telVolt > 0 ? telVolt.ToString("F3") : "--")} / {(peakVid > 0 ? peakVid.ToString("F3") : "--")} V";
                     _vdroopVal.Text = vdroopValid ? $"{(peakVid - telVolt) / peakVid * 100.0:F1} %" : "--";
                     _thmVal.Text    = $"{(tctl > 0 ? tctl.ToString("F0") : "--")} / {(thmLimit > 0 ? thmLimit.ToString() : "--")}";
