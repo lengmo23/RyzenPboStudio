@@ -1090,8 +1090,9 @@ internal sealed class MainForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             BackColor = Theme.Surface,
-            // 顶边距 ~24 避开表头行，使按钮对齐到第一行数字框
-            Margin = new Padding(8, 24, 0, 0),
+            // 顶边距与 CO 按钮列一致（32），两张卡片的 Apply/Refresh/Save/Load 水平对齐；
+            // 左边距 18 让按钮落在网格右侧剩余空间的中间，不贴着网格也不贴卡片右边
+            Margin = new Padding(18, 32, 0, 0),
         };
         PillButton Btn(string text, Action click)
         {
@@ -1125,9 +1126,9 @@ internal sealed class MainForm : Form
         for (int i = 0; i < 4; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         // 表头：温度档（列）
-        grid.Controls.Add(new Label { Text = "", AutoSize = false, Width = 40, Height = 18, BackColor = Theme.Surface }, 0, 0);
+        grid.Controls.Add(new Label { Text = "", AutoSize = false, Width = CsRowLabelWidth, Height = 18, BackColor = Theme.Surface }, 0, 0);
         string[] cols = { "LOW", "MED", "HIGH" };
-        for (int c = 0; c < 3; c++) grid.Controls.Add(CsHeader(cols[c]), c + 1, 0);
+        for (int c = 0; c < 3; c++) grid.Controls.Add(CsHeader(cols[c], last: c == 2), c + 1, 0);
 
         // 5 个频率档（行）
         string[] tiers = { "MIN", "LOW", "MED", "HIGH", "MAX" };
@@ -1136,50 +1137,62 @@ internal sealed class MainForm : Form
             grid.Controls.Add(CsRowLabel(tiers[t]), 0, t + 1);
             for (int c = 0; c < 3; c++)
             {
-                _csCells[t, c] = NewCsCell();
+                _csCells[t, c] = NewCsCell(last: c == 2);
                 grid.Controls.Add(_csCells[t, c], c + 1, t + 1);
             }
         }
         return grid;
     }
 
-    private static Label CsHeader(string text) => new()
+    /// <summary>温度档列（LOW/MED/HIGH）之间的横向间距，表头与数字框共用以保持同宽居中。</summary>
+    private const int CsColumnGap = 10;
+
+    /// <summary>温度档列宽。卡片宽度要同时容下 5×3 网格与右侧按钮列，CS 数字框比 CO 的窄。</summary>
+    private const int CsCellWidth = 46;
+
+    /// <summary>last=true 时不留右间距：最后一列的间距会把按钮列挤出卡片。</summary>
+    private static Label CsHeader(string text, bool last) => new()
     {
         Text = text,
         AutoSize = false,
-        Width = 54,
+        Width = CsCellWidth,
         Height = 18,
         ForeColor = Theme.TextLo,
         BackColor = Theme.Surface,
         TextAlign = ContentAlignment.MiddleCenter,
         Font = new Font(Theme.FontFamily, 8.5F),
-        Margin = new Padding(0, 0, 0, 2),
+        Margin = new Padding(0, 0, last ? 0 : CsColumnGap, 2),
     };
+
+    /// <summary>频率档行标（MIN/LOW/MED/HIGH/MAX）的列宽，表头占位格与之同宽。</summary>
+    private const int CsRowLabelWidth = 40;
 
     private static Label CsRowLabel(string text) => new()
     {
         Text = text,
         AutoSize = false,
-        Width = 40,
+        Width = CsRowLabelWidth,
         Height = 26,
         ForeColor = Theme.TextLo,
         BackColor = Theme.Surface,
-        TextAlign = ContentAlignment.MiddleLeft,
-        Margin = new Padding(0, 0, 4, 0),
+        // 右对齐：文字紧贴第一列数字框，不再吊在左边空一大段
+        TextAlign = ContentAlignment.MiddleRight,
+        // 上下 5：与数字框同步拉开行距，五个频率档之间不再贴在一起
+        Margin = new Padding(0, 5, 6, 5),
     };
 
-    private static NumericUpDown NewCsCell() => new()
+    private static NumericUpDown NewCsCell(bool last) => new()
     {
         Minimum = -50,
         Maximum = 30,
         Value = 0,
-        Width = 50,
+        Width = CsCellWidth,
         BackColor = Theme.SurfaceAlt,
         ForeColor = Theme.TextHi,
         BorderStyle = BorderStyle.FixedSingle,
         TextAlign = HorizontalAlignment.Center,
         Font = new Font(Theme.MonoFamily, 10F),
-        Margin = new Padding(0, 2, 4, 2),
+        Margin = new Padding(0, 5, last ? 0 : CsColumnGap, 5),
     };
 
     // ── CO 编辑器行为 ───────────────────────────────────────────────────────
