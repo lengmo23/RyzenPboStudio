@@ -36,6 +36,11 @@ internal sealed class TestState
     [JsonPropertyName("seq_phase")] public string? SeqPhase { get; set; }
     [JsonPropertyName("duration_seconds")] public int? DurationSeconds { get; set; }
     [JsonPropertyName("iterations_map")] public Dictionary<string, int>? IterationsMap { get; set; }
+    // 测试范围：ALL=全部核心，CCD=单个 CCD，EACH=逐 CCD 依次，CUSTOM=自定义核心。
+    // EACH 时 ScopeCcd 记录断电前跑到第几个 CCD，恢复后从那个 CCD 继续。
+    [JsonPropertyName("test_scope")] public string? TestScope { get; set; }
+    [JsonPropertyName("scope_ccd")] public int? ScopeCcd { get; set; }
+    [JsonPropertyName("scope_cores")] public List<int>? ScopeCores { get; set; }
     [JsonPropertyName("timestamp")] public double Timestamp { get; set; }
 }
 

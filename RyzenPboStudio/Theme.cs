@@ -75,6 +75,8 @@ internal sealed class PillButton : Button
     public Color Normal { get; set; } = Theme.Accent;
     public Color Hover { get; set; } = Theme.AccentHover;
     public Color Disabled { get; set; } = Theme.SurfaceAlt;
+    /// <summary>非 Empty 时在填充外再描一圈边，用于空心按钮；禁用时自动退成灰色描边。</summary>
+    public Color Outline { get; set; } = Color.Empty;
 
     private bool _hover;
 
@@ -103,6 +105,13 @@ internal sealed class PillButton : Button
         Color fill = !Enabled ? Disabled : (_hover ? Hover : Normal);
         using var b = new SolidBrush(fill);
         e.Graphics.FillPath(b, path);
+        if (Outline != Color.Empty)
+        {
+            // 描边路径内缩 1px，1.5px 的笔才不会被控件边界削掉外侧
+            using var op = Theme.RoundRect(new Rectangle(1, 1, Width - 3, Height - 3), Math.Max(1, Radius - 1));
+            using var pen = new Pen(Enabled ? Outline : Theme.Border, 1.5f);
+            e.Graphics.DrawPath(pen, op);
+        }
         TextRenderer.DrawText(e.Graphics, Text, Font, r,
             Enabled ? ForeColor : Theme.TextLo,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
