@@ -33,6 +33,47 @@ internal static class YCruncher
             "放好后重新点击开始测试。");
     }
 
+    /// <summary>
+    /// 写一份限定逻辑核心的 stress 配置。y-cruncher 的 config 是 JSON 风格但数组元素用空格分隔、
+    /// 不能用逗号；字段名与类型按 v0.8.7 的实际要求，缺一个都会直接抛 KeyNotFoundException。
+    /// 内存按「选中核心数 / 全部逻辑核数」等比缩放，使每线程内存量与全核默认时保持一致。
+    /// </summary>
+    private static string WriteStressConfig(
+        IReadOnlyList<string> algorithms, int durationSeconds, int iterations, IReadOnlyList<int> logicalCores)
+    {
+        long totalRam = 0;
+        try { totalRam = (long)SystemInfo.TotalPhysicalBytes(); } catch { }
+        if (totalRam <= 0) totalRam = 8L * 1024 * 1024 * 1024;
+
+        int allLogical = Math.Max(1, Environment.ProcessorCount);
+        // 0.72 是实测的 y-cruncher 默认取用比例（63.6 GB 机器上默认 45.8 GiB）
+        long mem = (long)(totalRam * 0.72 * logicalCores.Count / allLogical);
+        long minMem = 256L * 1024 * 1024 * logicalCores.Count;   // 每线程至少 256 MB
+        if (mem < minMem) mem = minMem;
+
+        // SecondsTotal 留足余量：轮数由 stdout 的 Iteration 计数控制，别让 y-cruncher 先自行收工
+        long secondsTotal = (long)durationSeconds * Math.Max(1, iterations) * algorithms.Count + 3600;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("{");
+        sb.AppendLine("    Action : \"StressTest\"");
+        sb.AppendLine("    StressTest : {");
+        sb.AppendLine("        AllocateLocally : false");
+        sb.AppendLine($"        TotalMemory : {mem}");
+        sb.AppendLine($"        SecondsPerTest : {durationSeconds}");
+        sb.AppendLine($"        SecondsTotal : {secondsTotal}");
+        sb.AppendLine("        StopOnError : true");
+        sb.AppendLine($"        LogicalCores : [{string.Join(' ', logicalCores)}]");
+        sb.AppendLine($"        Tests : [{string.Join(' ', algorithms.Select(a => $"\"{a}\""))}]");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+
+        Directory.CreateDirectory(Workspace.ProfilesDir);
+        string path = Path.Combine(Workspace.ProfilesDir, "yc-stress.cfg");
+        File.WriteAllText(path, sb.ToString(), Encoding.ASCII);
+        return path;
+    }
+
     /// <summary>强制结束 y-cruncher 及其架构子进程。</summary>
     public static void Kill()
     {
@@ -73,11 +114,15 @@ internal static class YCruncher
     /// 跑 iterations 轮压测（algorithms 可为一个或多个 y-cruncher 组件，多个即「和项」一起测）：
     /// 自动模式下报错则对应物理核心 +StepOnError 后重跑整轮，直到通过或被取消；
     /// 手动模式(autoAdjust=false)下报错只提醒并停止，不改动任何负压。返回 (是否通过, 最终负压)。
+    /// logicalCores 非空时只压这些逻辑核（走 config 文件，命令行的 stress 不支持指定核心），
+    /// scopeCores 则限定 y-cruncher 整体崩溃时的负压回退范围，避免误伤未参与本次测试的核心。
     /// </summary>
     public static (bool ok, List<int> offsets) RunStressTest(
         IReadOnlyList<string> algorithms, int iterations, List<int> offsets,
         int durationSeconds, string mode, CancellationToken token,
-        bool autoAdjust = true, Action<List<int>>? onManualError = null)
+        bool autoAdjust = true, Action<List<int>>? onManualError = null,
+        IReadOnlyList<int>? logicalCores = null, IReadOnlyList<int>? scopeCores = null,
+        string? scopeLabel = null)
     {
         string yc = FindExe();
         string ycDir = Path.GetDirectoryName(yc)!;
@@ -89,9 +134,20 @@ internal static class YCruncher
             if (token.IsCancellationRequested)
                 return (false, current);
 
-            Log.Write($"=== 开始 {iterations} 轮 {algoLabel} 测试，每轮 {durationSeconds} 秒 ===");
-            var args = new List<string> { "skip-warnings", "stress", $"-D:{durationSeconds}" };
-            args.AddRange(algorithms);
+            Log.Write($"=== 开始 {iterations} 轮 {algoLabel} 测试 · 每轮 {durationSeconds} 秒 · 范围 {scopeLabel ?? "全部核心"} ===");
+            List<string> args;
+            if (logicalCores is { Count: > 0 })
+            {
+                // 限定核心：只能用配置文件，命令行的 stress 不接受任何核心/线程相关参数。
+                // 轮数仍由下面的 Iteration 计数控制，SecondsTotal 给足以免 y-cruncher 先超时收工。
+                string cfgPath = WriteStressConfig(algorithms, durationSeconds, iterations, logicalCores);
+                args = new List<string> { "skip-warnings", "config", cfgPath };
+            }
+            else
+            {
+                args = new List<string> { "skip-warnings", "stress", $"-D:{durationSeconds}" };
+                args.AddRange(algorithms);
+            }
             Log.Write($"运行: {yc} {string.Join(' ', args)}");
 
             var ycLog = new StringBuilder();
@@ -257,6 +313,8 @@ internal static class YCruncher
                 bool anyReduced = false;
                 for (int i = 0; i < current.Count; i++)
                 {
+                    // 限定了测试范围时只回退参与本次测试的核心，不动没测过的那些
+                    if (scopeCores is { Count: > 0 } && !scopeCores.Contains(i)) continue;
                     if (current[i] < 0)
                     {
                         int old = current[i];
@@ -268,7 +326,9 @@ internal static class YCruncher
 
                 if (!anyReduced)
                 {
-                    Log.Write("y-cruncher 崩溃，但所有核心负压已为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试。", "ERROR");
+                    Log.Write(scopeCores is { Count: > 0 }
+                        ? "y-cruncher 崩溃，但本次测试范围内的核心负压已全为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试。"
+                        : "y-cruncher 崩溃，但所有核心负压已为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试。", "ERROR");
                     return (false, current);
                 }
 

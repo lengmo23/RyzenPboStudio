@@ -13,6 +13,9 @@ internal sealed class MainForm : Form
     private PillButton _autoAdjBtn = null!;                // 自动调整负压模式
     private PillButton _manualAdjBtn = null!;              // 手动模式（报错只提醒）
     private bool _autoAdjust = true;                       // true=报错自动回退负压；false=只提醒不改负压
+    private readonly List<PillButton> _scopeBtns = new();  // 测试范围：全部 / 各 CCD / 逐 CCD / 自定义
+    // 按钮上只留短标题，具体测哪些项、跑几轮放到悬停提示里，省下纵向空间
+    private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 120 };
     private readonly TextBox _durationBox = new();
     private readonly TextBox _roundsBox = new();
     private readonly PillButton _startBtn = Primary("▶  开始测试");
@@ -72,6 +75,12 @@ internal sealed class MainForm : Form
     private int _singleRounds = Config.DefaultBkt;   // 单项测试轮数（默认 10）
     private List<int> _initialOffsets = new();
 
+    // 测试范围：ALL=全部核心（走原有命令行，行为不变），CCD=单个 CCD，
+    // EACH=逐 CCD 依次跑完整轮次，CUSTOM=自定义物理核。后三者走 y-cruncher 配置文件限定逻辑核。
+    private string _testScope = "ALL";
+    private int _scopeCcd;
+    private List<int> _customCores = new();
+
     // 和项测试（COMBO）固定参数：VT3+BKT+SVT 一起跑 10 轮。
     private static readonly string[] ComboAlgos = { "VSTv3", "BKT", "SVT" };
     private const int ComboRounds = 10;
@@ -92,7 +101,9 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = "AMD Ryzen PBO Studio";
-        ClientSize = new Size(1370, 926);   // 宽度容纳双 CCD 并排（9950X 等 16 核），不做横向滚动
+        // 宽度容纳双 CCD 并排（9950X 等 16 核），不做横向滚动；
+        // 高度给测试设置卡留出内容与开始/停止之间的呼吸空间，放不下的屏幕由 FitToScreen 等比缩回
+        ClientSize = new Size(1370, 950);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.Bg;
@@ -253,7 +264,8 @@ internal sealed class MainForm : Form
 
         // 左栏用绝对宽度而非百分比：卡片内容是固定的 TestRowWidth，用百分比会随窗口
         // 尺寸变化把开始/停止按钮裁掉。宽度 = 内容 + 卡片左右内边距 32 + 栏间距 6 +
-        // 余量 34（含 body 出现纵向滚动条时占用的约 17px，避免横向再被挤掉）。
+        // 余量 22（body 真出纵向滚动条时它占约 17px，仍容得下，不会再顶出横向滚动条）。
+        // 余量不要再往下压：低于 17px 时滚动条一出就会挤出横向滚动条。
         var top = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -262,7 +274,7 @@ internal sealed class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0),
         };
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TestRowWidth + 72));
+        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TestRowWidth + 60));
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 日志吃掉剩余宽度
         cfg.Margin = new Padding(0, 0, 6, 0);
         logCard.Margin = new Padding(6, 0, 0, 0);
@@ -406,7 +418,7 @@ internal sealed class MainForm : Form
         };
 
         // 单项测试：标题 + 其下方的下拉框
-        var modeTitle = new Label { Text = "单项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 4), Font = new Font(Theme.FontFamily, 9F, FontStyle.Bold) };
+        var modeTitle = new Label { Text = "单项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
 
         _modeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         _modeCombo.FlatStyle = FlatStyle.Flat;
@@ -414,7 +426,7 @@ internal sealed class MainForm : Form
         _modeCombo.BackColor = Theme.SurfaceAlt;
         _modeCombo.ForeColor = Theme.TextHi;
         _modeCombo.Font = new Font(Theme.FontFamily, 10F);
-        _modeCombo.Margin = new Padding(0, 0, 0, 6);
+        _modeCombo.Margin = new Padding(0, 0, 0, 12);
         foreach (var opt in ModeOptions) _modeCombo.Items.Add(opt.display);
         _modeCombo.SelectedIndexChanged += (_, _) =>
         {
@@ -422,28 +434,65 @@ internal sealed class MainForm : Form
             _selectedMode = ModeOptions[_modeCombo.SelectedIndex].mode; // 选单项即清除组合测试高亮
             RestyleModeButtons();
         };
-        var fields = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 6) };
+        var fields = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
         AddFieldPair(fields, "每轮(秒)", _durationBox, 66);
         AddFieldPair(fields, "轮数", _roundsBox, 60);
         _durationBox.Text = _durationSeconds.ToString();
         _roundsBox.Text = _singleRounds.ToString();
 
-        // 多项测试（顺序 / 组合）
-        var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 4), Font = new Font(Theme.FontFamily, 9F, FontStyle.Bold) };
-        _seqBtn = MakeModeButton("顺序测试  VT3→BKT→SVT  20/10/10轮", "SEQ");
-        _comboBtn = MakeModeButton("组合测试  VT3+BKT+SVT 同跑  10轮", "COMBO");
+        // 多项测试（顺序 / 组合）：两键横排，测哪些项、跑几轮放悬停提示，标题后的 ⓘ 是可悬停的提示
+        var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        const int modeGap = 10;
+        int modeBtnWidth = (TestRowWidth - modeGap) / 2;
+        _seqBtn = MakeModeButton("顺序测试", "SEQ", modeBtnWidth,
+            $"VT3 → BKT → SVT 依次各测一遍\n轮数：VT3 {_iterations["VT3"]} 轮 / BKT {_iterations["BKT"]} 轮 / SVT {_iterations["SVT"]} 轮\n每项跑完清理进程再进入下一项");
+        _comboBtn = MakeModeButton("组合测试", "COMBO", modeBtnWidth,
+            $"VT3 + BKT + SVT 三项同时跑，共 {ComboRounds} 轮\n同时施加多种负载，比单项更容易暴露不稳定");
+        _seqBtn.Margin = new Padding(0, 0, modeGap, 0);
+        _comboBtn.Margin = new Padding(0);
+        var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 2) };
+        modeRow.Controls.Add(_seqBtn);
+        modeRow.Controls.Add(_comboBtn);
 
-        // 负压调整方式：自动回退 / 手动（只提醒）
-        var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 4, 0, 4), Font = new Font(Theme.FontFamily, 9F, FontStyle.Bold) };
-        _autoAdjBtn   = MakeAdjustButton("自动调整负压模式  报错自动回退一档", true);
-        _manualAdjBtn = MakeAdjustButton("手动模式  报错只提醒，不改负压", false);
+        // 负压调整方式：自动回退 / 手动（只提醒）。两键横排等分一行，省下的纵向空间给测试范围。
+        var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        const int adjGap = 10;
+        int adjBtnWidth = (TestRowWidth - adjGap) / 2;
+        _autoAdjBtn   = MakeAdjustButton("自动模式", true,
+            $"压测报错时，把出错核心的负压自动回退一档（+{Config.StepOnError}）后重跑整轮，\n直到该轮通过或你手动停止。y-cruncher 整体崩溃时，回退本次测试范围内仍在负压的核心。");
+        _manualAdjBtn = MakeAdjustButton("手动模式", false,
+            "压测报错时只弹提示并停止，不改动任何负压。\n由你自己判断怎么调，调完重新开始测试。");
+        _autoAdjBtn.Width = adjBtnWidth;
+        _manualAdjBtn.Width = adjBtnWidth;
+        _autoAdjBtn.Margin = new Padding(0, 0, adjGap, 0);
+        _manualAdjBtn.Margin = new Padding(0);
+        var adjRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 0) };
+        adjRow.Controls.Add(_autoAdjBtn);
+        adjRow.Controls.Add(_manualAdjBtn);
 
-        // 开始 / 停止：横排置于负压调整方式下方，两键等分 TestRowWidth（含中间 10px 间隔）
+        // 测试范围：第一行「全部核心 | 自定义」所有机型都有；第二行「各 CCD | 逐 CCD」只有多 CCD 机型才出。
+        var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var scopeRow1 = BuildScopeRow(new (string, string, string)[]
+        {
+            ("全部核心", "ALL", "所有核心一起压测，与旧版本行为一致"),
+            ("自定义…", "CUSTOM", "自行勾选参与压测的物理核心"),
+        });
+        var scopeRow2 = BuildCcdScopeRow();
+        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 6);   // 与 CCD 行拉开，别看着像同一行
+
+        // 开始 / 停止：停靠卡片底部（不随内容排在最后），两键等分 TestRowWidth（含中间 10px 间隔）。
+        // 这样内容与按钮之间的留白由卡片高度自动分配，换 DPI 时按钮也始终贴底。
         const int runGap = 10;
         int runBtnWidth = (TestRowWidth - runGap) / 2;
-        var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 6, 0, 0) };
-        _startBtn.Size = new Size(runBtnWidth, 44);
-        _stopBtn.Size = new Size(runBtnWidth, 44);
+        var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Margin = new Padding(0, 0, 0, 6) };
+        // 开始键改成空心描边：选中的测试模式/范围已经是实心 AMD 红，再来一块大红会互相抢。
+        // 保留红描边 + 浅红字守住品牌色，但不再是实心色块，视觉冲击降下来。
+        _startBtn.Normal = Theme.SurfaceAlt;
+        _startBtn.Hover = Theme.Border;
+        _startBtn.Outline = Theme.Accent;
+        _startBtn.ForeColor = Color.FromArgb(0xF2, 0x73, 0x6C);
+        _startBtn.Size = new Size(runBtnWidth, 38);
+        _stopBtn.Size = new Size(runBtnWidth, 38);
         _startBtn.Margin = new Padding(0, 0, runGap, 0);
         _stopBtn.Margin = new Padding(0);
         _stopBtn.Enabled = false;
@@ -456,30 +505,214 @@ internal sealed class MainForm : Form
         body.Controls.Add(_modeCombo);
         body.Controls.Add(fields);
         body.Controls.Add(comboTitle);
-        body.Controls.Add(_seqBtn);
-        body.Controls.Add(_comboBtn);
+        body.Controls.Add(modeRow);
         body.Controls.Add(adjTitle);
-        body.Controls.Add(_autoAdjBtn);
-        body.Controls.Add(_manualAdjBtn);
-        body.Controls.Add(runRow);
+        body.Controls.Add(adjRow);
+        body.Controls.Add(scopeTitle);
+        body.Controls.Add(scopeRow1);
+        if (scopeRow2 != null) body.Controls.Add(scopeRow2);
 
         SelectMode(_selectedMode);
         RestyleAdjustButtons();
+        RestyleScopeButtons();
 
+        // 添加顺序决定停靠优先级：标题占顶、按钮占底、body 填中间
         card.Controls.Add(body);
+        card.Controls.Add(runRow);
         card.Controls.Add(SectionTitle("测试设置"));
         return card;
     }
 
+    /// <summary>一行测试范围按钮，等分 TestRowWidth。</summary>
+    private FlowLayoutPanel BuildScopeRow(IReadOnlyList<(string text, string tag, string tip)> specs)
+    {
+        const int gap = 6;
+        int w = (TestRowWidth - gap * (specs.Count - 1)) / specs.Count;
+        var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 2) };
+        for (int i = 0; i < specs.Count; i++)
+        {
+            var b = MakeScopeButton(specs[i].text, specs[i].tag, w, specs[i].tip);
+            b.Margin = new Padding(0, 0, i < specs.Count - 1 ? gap : 0, 0);
+            row.Controls.Add(b);
+        }
+        return row;
+    }
+
+    /// <summary>测试范围第二行：每个 CCD 一个键 + 逐 CCD 依次。单 CCD 机型返回 null，整行不出现。</summary>
+    private FlowLayoutPanel? BuildCcdScopeRow()
+    {
+        int ccds = CoreTopology.CcdCount;
+        if (ccds <= 1) return null;
+
+        var specs = new List<(string, string, string)>();
+        for (int c = 0; c < ccds; c++)
+        {
+            var cores = CoreTopology.PhysicalCoresOfCcd(c);
+            specs.Add(($"CCD{c}", $"CCD{c}",
+                $"只压 CCD{c}（物理核 {string.Join(", ", cores)}）\n另一个 CCD 空闲时功耗预算全给被测 CCD，\n频率比全核负载时更高，结论不能直接套用到全核"));
+        }
+        specs.Add(("逐 CCD", "EACH",
+            "对每个 CCD 各跑一遍完整轮次（CCD0 → CCD1 …）\n中途某个 CCD 没跑完就不再往下走"));
+        return BuildScopeRow(specs);
+    }
+
+    /// <summary>测试范围按钮：点选即切换并高亮；「自定义…」先弹核心选择框，取消则不改范围。</summary>
+    private PillButton MakeScopeButton(string text, string tag, int width, string tip)
+    {
+        var b = new PillButton
+        {
+            Text = text,
+            Tag = tag,
+            Font = new Font(Theme.FontFamily, 9.5F),
+            Height = 30,
+            Width = width,
+            Radius = 8,
+            AutoSize = false,
+            BackColor = Theme.Surface,
+            Normal = Theme.SurfaceAlt,
+            Hover = Theme.Border,
+            ForeColor = Theme.TextHi,
+            Margin = new Padding(0, 0, 0, 2),
+        };
+        _tips.SetToolTip(b, tip);
+        b.Click += (_, _) =>
+        {
+            if (tag == "CUSTOM")
+            {
+                if (!PromptCustomCores()) return;
+                _testScope = "CUSTOM";
+            }
+            else if (tag.StartsWith("CCD"))
+            {
+                _testScope = "CCD";
+                _scopeCcd = int.Parse(tag[3..]);
+            }
+            else
+            {
+                _testScope = tag;   // ALL / EACH
+            }
+            RestyleScopeButtons();
+        };
+        _scopeBtns.Add(b);
+        return b;
+    }
+
+    private void RestyleScopeButtons()
+    {
+        string active = _testScope switch
+        {
+            "CCD" => $"CCD{_scopeCcd}",
+            _ => _testScope,
+        };
+        foreach (var b in _scopeBtns)
+        {
+            bool sel = (string)b.Tag! == active;
+            b.Normal = sel ? Theme.Accent : Theme.SurfaceAlt;
+            b.Hover = sel ? Theme.AccentHover : Theme.Border;
+            b.ForeColor = sel ? Theme.AccentText : Theme.TextHi;
+            b.Invalidate();
+        }
+    }
+
+    /// <summary>自定义核心选择框：逐物理核勾选（熔丝屏蔽槽禁用）。确认且至少选中一个才返回 true。</summary>
+    private bool PromptCustomCores()
+    {
+        int slots = _coSlotCount > 0 ? _coSlotCount : RyzenSmu.SlotCount;
+        if (slots <= 0) { MessageBox.Show("未能读取核心拓扑，无法自定义测试范围。", "提示"); return false; }
+
+        using var dlg = new Form
+        {
+            Text = "选择测试核心",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            BackColor = Theme.Surface,
+            ForeColor = Theme.TextHi,
+            Font = new Font(Theme.FontFamily, 9F),
+        };
+
+        int rows = (slots + 1) / 2;
+        var grid = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            RowCount = rows,
+            AutoSize = true,
+            BackColor = Theme.Surface,
+            Padding = new Padding(14, 12, 14, 4),
+        };
+        var boxes = new CheckBox[slots];
+        for (int i = 0; i < slots; i++)
+        {
+            bool disabled = RyzenSmu.IsSlotDisabled(i);
+            var cb = new CheckBox
+            {
+                Text = $"核心 {i}" + (disabled ? "（屏蔽）" : ""),
+                AutoSize = true,
+                Enabled = !disabled,
+                Checked = !disabled && (_customCores.Count == 0 || _customCores.Contains(i)),
+                ForeColor = disabled ? Theme.TextLo : Theme.TextHi,
+                BackColor = Theme.Surface,
+                Margin = new Padding(6, 4, 18, 4),
+            };
+            boxes[i] = cb;
+            grid.Controls.Add(cb, i / rows, i % rows);
+        }
+
+        var okBtn = new Button { Text = "确定", DialogResult = DialogResult.OK, Width = 88, Height = 30, FlatStyle = FlatStyle.Flat, BackColor = Theme.SurfaceAlt, ForeColor = Theme.TextHi };
+        okBtn.FlatAppearance.BorderColor = Theme.Border;
+        var cancelBtn = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Width = 88, Height = 30, FlatStyle = FlatStyle.Flat, BackColor = Theme.SurfaceAlt, ForeColor = Theme.TextHi };
+        cancelBtn.FlatAppearance.BorderColor = Theme.Border;
+        // 整组靠右，组内从左往右：确定在左、取消在右
+        var btnRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Anchor = AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Surface, Margin = new Padding(14, 4, 14, 12) };
+        btnRow.Controls.Add(okBtn);
+        btnRow.Controls.Add(cancelBtn);
+
+        // 两行都排进同一个 TableLayoutPanel：之前按钮行用 Dock=Bottom、内容行不 Dock，
+        // 未停靠的内容不会给停靠的兄弟让位，确定/取消被复选框盖住点不到，只能关窗口（=取消）。
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Theme.Surface,
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(grid, 0, 0);
+        layout.Controls.Add(btnRow, 0, 1);
+        dlg.Controls.Add(layout);
+        dlg.AcceptButton = okBtn;
+        dlg.CancelButton = cancelBtn;
+        dlg.AutoSize = true;
+        dlg.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+
+        if (dlg.ShowDialog(this) != DialogResult.OK) return false;
+
+        var picked = new List<int>();
+        for (int i = 0; i < slots; i++)
+            if (boxes[i].Enabled && boxes[i].Checked) picked.Add(i);
+
+        if (picked.Count == 0)
+        {
+            MessageBox.Show("至少要选择一个核心。", "提示");
+            return false;
+        }
+        _customCores = picked;
+        return true;
+    }
+
     /// <summary>负压调整方式按钮（自动/手动）：点选即切换并高亮。</summary>
-    private PillButton MakeAdjustButton(string text, bool auto)
+    private PillButton MakeAdjustButton(string text, bool auto, string tip)
     {
         var b = new PillButton
         {
             Text = text,
             Tag = auto,
             Font = new Font(Theme.FontFamily, 9.5F),
-            Height = 34,
+            Height = 30,
             Width = TestRowWidth,
             Radius = 8,
             AutoSize = false,
@@ -487,8 +720,9 @@ internal sealed class MainForm : Form
             Normal = Theme.SurfaceAlt,
             Hover = Theme.Border,
             ForeColor = Theme.TextHi,
-            Margin = new Padding(0, 0, 0, 4),
+            Margin = new Padding(0, 0, 0, 2),
         };
+        _tips.SetToolTip(b, tip);
         b.Click += (_, _) => { _autoAdjust = auto; RestyleAdjustButtons(); };
         return b;
     }
@@ -523,23 +757,24 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>组合测试按钮（顺序/和项）：点选即设为当前模式并高亮。</summary>
-    private PillButton MakeModeButton(string text, string mode)
+    private PillButton MakeModeButton(string text, string mode, int width, string tip)
     {
         var b = new PillButton
         {
             Text = text,
             Tag = mode,
             Font = new Font(Theme.FontFamily, 9.5F),
-            Height = 34,
-            Width = TestRowWidth,
+            Height = 30,
+            Width = width,
             Radius = 8,
             AutoSize = false,
             BackColor = Theme.Surface,
             Normal = Theme.SurfaceAlt,   // 默认灰色，仅选中时由 RestyleModeButtons 改红
             Hover = Theme.Border,
             ForeColor = Theme.TextHi,
-            Margin = new Padding(0, 0, 0, 4),
+            Margin = new Padding(0, 0, 0, 2),
         };
+        _tips.SetToolTip(b, tip);
         b.Click += (_, _) => { _selectedMode = mode; RestyleModeButtons(); };
         return b;
     }
@@ -1399,10 +1634,10 @@ internal sealed class MainForm : Form
     {
         Text = text,
         Dock = DockStyle.Top,
-        Height = 22,
+        Height = 26,
         ForeColor = Theme.TextLo,
         BackColor = Theme.Surface,
-        Font = new Font(Theme.FontFamily, 9F, FontStyle.Bold),
+        Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold),
         Padding = new Padding(2, 2, 0, 0),
     };
 
@@ -1582,7 +1817,7 @@ internal sealed class MainForm : Form
 
         SetControlsEnabled(false);
         _stopBtn.Enabled = true;
-        SetStatus($"运行中 · 模式 {_testMode} · 每轮 {duration} 秒", Theme.Warn);
+        SetStatus($"运行中 · 模式 {_testMode} · 范围 {ScopeLabel(_testScope, _scopeCcd)} · 每轮 {duration} 秒", Theme.Warn);
 
         _testTask = Task.Run(RunTestThread);
     }
@@ -1622,7 +1857,6 @@ internal sealed class MainForm : Form
         Workspace.MarkInProgress($"start {DateTime.Now:O}");
 
         int numCores = RyzenSmu.SlotCount;
-        Log.Write($"检测到 {numCores} 个核心槽位");
 
         string? seqResumePhase = null;
         List<int> offsets;
@@ -1645,6 +1879,9 @@ internal sealed class MainForm : Form
                 testRound = prev.TestRound;
                 _testMode = string.IsNullOrEmpty(prev.TestMode) ? SelectedMode() : prev.TestMode;
                 seqResumePhase = prev.SeqPhase;
+                if (!string.IsNullOrEmpty(prev.TestScope)) _testScope = prev.TestScope;
+                if (prev.ScopeCcd is int pc) _scopeCcd = pc;
+                if (prev.ScopeCores is { Count: > 0 } sc) _customCores = new List<int>(sc);
                 if (prev.DurationSeconds is int d) _durationSeconds = d;
                 if (prev.IterationsMap is { } m)
                 {
@@ -1682,6 +1919,7 @@ internal sealed class MainForm : Form
             {
                 SelectMode(_testMode);
                 ApplySettingsToUi();
+                RestyleScopeButtons();
                 _initialOffsetsLabel.Text = $"初始负压: [{string.Join(", ", preRecovery)}]";
             });
         }
@@ -1689,6 +1927,8 @@ internal sealed class MainForm : Form
         {
             _testMode = SelectedMode();
             seqResumePhase = null;
+            // 逐 CCD 模式正常启动时总是从 CCD0 开始；_scopeCcd 只在崩溃恢复时用作续跑起点
+            if (_testScope == "EACH") _scopeCcd = 0;
             offsets = RyzenSmu.ReadOffsets(numCores);
             testRound = 0;
             Log.Write($"当前负压: [{string.Join(", ", offsets)}]");
@@ -1705,92 +1945,132 @@ internal sealed class MainForm : Form
             _offsetsLabel.Text = $"当前负压: [{string.Join(", ", initSnapshot)}]";
         });
 
-        Log.Write($"测试参数: 每轮 {_durationSeconds} 秒");
-
         var token = _cts!.Token;
 
-        if (_testMode == "SEQ")
+        // 逐 CCD 模式下把整套测试对每个 CCD 各跑一遍；其余模式只跑一遍。
+        // 断电恢复时 _scopeCcd 记着上次跑到哪个 CCD，从那里接着来。
+        bool eachCcd = _testScope == "EACH" && CoreTopology.CcdCount > 1;
+        int scopeStart = eachCcd ? Math.Clamp(_scopeCcd, 0, CoreTopology.CcdCount - 1) : 0;
+        int scopeEnd = eachCcd ? CoreTopology.CcdCount - 1 : 0;
+
+        for (int pass = scopeStart; pass <= scopeEnd; pass++)
         {
-            (string name, string algo, int iters)[] phases =
-            {
-                ("VT3", "VSTv3", _iterations["VT3"]),
-                ("BKT", "BKT", _iterations["BKT"]),
-                ("SVT", "SVT", _iterations["SVT"]),
-            };
+            if (_stopRequested) break;
+            if (eachCcd) _scopeCcd = pass;
+            // 逐 CCD 时 CCD 号来自循环，单选某个 CCD 时来自用户的选择（此时循环只跑一趟，pass 恒为 0）
+            int ccd = eachCcd ? pass : _scopeCcd;
+            var (scopeLogical, scopeCores) = ResolveScope(eachCcd ? "CCD" : _testScope, ccd);
+            string scopeLabel = ScopeLabel(eachCcd ? "CCD" : _testScope, ccd);
 
-            int startIdx = 0;
-            if (!string.IsNullOrEmpty(seqResumePhase))
+            bool passOk = RunOnePass(scopeLogical, scopeCores, scopeLabel);
+            seqResumePhase = null;   // 下一个 CCD 从第一个阶段重新开始
+            if (!passOk) break;      // 本轮没跑完（取消／无法继续），不再往下一个 CCD 走
+            if (pass < scopeEnd)
             {
-                for (int i = 0; i < phases.Length; i++)
-                    if (phases[i].name == seqResumePhase) { startIdx = i; break; }
+                Log.Write($">>> CCD{pass} 测试完成，清理进程...");
+                YCruncher.Kill();
             }
+        }
 
-            for (int pi = startIdx; pi < phases.Length; pi++)
+        bool RunOnePass(List<int>? scopeLogical, List<int>? scopeCores, string scopeLabel)
+        {
+            bool passOk = true;
+            if (_testMode == "SEQ")
             {
-                if (_stopRequested) break;
-                var (name, algo, iters) = phases[pi];
+                (string name, string algo, int iters)[] phases =
+                {
+                    ("VT3", "VSTv3", _iterations["VT3"]),
+                    ("BKT", "BKT", _iterations["BKT"]),
+                    ("SVT", "SVT", _iterations["SVT"]),
+                };
 
-                Log.Write($"\n>>> 开始 {name} 测试 ({iters} 轮)");
+                int startIdx = 0;
+                if (!string.IsNullOrEmpty(seqResumePhase))
+                {
+                    for (int i = 0; i < phases.Length; i++)
+                        if (phases[i].name == seqResumePhase) { startIdx = i; break; }
+                }
+
+                for (int pi = startIdx; pi < phases.Length; pi++)
+                {
+                    if (_stopRequested) break;
+                    var (name, algo, iters) = phases[pi];
+
+                    Log.Write($"\n>>> 开始 {name} 测试 ({iters} 轮)");
+                    Workspace.SaveState(new TestState
+                    {
+                        Offsets = offsets,
+                        TestRound = testRound,
+                        TestMode = _testMode,
+                        SeqPhase = name,
+                        TestScope = _testScope,
+                        ScopeCcd = _scopeCcd,
+                        ScopeCores = _testScope == "CUSTOM" ? new List<int>(_customCores) : null,
+                        DurationSeconds = _durationSeconds,
+                        IterationsMap = new Dictionary<string, int>(_iterations),
+                        Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
+                    });
+
+                    bool ok;
+                    (ok, offsets) = YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
+                    if (!ok)
+                    {
+                        Log.Write($"{name} 测试未完成", "WARN");
+                        passOk = false;
+                        break;
+                    }
+                    testRound = 0;
+
+                    if (pi < phases.Length - 1)
+                    {
+                        Log.Write($">>> {name} 测试完成，清理进程...");
+                        YCruncher.Kill();
+                    }
+                }
+            }
+            else if (_testMode == "COMBO")
+            {
+                Log.Write($"\n>>> 开始组合测试 VT3+BKT+SVT 同跑 ({ComboRounds} 轮)");
                 Workspace.SaveState(new TestState
                 {
                     Offsets = offsets,
                     TestRound = testRound,
                     TestMode = _testMode,
-                    SeqPhase = name,
+                    TestScope = _testScope,
+                    ScopeCcd = _scopeCcd,
+                    ScopeCores = _testScope == "CUSTOM" ? new List<int>(_customCores) : null,
                     DurationSeconds = _durationSeconds,
                     IterationsMap = new Dictionary<string, int>(_iterations),
                     Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
                 });
 
                 bool ok;
-                (ok, offsets) = YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError);
-                if (!ok)
-                {
-                    Log.Write($"{name} 测试未完成", "WARN");
-                    break;
-                }
-                testRound = 0;
-
-                if (pi < phases.Length - 1)
-                {
-                    Log.Write($">>> {name} 测试完成，清理进程...");
-                    YCruncher.Kill();
-                }
+                (ok, offsets) = YCruncher.RunStressTest(ComboAlgos, ComboRounds, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
+                if (ok) Log.Write("组合测试全部完成！");
+                else passOk = false;
             }
-        }
-        else if (_testMode == "COMBO")
-        {
-            Log.Write($"\n>>> 开始组合测试 VT3+BKT+SVT 同跑 ({ComboRounds} 轮)");
-            Workspace.SaveState(new TestState
+            else
             {
-                Offsets = offsets,
-                TestRound = testRound,
-                TestMode = _testMode,
-                DurationSeconds = _durationSeconds,
-                IterationsMap = new Dictionary<string, int>(_iterations),
-                Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
-            });
+                var (algo, iters) = GetTestConfig(_testMode);
+                Workspace.SaveState(new TestState
+                {
+                    Offsets = offsets,
+                    TestRound = testRound,
+                    TestMode = _testMode,
+                    TestScope = _testScope,
+                    ScopeCcd = _scopeCcd,
+                    ScopeCores = _testScope == "CUSTOM" ? new List<int>(_customCores) : null,
+                    DurationSeconds = _durationSeconds,
+                    IterationsMap = new Dictionary<string, int>(_iterations),
+                    Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
+                });
 
-            bool ok;
-            (ok, offsets) = YCruncher.RunStressTest(ComboAlgos, ComboRounds, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError);
-            if (ok) Log.Write("组合测试全部完成！");
-        }
-        else
-        {
-            var (algo, iters) = GetTestConfig(_testMode);
-            Workspace.SaveState(new TestState
-            {
-                Offsets = offsets,
-                TestRound = testRound,
-                TestMode = _testMode,
-                DurationSeconds = _durationSeconds,
-                IterationsMap = new Dictionary<string, int>(_iterations),
-                Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
-            });
-
-            bool ok;
-            (ok, offsets) = YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError);
-            if (ok) Log.Write("测试全部完成！");
+                bool ok;
+                (ok, offsets) = YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
+                if (ok) Log.Write("测试全部完成！");
+                else passOk = false;
+            }
+            return passOk;
         }
 
         Log.Write("\n" + new string('=', 50));
@@ -1803,6 +2083,7 @@ internal sealed class MainForm : Form
             var sb = new StringBuilder();
             sb.AppendLine($"测试完成时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             sb.AppendLine($"测试模式: {_testMode}");
+            sb.AppendLine($"测试范围: {ScopeLabel(_testScope, _scopeCcd)}");
             sb.AppendLine();
             sb.AppendLine($"每轮时间: {_durationSeconds} 秒");
             sb.AppendLine(_testMode switch
@@ -1891,6 +2172,38 @@ internal sealed class MainForm : Form
         _roundsBox.Text = _singleRounds.ToString();
     }
 
+    /// <summary>把测试范围解析成 (要压的逻辑核, 对应物理核)。全部核心返回 (null, null)，
+    /// 表示走原有命令行路径，行为与加这个功能之前完全一致。</summary>
+    private (List<int>? logical, List<int>? physical) ResolveScope(string scope, int ccd)
+    {
+        switch (scope)
+        {
+            case "CCD":
+            {
+                var logical = CoreTopology.LogicalCoresOfCcd(ccd);
+                if (logical.Count == 0) return (null, null);   // 拓扑读不到就退回全核，不因此中断测试
+                return (logical, CoreTopology.PhysicalCoresOfCcd(ccd));
+            }
+            case "CUSTOM":
+            {
+                if (_customCores.Count == 0) return (null, null);
+                var logical = CoreTopology.LogicalCoresOfPhysical(_customCores);
+                if (logical.Count == 0) return (null, null);
+                return (logical, new List<int>(_customCores));
+            }
+            default:
+                return (null, null);
+        }
+    }
+
+    private string ScopeLabel(string scope, int ccd) => scope switch
+    {
+        "CCD" => $"CCD{ccd}",
+        "CUSTOM" => $"自定义核心 [{string.Join(", ", _customCores)}]",
+        "EACH" => "逐 CCD 依次",
+        _ => "全部核心",
+    };
+
     private string SelectedMode() => _selectedMode;
 
     private void SelectMode(string mode)
@@ -1911,6 +2224,7 @@ internal sealed class MainForm : Form
         if (_comboBtn != null) _comboBtn.Enabled = enabled;
         if (_autoAdjBtn != null) _autoAdjBtn.Enabled = enabled;
         if (_manualAdjBtn != null) _manualAdjBtn.Enabled = enabled;
+        foreach (var b in _scopeBtns) b.Enabled = enabled;
     }
 
     private void ClearLog()

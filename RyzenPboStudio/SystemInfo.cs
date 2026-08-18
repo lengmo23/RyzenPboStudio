@@ -219,9 +219,21 @@ internal static class SystemInfo
         catch { return "—"; }
     }
 
+    /// <summary>物理内存总字节数；取不到返回 0。</summary>
+    public static ulong TotalPhysicalBytes()
+    {
+        try
+        {
+            if (!GetPhysicallyInstalledSystemMemory(out ulong totalKb)) return 0;
+            return totalKb * 1024UL;
+        }
+        catch { return 0; }
+    }
+
     // ── GetLogicalProcessorInformation 取物理核心数 ──────────────────────────
 
     private const int RelationProcessorCore = 0;
+    private const int RelationCache = 2;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SystemLogicalProcessorInformation
@@ -229,8 +241,14 @@ internal static class SystemInfo
         public UIntPtr ProcessorMask;
         public uint Relationship;
         public uint Padding;       // 对齐到 8 字节，使后面的联合体落在偏移 16
-        public ulong Reserved0;
-        public ulong Reserved1;
+        // 偏移 16 起是联合体。Relationship==RelationCache 时是 CACHE_DESCRIPTOR：
+        // Level/Associativity/LineSize/Size/Type，其余关系类型下这两个字段无意义。
+        public byte CacheLevel;
+        public byte CacheAssociativity;
+        public ushort CacheLineSize;
+        public uint CacheSize;
+        public uint CacheType;
+        public uint Reserved1;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -306,6 +324,53 @@ internal static class SystemInfo
             Marshal.FreeHGlobal(buffer);
         }
     }
+
+    /// <summary>
+    /// 各 CCD 的逻辑核掩码，按最低逻辑核号升序（即 CCD0、CCD1…）。
+    /// 依据是共享同一块 L3 的逻辑核集合——Ryzen 上一个 CCD 一块 L3，
+    /// 比按「物理核序号 / 每CCD核数」硬算更可靠，熔丝屏蔽核的型号也能正确分组。
+    /// 拿不到拓扑时返回空表，由调用方回退。
+    /// </summary>
+    public static List<ulong> GetCcdLogicalMasks()
+    {
+        var masks = new List<ulong>();
+        uint length = 0;
+        GetLogicalProcessorInformation(IntPtr.Zero, ref length);
+        if (length == 0) return masks;
+
+        IntPtr buffer = Marshal.AllocHGlobal((int)length);
+        try
+        {
+            if (!GetLogicalProcessorInformation(buffer, ref length))
+                return masks;
+
+            int size = Marshal.SizeOf<SystemLogicalProcessorInformation>();
+            int n = (int)(length / size);
+            for (int i = 0; i < n; i++)
+            {
+                var item = Marshal.PtrToStructure<SystemLogicalProcessorInformation>(buffer + i * size);
+                if (item.Relationship == RelationCache && item.CacheLevel == 3)
+                    masks.Add((ulong)item.ProcessorMask);
+            }
+            masks.Sort((a, b) => LowestBit(a).CompareTo(LowestBit(b)));
+            return masks;
+        }
+        catch
+        {
+            return new List<ulong>();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static int LowestBit(ulong mask)
+    {
+        for (int i = 0; i < 64; i++)
+            if ((mask & (1UL << i)) != 0) return i;
+        return int.MaxValue;
+    }
 }
 
 /// <summary>逻辑核→物理核映射的缓存包装，拿不到拓扑时回退到旧的 c/2 假设。</summary>
@@ -324,5 +389,51 @@ internal static class CoreTopology
         if (_map != null && logical >= 0 && logical < _map.Length && _map[logical] >= 0)
             return _map[logical];
         return logical / 2; // 回退：每核 2 线程的旧假设
+    }
+
+    // ── CCD 分组（按共享 L3 划分）──────────────────────────────────────────
+    private static List<ulong>? _ccdMasks;
+
+    private static List<ulong> CcdMasks
+    {
+        get
+        {
+            _ccdMasks ??= SystemInfo.GetCcdLogicalMasks();
+            return _ccdMasks;
+        }
+    }
+
+    /// <summary>CCD 数；拿不到 L3 拓扑时按 1 处理（UI 据此隐藏 CCD 选项）。</summary>
+    public static int CcdCount => Math.Max(1, CcdMasks.Count);
+
+    /// <summary>指定 CCD 的逻辑核列表（升序）。越界或拓扑不可用时返回空表。</summary>
+    public static List<int> LogicalCoresOfCcd(int ccd)
+    {
+        var result = new List<int>();
+        if (ccd < 0 || ccd >= CcdMasks.Count) return result;
+        ulong mask = CcdMasks[ccd];
+        for (int bit = 0; bit < 64; bit++)
+            if ((mask & (1UL << bit)) != 0) result.Add(bit);
+        return result;
+    }
+
+    /// <summary>指定 CCD 的物理核序号列表（升序），与报错解析用的物理核编号同一口径。</summary>
+    public static List<int> PhysicalCoresOfCcd(int ccd) =>
+        LogicalCoresOfCcd(ccd).Select(PhysicalOf).Distinct().OrderBy(x => x).ToList();
+
+    /// <summary>物理核序号 → 其全部逻辑核（升序）。找不到时回退到 2n / 2n+1。</summary>
+    public static List<int> LogicalCoresOfPhysical(IEnumerable<int> physicalCores)
+    {
+        var want = new HashSet<int>(physicalCores);
+        var result = new List<int>();
+        if (!_loaded) { _map = SystemInfo.GetLogicalToPhysicalMap(); _loaded = true; }
+        if (_map != null)
+        {
+            for (int lp = 0; lp < _map.Length; lp++)
+                if (_map[lp] >= 0 && want.Contains(_map[lp])) result.Add(lp);
+        }
+        if (result.Count == 0)
+            foreach (int ph in want.OrderBy(x => x)) { result.Add(ph * 2); result.Add(ph * 2 + 1); }
+        return result;
     }
 }
