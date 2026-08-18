@@ -187,13 +187,65 @@ internal static class RyzenSmu
     public static int? LastTdcLimit { get; private set; }
     public static int? LastEdcLimit { get; private set; }
 
-    internal const int GnrPptLimitIdx   = 2;
-    internal const int GnrPptCurrentIdx = 3;
-    internal const int GnrTdcLimitIdx   = 8;
-    internal const int GnrTdcCurrentIdx = 9;
-    internal const int GnrThmLimitIdx   = 10;
-    internal const int GnrEdcLimitIdx   = 63;
-    internal const int GnrEdcCurrentIdx = 64;
+    // PPT / TDC / THM 在 Raphael、DragonRange、GraniteRidge 三代表头位置一致，用绝对索引即可。
+    // EDC 与每核电压、VDDCR_CPU 遥测组的位置逐型号不同，见 ProbePtLayout。
+    internal const int PtPptLimitIdx   = 2;
+    internal const int PtPptCurrentIdx = 3;
+    internal const int PtTdcLimitIdx   = 8;
+    internal const int PtTdcCurrentIdx = 9;
+    internal const int PtThmLimitIdx   = 10;
+
+    /// <summary>PM Table 中随型号浮动的偏移。VDDCR_CPU 遥测组起点 Raphael 在 0xB8、DragonRange 在 0xBC、
+    /// GraniteRidge 在 0xC0——同为 Zen4 也能差一个 float，每核电压段更是三者互异，按代号写死覆盖不全。</summary>
+    internal sealed class PtLayout
+    {
+        public int CpuVidIdx;        // 遥测组 {VID, TEL, I, P, TEMP} 的起点
+        public int CpuTelIdx;        // 组内第 2 项，实测电压：TEL × I = P 恒成立
+        public int EdcLimitIdx;
+        public int EdcCurrentIdx;
+        public int PerCoreVoltIdx;   // 每核电压段起点；-1 表示未探到，此时每核 VID 不显示
+    }
+
+    private static bool IsPtVolt(float v) => v is >= 0.20f and <= 1.60f;
+    private static bool IsPtTemp(float v) => v is >= 15f and <= 115f;
+
+    /// <summary>探测 PM Table 布局，探不中返回 null（调用方走回退路径）。
+    /// 遥测组用表头两个镜像值定位：idx19 与组内 VID、idx20 与组内功率都是逐位相等的同一个 float，
+    /// 不需要容差，因此不会被空闲态的低电流噪声干扰。每核电压段用「cores 个电压紧跟同样长的温度段」
+    /// 定位——两段在表里始终相邻，该组合在 7800X3D / 7945HX / 9950X 三份实机转储上均唯一命中。</summary>
+    internal static PtLayout? ProbePtLayout(float[]? t, int cores)
+    {
+        if (t == null || cores <= 0 || t.Length < 70) return null;
+
+        float vidRef = t[19], pwrRef = t[20];
+        if (vidRef is not (> 0.3f and < 2.0f) || pwrRef <= 0) return null;
+
+        int baseIdx = -1;
+        for (int i = 24; i + 4 < t.Length && i < 200; i++)
+        {
+            if (t[i] == vidRef && t[i + 3] == pwrRef && t[i + 2] > 0) { baseIdx = i; break; }
+        }
+        if (baseIdx < 0 || baseIdx + 16 >= t.Length) return null;
+
+        int voltIdx = -1;
+        for (int i = 24; i + 2 * cores <= t.Length; i++)
+        {
+            if (IsPtVolt(t[i - 1])) continue;   // 段首之前必须断开，避免落在长电压段的中间
+            bool ok = true;
+            for (int k = 0; k < cores && ok; k++) ok = IsPtVolt(t[i + k]);
+            for (int k = 0; k < cores && ok; k++) ok = IsPtTemp(t[i + cores + k]);
+            if (ok) { voltIdx = i; break; }
+        }
+
+        return new PtLayout
+        {
+            CpuVidIdx      = baseIdx,
+            CpuTelIdx      = baseIdx + 1,
+            EdcLimitIdx    = baseIdx + 15,
+            EdcCurrentIdx  = baseIdx + 16,
+            PerCoreVoltIdx = voltIdx,
+        };
+    }
 
     /// <summary>设置 PPT（持续功率上限，W）。</summary>
     public static bool SetPptLimit(uint watts)
@@ -268,13 +320,15 @@ internal static class RyzenSmu
             lock (IoLock)
             {
                 var cpu = GetCpu();
-                if (cpu.info.codeName == Cpu.CodeName.GraniteRidge
-                    && cpu.RefreshPowerTable() == SMU.Status.OK
-                    && cpu.powerTable?.Table is { } tbl && tbl.Length > GnrEdcCurrentIdx)
+                var topo = cpu.info.topology;
+                int coreCount = (int)(topo.physicalCores > 0 ? topo.physicalCores : topo.cores);
+                if (cpu.RefreshPowerTable() == SMU.Status.OK
+                    && cpu.powerTable?.Table is { } tbl
+                    && ProbePtLayout(tbl, coreCount) is { } lay && tbl.Length > lay.EdcLimitIdx)
                 {
-                    return ((int)Math.Round(tbl[GnrPptLimitIdx]),
-                            (int)Math.Round(tbl[GnrEdcLimitIdx]),
-                            (int)Math.Round(tbl[GnrTdcLimitIdx]));
+                    return ((int)Math.Round(tbl[PtPptLimitIdx]),
+                            (int)Math.Round(tbl[lay.EdcLimitIdx]),
+                            (int)Math.Round(tbl[PtTdcLimitIdx]));
                 }
 
                 var sys = cpu.GetSystemPowerLimit();

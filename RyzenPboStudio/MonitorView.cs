@@ -113,17 +113,12 @@ internal sealed class MonitorView : UserControl
     private readonly double regBaseMHz;  // 注册表 ~MHz：HAL 启动时实测写入，已含外频
     private readonly string installedMemory;
     private readonly double p0BaseMHz;   // P0 标称基频，用于 ΔAPERF/ΔMPERF×P0 算忙时频率（本机 TSC 不可读）
-    private readonly bool hasPtVolt;
-    private readonly int perCoreVoltIdx;
     private readonly TelVoltCalib telCalib;
-    private const int SingleCcdVoltIdx = 0x4D4 / 4;
-    private const int DualCcdVoltIdx   = 0x4F4 / 4;
-    // PM Table 头部的全局 VDDCR_CPU 遥测四元组：0xC0 请求 VID / 0xC4 实测电压(TEL) / 0xC8 电流 / 0xCC 功率。
-    // 由 0xC4×0xC8=0xCC 验证（SOC 组 0xD4.. 与 MISC 组 0xE8.. 结构相同、验算同样成立），
-    // 位于表头，单/双 CCD 版本布局一致。逐核 0x4D4/0x4F4 那组是各核经 LDO 后的 die 电压，
-    // 恒低于上游请求 VID 约 10mV，取其最大值并不等于整体 VID。
-    private const int CpuVidIdx = 0xC0 / 4;
-    private const int CpuTelIdx = 0xC4 / 4;
+    // PM Table 头部的全局 VDDCR_CPU 遥测组 {VID, TEL, I, P, TEMP}，由 TEL×I=P 验证（SOC 组与 MISC 组
+    // 结构相同、验算同样成立）。组起点逐型号浮动（Raphael 0xB8 / DragonRange 0xBC / GraniteRidge 0xC0），
+    // 每核电压段亦然，故首次读到表时由 RyzenSmu.ProbePtLayout 探测一次。每核电压是各核经 LDO 后的
+    // die 电压，恒低于上游请求 VID 约 10mV，取其最大值并不等于整体 VID。
+    private RyzenSmu.PtLayout? ptLayout;
     /// <summary>身份条／CCD 行／限制条共用的栅格列数，取限制条格数；三条共用同一次取整才能逐条对齐。</summary>
     private const int StripCols = 8;
 
@@ -169,9 +164,6 @@ internal sealed class MonitorView : UserControl
         catch { bclkPll = bclk = 0; }
         p0BaseMHz = regBaseMHz > 0 ? regBaseMHz
                   : (p0DefMHz > 0 && bclk > 0 ? p0DefMHz * bclk / 100.0 : 0);
-        hasPtVolt   = cpu.info.codeName == Cpu.CodeName.GraniteRidge;
-        perCoreVoltIdx = ccds == 1 ? SingleCcdVoltIdx : DualCcdVoltIdx;
-
         uint tv = 0;
         try { lock (RyzenSmu.IoLock) tv = cpu.GetTableVersion().TableVersion; }
         catch { /* 版本读不到则校准仅本次会话内有效 */ }
@@ -454,7 +446,35 @@ internal sealed class MonitorView : UserControl
         catch { return 0; }
     }
 
-    // 后台采样：每秒一窗。FREQ=HW P-state FID 快照(0xC0010293，回退 ΔAPERF/ΔMPERF×P0)，EFFREQ=有效频率(ΔAPERF/Δt)。
+    /// <summary>在一次亲和性绑定内连读该逻辑线程的 APERF / MPERF / TSC，使三者成为同一时刻的原子快照。
+    /// 分三次 ReadMsrTx 会各自切换两次亲和性，满载核上每次切换都要排队等一个调度时间片，
+    /// ΔAPERF 与 ΔTSC 覆盖的窗口因此错开、共模抵消不干净；合并后每线程只切 2 次而非 6 次。</summary>
+    private bool ReadCounters(int i, int thread, out ulong aperf, out ulong mperf, out ulong tsc)
+    {
+        aperf = mperf = tsc = 0;
+        try
+        {
+            int os = i >= 0 && i < slotOs.Length ? slotOs[i] : i;
+            if (os < 0) return false;   // 熔丝屏蔽槽无 OS 逻辑核
+            int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
+            if (thread < 0 || thread >= tpc) return false;
+
+            var prev = ThreadAffinity.Set(GroupAffinity.Single(0, os * tpc + thread));
+            if (prev == GroupAffinity.Undefined) return false;
+            try
+            {
+                uint eax = 0, edx = 0;
+                if (cpu.ReadMsr(0xC00000E8, ref eax, ref edx)) aperf = ((ulong)edx << 32) | eax;
+                if (cpu.ReadMsr(0xC00000E7, ref eax, ref edx)) mperf = ((ulong)edx << 32) | eax;
+                if (cpu.ReadMsr(0x10,       ref eax, ref edx)) tsc   = ((ulong)edx << 32) | eax;
+            }
+            finally { ThreadAffinity.Set(prev); }
+            return true;
+        }
+        catch { return false; }
+    }
+
+    // 后台采样：每秒一窗。FREQ=HW P-state FID 快照(0xC0010293，回退 ΔAPERF/ΔMPERF×P0)，EFFREQ=有效频率(ΔAPERF/ΔTSC×TSC频率，TSC 不可读时回退墙钟)。
     // APERF/MPERF/TSC 逐 SMT 线程采样（每逻辑线程独立计数，只读线程 0 会漏掉只跑在第二线程上的负载），
     // 每核取最忙线程作为该核读数。只在窗口首尾各采一次（不在 40ms 循环里读），避免高频 affinity 读 MSR
     // 反复唤醒空闲核、把它们拉到 boost 污染频率读数。窗口内仅采 PM Table 每核电压峰值。
@@ -469,11 +489,21 @@ internal sealed class MonitorView : UserControl
         var coClock = Stopwatch.StartNew();
         long coNextMs = 0;
 
+        // TSC 频率自校准：TSC 是恒定频率、不随负载与升降频变化，所以固定拿一个参考线程跨轮累积
+        // 一个长窗口算 ΔTSC/Δt 就够。窗口越长，单次绑核读那几十毫秒的采样偏移占比越小，
+        // 跑几分钟后优于 0.01%。注册表 ~MHz 是 HAL 开机时实测写入的，开机后再改 BCLK
+        // （外置时钟发生器的板子）它就偏了，故标定成功后优先用标定值。
+        int tscRefSlot = -1;
+        long tscBaseTick = 0;
+        ulong tscBase = 0;
+        double tscMHz = 0;
+
         while (running)
         {
             int lp = n * tpc;
             var startA = new ulong[lp]; var startM = new ulong[lp]; var startT = new ulong[lp];
             var lastA  = new ulong[lp]; var lastM  = new ulong[lp]; var lastT  = new ulong[lp];
+            var startTick = new long[lp]; var lastTick = new long[lp];
             var maxVolt = new double[n];
             var psSnap = new ulong[n];
             float[]? ptSnap = null;
@@ -486,9 +516,8 @@ internal sealed class MonitorView : UserControl
                     for (int t = 0; t < tpc; t++)
                     {
                         int x = i * tpc + t;
-                        startA[x] = ReadMsr(i, 0xC00000E8, t);
-                        startM[x] = ReadMsr(i, 0xC00000E7, t);
-                        startT[x] = ReadMsr(i, 0x10, t);
+                        startTick[x] = Stopwatch.GetTimestamp();
+                        ReadCounters(i, t, out startA[x], out startM[x], out startT[x]);
                     }
             }
 
@@ -496,36 +525,37 @@ internal sealed class MonitorView : UserControl
             var swWin = Stopwatch.StartNew();
             do
             {
-                if (hasPtVolt)
+                lock (RyzenSmu.IoLock)
                 {
-                    lock (RyzenSmu.IoLock)
+                    bool pmRefreshed = false;
+                    try { pmRefreshed = cpu.RefreshPowerTable() == SMU.Status.OK; }
+                    catch { /* 本轮 PM Table 不可用 */ }
+                    if (pmRefreshed && cpu.powerTable?.Table is { } tbl)
                     {
-                        bool pmRefreshed = false;
-                        try { pmRefreshed = cpu.RefreshPowerTable() == SMU.Status.OK; }
-                        catch { /* 本轮 PM Table 不可用 */ }
-                        if (pmRefreshed && cpu.powerTable?.Table is { } tbl && tbl.Length > perCoreVoltIdx + n)
+                        ptLayout ??= RyzenSmu.ProbePtLayout(tbl, n);
+                        if (ptLayout is { } lay)
                         {
-                            for (int i = 0; i < n; i++)
-                            {
-                                double v = tbl[perCoreVoltIdx + i];
-                                if (v > maxVolt[i]) maxVolt[i] = v;
-                            }
+                            if (lay.PerCoreVoltIdx >= 0 && tbl.Length > lay.PerCoreVoltIdx + n)
+                                for (int i = 0; i < n; i++)
+                                {
+                                    double v = tbl[lay.PerCoreVoltIdx + i];
+                                    if (v > maxVolt[i]) maxVolt[i] = v;
+                                }
                             // TEL 取 VID 峰值那一帧的配对值：两者各自取峰会落在不同帧，
                             // 噪声放大后会出现 TEL > VID 的倒挂（Vdroop 为负）。
-                            if (tbl.Length > CpuTelIdx && tbl[CpuVidIdx] > maxCpuVid)
+                            if (tbl[lay.CpuVidIdx] > maxCpuVid)
                             {
-                                maxCpuVid = tbl[CpuVidIdx];
-                                maxCpuTel = tbl[CpuTelIdx];
+                                maxCpuVid = tbl[lay.CpuVidIdx];
+                                maxCpuTel = tbl[lay.CpuTelIdx];
                             }
-                            ptSnap = (float[])tbl.Clone();   // 供 TEL 校准/本地读取（lock 外使用）
                         }
+                        ptSnap = (float[])tbl.Clone();   // 供 TEL 校准/本地读取（lock 外使用）
                     }
                 }
                 Thread.Sleep(40);
             } while (swWin.ElapsedMilliseconds < 500 && running);   // 贴近 HWiNFO ~500ms 刷新节奏
 
             if (!running) break;
-            double winSec = swWin.Elapsed.TotalSeconds;
 
             // 窗口终点：各核每个 SMT 线程的 APERF / MPERF / TSC
             lock (RyzenSmu.IoLock)
@@ -535,18 +565,40 @@ internal sealed class MonitorView : UserControl
                     for (int t = 0; t < tpc; t++)
                     {
                         int x = i * tpc + t;
-                        lastA[x] = ReadMsr(i, 0xC00000E8, t);
-                        lastM[x] = ReadMsr(i, 0xC00000E7, t);
-                        lastT[x] = ReadMsr(i, 0x10, t);
+                        lastTick[x] = Stopwatch.GetTimestamp();
+                        ReadCounters(i, t, out lastA[x], out lastM[x], out lastT[x]);
                     }
                     psSnap[i] = ReadMsr(i, 0xC0010293);   // HW P-state 为物理核共享，读线程 0 即可
+                }
+            }
+
+            // TSC 频率标定：参考线程首轮定基准，之后累积到 2 秒以上才出值。TSC 回退（睡眠唤醒后
+            // 计数器重置）或标定值偏离注册表 ~MHz 超过 10% 均视为跳变，弃值重设基准。
+            if (tscRefSlot < 0)
+                for (int i = 0; i < n; i++)
+                    if (startT[i * tpc] > 0 && lastT[i * tpc] > 0) { tscRefSlot = i; break; }
+            if (tscRefSlot >= 0 && lastT[tscRefSlot * tpc] is var refTsc and > 0)
+            {
+                long refTick = lastTick[tscRefSlot * tpc];
+                if (tscBase == 0 || refTsc < tscBase) { tscBase = refTsc; tscBaseTick = refTick; }
+                else
+                {
+                    double calSec = (refTick - tscBaseTick) / (double)Stopwatch.Frequency;
+                    if (calSec >= 2.0)
+                    {
+                        double mhz = (refTsc - tscBase) / calSec / 1e6;
+                        if (p0BaseMHz <= 0 || Math.Abs(mhz - p0BaseMHz) / p0BaseMHz < 0.10) tscMHz = mhz;
+                        else { tscBase = refTsc; tscBaseTick = refTick; tscMHz = 0; }
+                    }
                 }
             }
 
             var busyFreq = new double[n];
             var effFreq  = new double[n];
             var occ      = new double[n];
-            double p0Hz = p0BaseMHz * 1e6;
+            // APERF/MPERF 都以 TSC 频率为基准计数，故三者共用同一个频率基准
+            double tscFreqMHz = tscMHz > 0 ? tscMHz : p0BaseMHz;
+            double p0Hz = tscFreqMHz * 1e6;
             for (int i = 0; i < n; i++)
             {
                 // 物理核的读数取各 SMT 线程中最忙的那个：单线程负载时另一线程处于 halt、计数几乎不涨，
@@ -556,16 +608,25 @@ internal sealed class MonitorView : UserControl
                 for (int t = 0; t < tpc; t++)
                 {
                     int x = i * tpc + t;
-                    ulong dA = lastA[x] - startA[x];
-                    ulong dM = lastM[x] - startM[x];
-                    ulong dT = lastT[x] - startT[x];
+                    // 单个 MSR 读失败会返回 0，无符号相减会下溢成天文数字（ΔAPERF 下溢就是一个
+                    // 上千万 MHz 的假读数），故增量必须单调才采用，否则按不可用处理显示 "-"。
+                    ulong dA = lastA[x] >= startA[x] ? lastA[x] - startA[x] : 0;
+                    ulong dM = lastM[x] >= startM[x] ? lastM[x] - startM[x] : 0;
+                    ulong dT = lastT[x] >= startT[x] ? lastT[x] - startT[x] : 0;
+                    // 该逻辑线程自己的首尾采样间隔：首尾快照都是逐核串行读的，满载时把采样线程调度到
+                    // 忙核上要等几十毫秒，两轮读取本身就要几百毫秒到一秒多。用统一的窗口时长当分母，
+                    // 会让越靠后读到的核虚高越多（空槽不耗时、不产生增量）。
+                    double sec = (lastTick[x] - startTick[x]) / (double)Stopwatch.Frequency;
 
-                    // EFFREQ 有效频率（含空闲）：ΔAPERF/Δt
-                    double eff = winSec > 0 ? dA / winSec / 1e6 : 0;
+                    // EFFREQ 有效频率（含空闲）：ΔAPERF/ΔTSC×TSC频率。TSC 与 APERF 在同一次绑定内读出，
+                    // 读得慢会让两者同比例变大、比值不变，分母不受采样耗时影响；
+                    // TSC 不可读(=0) 时才退回墙钟 ΔAPERF/Δt，那条路仍会被采样延迟污染。
+                    double eff = dT > 0 && tscFreqMHz > 0 ? (double)dA / dT * tscFreqMHz
+                               : (sec > 0 ? dA / sec / 1e6 : 0);
 
                     // 占用率：ΔMPERF/ΔTSC；本机 TSC 不可读(=0) 时用 ΔMPERF/(P0基频×Δt)
                     double oc = dT > 0 ? Math.Min(100.0, (double)dM / dT * 100.0)
-                              : (p0Hz > 0 && winSec > 0 ? Math.Min(100.0, dM / (p0Hz * winSec) * 100.0) : 0);
+                              : (p0Hz > 0 && sec > 0 ? Math.Min(100.0, dM / (p0Hz * sec) * 100.0) : 0);
 
                     if (eff > bestEff) bestEff = eff;
                     if (oc > bestOcc) bestOcc = oc;
@@ -575,9 +636,9 @@ internal sealed class MonitorView : UserControl
                 effFreq[i] = bestEff;
                 occ[i] = bestOcc;
 
-                // FREQ 忙时频率(≈ HWiNFO Core Clock)：ΔAPERF/ΔMPERF × P0基频（活动时平均实频）。
-                // MPERF 或 P0 不可用时回退有效频率，避免显示为空。
-                busyFreq[i] = (bestM > 0 && p0BaseMHz > 0) ? (double)bestA / bestM * p0BaseMHz : effFreq[i];
+                // FREQ 忙时频率(≈ HWiNFO Core Clock)：ΔAPERF/ΔMPERF × TSC频率（活动时平均实频）。
+                // MPERF 或频率基准不可用时回退有效频率，避免显示为空。
+                busyFreq[i] = (bestM > 0 && tscFreqMHz > 0) ? (double)bestA / bestM * tscFreqMHz : effFreq[i];
             }
 
             // FREQ 优先用 HW P-state FID 快照（MSR 0xC0010293，与 HWiNFO "Core N Clock" 同源同口径）：
@@ -648,15 +709,15 @@ internal sealed class MonitorView : UserControl
 
                 pptCurrent = tdcCurrent = edcCurrent = 0;
                 pptLimit = tdcLimit = edcLimit = thmLimit = 0;
-                if (hasPtVolt && cpu.powerTable?.Table is { } tbl && tbl.Length > RyzenSmu.GnrEdcCurrentIdx)
+                if (ptLayout is { } ptLay && cpu.powerTable?.Table is { } tbl && tbl.Length > ptLay.EdcCurrentIdx)
                 {
-                    pptCurrent = tbl[RyzenSmu.GnrPptCurrentIdx];
-                    pptLimit   = (int)Math.Round(tbl[RyzenSmu.GnrPptLimitIdx]);
-                    tdcCurrent = tbl[RyzenSmu.GnrTdcCurrentIdx];
-                    tdcLimit   = (int)Math.Round(tbl[RyzenSmu.GnrTdcLimitIdx]);
-                    edcCurrent = tbl[RyzenSmu.GnrEdcCurrentIdx];
-                    edcLimit   = (int)Math.Round(tbl[RyzenSmu.GnrEdcLimitIdx]);
-                    thmLimit   = (int)Math.Round(tbl[RyzenSmu.GnrThmLimitIdx]);
+                    pptCurrent = tbl[RyzenSmu.PtPptCurrentIdx];
+                    pptLimit   = (int)Math.Round(tbl[RyzenSmu.PtPptLimitIdx]);
+                    tdcCurrent = tbl[RyzenSmu.PtTdcCurrentIdx];
+                    tdcLimit   = (int)Math.Round(tbl[RyzenSmu.PtTdcLimitIdx]);
+                    edcCurrent = tbl[ptLay.EdcCurrentIdx];
+                    edcLimit   = (int)Math.Round(tbl[ptLay.EdcLimitIdx]);
+                    thmLimit   = (int)Math.Round(tbl[RyzenSmu.PtThmLimitIdx]);
                 }
                 else
                 {
