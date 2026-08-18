@@ -120,6 +120,22 @@ internal static class RyzenSmu
     // SetPsmMargin 编码的逆：CO 负压存于返回值低 16 位补码。
     private static int DecodeMargin(uint raw) => (short)(raw & 0xffff);
 
+    /// <summary>
+    /// 读单核 CO 负压；失败返回 null。SMU 邮箱被其它软件（HWiNFO / Ryzen Master）或本进程其它命令占用时
+    /// 事务会返回非 OK，ZenStates 随即把 args 清零，直接当 0 用会让读数在真值与 0 之间乱跳，所以重试几次再放弃。
+    /// 调用方需持有 <see cref="IoLock"/>。
+    /// </summary>
+    public static int? TryReadMargin(Cpu cpu, uint ccd, uint core)
+    {
+        uint mask = cpu.MakeCoreMask(core, ccd, 0);
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            uint? raw = cpu.GetPsmMarginSingleCore(mask);
+            if (raw.HasValue) return DecodeMargin(raw.Value);
+        }
+        return null;
+    }
+
     /// <summary>读取当前各物理核心负压值；读取失败的核心返回 0。</summary>
     public static List<int> ReadOffsets(int numCores)
     {
@@ -133,8 +149,7 @@ internal static class RyzenSmu
                 {
                     if (IsSlotDisabledNoLock(cpu, i)) { result.Add(0); continue; }
                     var (ccd, core) = MapIndex(cpu, i);
-                    uint? raw = cpu.GetPsmMarginSingleCore(cpu.MakeCoreMask(core, ccd, 0));
-                    result.Add(raw.HasValue ? DecodeMargin(raw.Value) : 0);
+                    result.Add(TryReadMargin(cpu, ccd, core) ?? 0);
                 }
                 return result;
             }

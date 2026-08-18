@@ -463,6 +463,12 @@ internal sealed class MonitorView : UserControl
         int n = (int)cores;
         int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
 
+        // CO 是设定值不是实时遥测，没必要每轮全核读一遍：读得越密越容易撞上别人占用 SMU 邮箱。
+        // 缓存跨轮保留最近一次读到的有效值，读失败时沿用它而不是显示 0。
+        var coCache = new int[n];
+        var coClock = Stopwatch.StartNew();
+        long coNextMs = 0;
+
         while (running)
         {
             int lp = n * tpc;
@@ -611,18 +617,24 @@ internal sealed class MonitorView : UserControl
             double fclk, uclk;
             lock (RyzenSmu.IoLock)
             {
-                // AMD CO（设定值，每秒读一次）
-                co = new int[n];
-                for (int i = 0; i < n; i++)
+                // AMD CO（设定值，每 2s 全核读一次；其余轮次直接用缓存）
+                if (coClock.ElapsedMilliseconds >= coNextMs)
                 {
-                    uint ccd = (uint)i / coresPerCcd, core = (uint)i % coresPerCcd;
-                    try
+                    for (int i = 0; i < n; i++)
                     {
-                        uint? raw = cpu.GetPsmMarginSingleCore(cpu.MakeCoreMask(core, ccd, 0));
-                        co[i] = raw.HasValue ? (short)(raw.Value & 0xffff) : 0;
+                        if (slotDisabled[i]) continue;   // 熔丝屏蔽槽读不出 CO，白发请求只会加重邮箱争用
+                        uint ccd = (uint)i / coresPerCcd, core = (uint)i % coresPerCcd;
+                        try
+                        {
+                            // 读失败保留上一次有效值：写 0 会让界面在真值与 0 之间乱跳。
+                            int? margin = RyzenSmu.TryReadMargin(cpu, ccd, core);
+                            if (margin.HasValue) coCache[i] = margin.Value;
+                        }
+                        catch { /* 保留上一次有效值 */ }
                     }
-                    catch { co[i] = 0; }
+                    coNextMs = coClock.ElapsedMilliseconds + 2000;
                 }
+                co = (int[])coCache.Clone();
 
                 // 温度
                 ccdTemp = new float[ccds];
