@@ -532,7 +532,10 @@ internal sealed class MonitorView : UserControl
                     catch { /* 本轮 PM Table 不可用 */ }
                     if (pmRefreshed && cpu.powerTable?.Table is { } tbl)
                     {
-                        ptLayout ??= RyzenSmu.ProbePtLayout(tbl, n);
+                        // 每核电压段探不中时不锁定这份残缺布局：屏蔽槽/深度空闲会让某一帧匹配不上，
+                        // 下一帧还有机会。探到完整布局后才停止重试。
+                        if (ptLayout is not { PerCoreVoltIdx: >= 0 })
+                            ptLayout = RyzenSmu.ProbePtLayout(tbl, n) ?? ptLayout;
                         if (ptLayout is { } lay)
                         {
                             if (lay.PerCoreVoltIdx >= 0 && tbl.Length > lay.PerCoreVoltIdx + n)
