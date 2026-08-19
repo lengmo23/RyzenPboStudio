@@ -209,10 +209,18 @@ internal static class RyzenSmu
     private static bool IsPtVolt(float v) => v is >= 0.20f and <= 1.60f;
     private static bool IsPtTemp(float v) => v is >= 15f and <= 115f;
 
+    /// <summary>该槽位是否被熔丝屏蔽。每核段按槽位排列、屏蔽槽填 0，探测时必须跳过这些位置，
+    /// 否则 9900X3D / 7900X 这类带空洞的型号永远凑不出 cores 个连续的合法电压。
+    /// 槽位表尚未建立时按全部有效处理（保持与旧判据一致）。</summary>
+    private static bool IsSlotMaskedNoLock(int slot) =>
+        _slotDisabled is { } d && slot >= 0 && slot < d.Length && d[slot];
+
     /// <summary>探测 PM Table 布局，探不中返回 null（调用方走回退路径）。
     /// 遥测组用表头两个镜像值定位：idx19 与组内 VID、idx20 与组内功率都是逐位相等的同一个 float，
     /// 不需要容差，因此不会被空闲态的低电流噪声干扰。每核电压段用「cores 个电压紧跟同样长的温度段」
-    /// 定位——两段在表里始终相邻，该组合在 7800X3D / 7945HX / 9950X 三份实机转储上均唯一命中。</summary>
+    /// 定位——两段在表里始终相邻，该组合在 7800X3D / 7945HX / 9950X 三份实机转储上均唯一命中。
+    /// cores 传的是槽位数而非有效核数：每核段按槽位排列，屏蔽槽填 0，故这些位置不参与匹配。
+    /// 每核段探不中时 PerCoreVoltIdx 为 -1，调用方应继续重试而不是锁定这份残缺布局。</summary>
     internal static PtLayout? ProbePtLayout(float[]? t, int cores)
     {
         if (t == null || cores <= 0 || t.Length < 70) return null;
@@ -232,8 +240,8 @@ internal static class RyzenSmu
         {
             if (IsPtVolt(t[i - 1])) continue;   // 段首之前必须断开，避免落在长电压段的中间
             bool ok = true;
-            for (int k = 0; k < cores && ok; k++) ok = IsPtVolt(t[i + k]);
-            for (int k = 0; k < cores && ok; k++) ok = IsPtTemp(t[i + cores + k]);
+            for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtVolt(t[i + k]);
+            for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtTemp(t[i + cores + k]);
             if (ok) { voltIdx = i; break; }
         }
 
