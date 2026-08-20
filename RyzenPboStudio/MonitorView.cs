@@ -720,7 +720,7 @@ internal sealed class MonitorView : UserControl
                 ccdTemp = new float[ccds];
                 for (uint c = 0; c < ccds; c++)
                 {
-                    try { ccdTemp[c] = cpu.GetSingleCcdTemperature(c) ?? 0; }
+                    try { ccdTemp[c] = RyzenSmu.ReadCcdTemperature(c); }
                     catch { ccdTemp[c] = 0; }
                 }
                 try { tctl = cpu.GetCpuTemperature() ?? 0; }

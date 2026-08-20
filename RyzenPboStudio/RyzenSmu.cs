@@ -431,6 +431,38 @@ internal static class RyzenSmu
         }
     }
 
+    // Vermeer 的 CCD 温度寄存器沿用 Zen2 的地址。ZenStates 的 GetSingleCcdTemperature 按
+    // family >= 19H 一刀切选了 Raphael 的 0x59B08，而 Vermeer 同为 19H（model 0x21），
+    // 于是读到的值算出的温度越界、被当作无效返回 0，界面上 HOT 一直是 "--"。
+    // 5800X3D 实测：0x59954 得 51.75°C，同时刻 Tctl 51.88°C。
+    private const uint VermeerCcdTempReg = 0x00059954;
+
+    /// <summary>读取指定 CCD 的热点温度（°C）；读不到或超出量程返回 0。
+    /// 只有 Vermeer 走自己的寄存器，其余型号仍交给 ZenStates——那边对 Zen2/Zen4/Zen5 是对的，
+    /// 同为 Zen3 的 Chagall / Milan 手头没有实机可验，不擅自套用。</summary>
+    public static float ReadCcdTemperature(uint ccd)
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var cpu = GetCpu();
+                if (cpu.info.codeName != Cpu.CodeName.Vermeer)
+                    return cpu.GetSingleCcdTemperature(ccd) ?? 0;
+
+                uint raw = 0;
+                if (!cpu.ReadDwordEx(VermeerCcdTempReg + ccd * 4, ref raw)) return 0;
+                float t = (raw & 0xfff) * 0.125f - 305.0f;
+                return t is > 0f and < 125f ? t : 0;
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Write($"读取 CCD{ccd} 温度失败: {e.Message}", "WARN");
+            return 0;
+        }
+    }
+
     /// <summary>当前 CPU 的 SMU 是否有「设置全核 boost 上限」这条消息。
     /// Zen3（Vermeer）继承 Zen2 的消息表，那里只有读（GetBoostLimitFrequency 0x6E）没有写，
     /// Rsmu 与 MP1 两个 ID 都是 0——而 SetBoostLimitAllCore 并不校验 ID，会照发一条消息 0 给 SMU，
