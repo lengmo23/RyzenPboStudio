@@ -37,7 +37,7 @@ internal static class SystemInfo
         }
         catch
         {
-            // 检测失败时不阻断（与原版一致）
+            // 检测失败时不阻断启动
             return false;
         }
     }
@@ -263,9 +263,9 @@ internal static class SystemInfo
 
     /// <summary>
     /// 逻辑核 → 物理核 映射（下标=逻辑核号，值=物理核序号）。
-    /// 取代写死的 c/2：关闭 SMT、或线程数/核不为 2 时也正确。拿不到拓扑返回 null。
-    /// 注：基于 GetLogicalProcessorInformation，仅覆盖单个处理器组（≤64 逻辑核），
-    /// 对桌面 Ryzen 足够；超过 64 逻辑核的平台会回退到调用方的兜底逻辑。
+    /// 关闭 SMT、或每核线程数不为 2 时同样正确。拿不到拓扑返回 null。
+    /// 基于 GetLogicalProcessorInformation，仅覆盖单个处理器组（≤64 逻辑核），
+    /// 超过 64 逻辑核的平台会回退到调用方的兜底逻辑。
     /// </summary>
     public static int[]? GetLogicalToPhysicalMap()
     {
@@ -388,7 +388,7 @@ internal static class CoreTopology
         }
         if (_map != null && logical >= 0 && logical < _map.Length && _map[logical] >= 0)
             return _map[logical];
-        return logical / 2; // 回退：每核 2 线程的旧假设
+        return logical / 2; // 回退：假设每核 2 线程
     }
 
     // ── CCD 分组（按共享 L3 划分）──────────────────────────────────────────
