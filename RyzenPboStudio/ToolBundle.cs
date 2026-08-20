@@ -172,7 +172,7 @@ internal static class ToolBundle
             }
             catch
             {
-                // 主错误优先；残留的临时目录会在后续版本维护时清理。
+                // 主错误优先，临时目录残留不额外报错
             }
         }
     }

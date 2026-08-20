@@ -353,16 +353,16 @@ internal sealed class MonitorView : UserControl
             }
         }
 
-        // Zen3 没有 MSR CPPC（CPUID Fn8000_0008_EBX[27]=0，实测 5800X3D 上三个 MSR 均读回全 0），
-        // 退到取自 ACPI _CPC 的事件 55；两条路径同刻度，5700X 上逐核与 HYDRA 相符。
+        // Zen3 没有 MSR CPPC（CPUID Fn8000_0008_EBX[27]=0，三个 MSR 均读回全 0），
+        // 退到取自 ACPI _CPC 的事件 55，两条路径同刻度。
         if (perf.All(v => v == 0))
         {
             int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
             if (CppcReader.Read((int)cores, tpc) is { } fromLog) perf = fromLog;
         }
 
-        // BIOS 里关掉 CPPC 时每核报同一个值（实测 5800X3D 全核 133%），排名无从谈起：
-        // 归零当作读不到处理，CPPC 行显示 "-" 且不标金银核，好过按同分硬排出一金一银。
+        // BIOS 关掉 CPPC 时每核报同一个值，排名无从谈起：归零当作读不到，CPPC 行显示 "-"
+        // 且不标金银核，好过按同分硬排出一金一银。
         var livePerf = Enumerable.Range(0, (int)cores)
             .Where(i => slotDisabled.Length <= i || !slotDisabled[i])
             .Select(i => perf[i]).ToArray();
@@ -490,10 +490,10 @@ internal sealed class MonitorView : UserControl
         catch { return false; }
     }
 
-    // 后台采样：每秒一窗。FREQ=HW P-state FID 快照(0xC0010293，回退 ΔAPERF/ΔMPERF×P0)，EFFREQ=有效频率(ΔAPERF/ΔTSC×TSC频率，TSC 不可读时回退墙钟)。
-    // APERF/MPERF/TSC 逐 SMT 线程采样（每逻辑线程独立计数，只读线程 0 会漏掉只跑在第二线程上的负载），
-    // 每核取最忙线程作为该核读数。只在窗口首尾各采一次（不在 40ms 循环里读），避免高频 affinity 读 MSR
-    // 反复唤醒空闲核、把它们拉到 boost 污染频率读数。窗口内仅采 PM Table 每核电压峰值。
+    // 后台采样：每秒一窗。FREQ 取 HW P-state FID 快照(0xC0010293)，回退 ΔAPERF/ΔMPERF×P0；
+    // EFFREQ = ΔAPERF/ΔTSC×TSC频率，TSC 不可读时回退墙钟。
+    // APERF/MPERF/TSC 逐 SMT 线程采样，每核取最忙线程；只在窗口首尾各采一次，
+    // 避免高频 affinity 读 MSR 反复唤醒空闲核、把它们拉到 boost 污染频率读数。
     private void Worker()
     {
         int n = (int)cores;
@@ -505,10 +505,9 @@ internal sealed class MonitorView : UserControl
         var coClock = Stopwatch.StartNew();
         long coNextMs = 0;
 
-        // TSC 频率自校准：TSC 是恒定频率、不随负载与升降频变化，所以固定拿一个参考线程跨轮累积
-        // 一个长窗口算 ΔTSC/Δt 就够。窗口越长，单次绑核读那几十毫秒的采样偏移占比越小，
-        // 跑几分钟后优于 0.01%。注册表 ~MHz 是 HAL 开机时实测写入的，开机后再改 BCLK
-        // （外置时钟发生器的板子）它就偏了，故标定成功后优先用标定值。
+        // TSC 频率自校准：TSC 恒定频率、不随升降频变化，固定拿一个参考线程跨轮累积长窗口算
+        // ΔTSC/Δt；窗口越长，绑核读取那几十毫秒的采样偏移占比越小。注册表 ~MHz 由 HAL 开机时
+        // 写入，开机后再改 BCLK（外置时钟发生器的板子）它就偏了，故标定成功后优先用标定值。
         int tscRefSlot = -1;
         long tscBaseTick = 0;
         ulong tscBase = 0;
@@ -632,9 +631,8 @@ internal sealed class MonitorView : UserControl
                     ulong dA = lastA[x] >= startA[x] ? lastA[x] - startA[x] : 0;
                     ulong dM = lastM[x] >= startM[x] ? lastM[x] - startM[x] : 0;
                     ulong dT = lastT[x] >= startT[x] ? lastT[x] - startT[x] : 0;
-                    // 该逻辑线程自己的首尾采样间隔：首尾快照都是逐核串行读的，满载时把采样线程调度到
-                    // 忙核上要等几十毫秒，两轮读取本身就要几百毫秒到一秒多。用统一的窗口时长当分母，
-                    // 会让越靠后读到的核虚高越多（空槽不耗时、不产生增量）。
+                    // 用该线程自己的首尾间隔当分母：首尾快照逐核串行读，满载时一轮要几百毫秒到一秒多，
+                    // 统一用窗口时长会让越靠后读到的核虚高越多。
                     double sec = (lastTick[x] - startTick[x]) / (double)Stopwatch.Frequency;
 
                     // EFFREQ 有效频率（含空闲）：ΔAPERF/ΔTSC×TSC频率。TSC 与 APERF 在同一次绑定内读出，
@@ -937,13 +935,13 @@ internal sealed class CcdView
             Text = $"CCD#{ccd}",
         };
 
-        Container.Controls.Add(dgv);     // Dock=Fill 先加，占标题下方剩余空间
-        Container.Controls.Add(title);   // Dock=Top 后加，置于顶部
+        // 先加 Dock=Fill 再加 Dock=Top，表格才占标题下方的剩余空间
+        Container.Controls.Add(dgv);
+        Container.Controls.Add(title);
 
         dgv.SizeChanged += (_, _) => LayoutRows();   // 面板高度变化（含 2K/DPI 缩放）时重分配行高
-        // SizeChanged 通常早于 handle 创建，那一次 LayoutRows 会因 !IsHandleCreated 直接返回；
-        // 此后窗口尺寸不变就不会再有 SizeChanged，行高永远停在默认值、面板下方留白。
-        // handle 就绪与面板真正显示时各补算一次，覆盖启动即最终尺寸的情形。
+        // SizeChanged 早于 handle 创建，那一次 LayoutRows 会直接返回；尺寸不再变就不会有第二次，
+        // 故 handle 就绪与面板显示时各补算一次，否则行高停在默认值、面板下方留白。
         dgv.HandleCreated += (_, _) => LayoutRows();
         dgv.VisibleChanged += (_, _) => { if (dgv.Visible) LayoutRows(); };
     }

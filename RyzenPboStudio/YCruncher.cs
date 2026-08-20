@@ -46,7 +46,7 @@ internal static class YCruncher
         if (totalRam <= 0) totalRam = 8L * 1024 * 1024 * 1024;
 
         int allLogical = Math.Max(1, Environment.ProcessorCount);
-        // 0.72 是实测的 y-cruncher 默认取用比例（63.6 GB 机器上默认 45.8 GiB）
+        // 0.72 对齐 y-cruncher 自己的默认内存取用比例
         long mem = (long)(totalRam * 0.72 * logicalCores.Count / allLogical);
         long minMem = 256L * 1024 * 1024 * logicalCores.Count;   // 每线程至少 256 MB
         if (mem < minMem) mem = minMem;

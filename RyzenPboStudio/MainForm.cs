@@ -31,8 +31,8 @@ internal sealed class MainForm : Form
     private bool _updateBusy;                // 更新流程进行中，避免重入
     private Version? _knownNewVersion;       // 已检测到的新版本：状态条常驻显示，即使用户点过「否」
 
-    // TESTING 页测试设置卡内各段的统一宽度：下拉框、模式按钮、调整方式按钮、
-    // 以及底部开始/停止两键之和都对齐到这个值，改宽度只需改这里一处。
+    // TESTING 页测试设置卡内各段的统一宽度：下拉框、模式按钮、调整方式按钮，
+    // 以及底部开始/停止两键之和都对齐到这个值。
     private const int TestRowWidth = 370;
 
     // ── 手动 Curve Optimizer 编辑器 ─────────────────────────────────────────
@@ -263,10 +263,8 @@ internal sealed class MainForm : Form
         var cfg = BuildConfigCard();
         var logCard = BuildLogCard(_logBoxTesting);
 
-        // 左栏用绝对宽度而非百分比：卡片内容是固定的 TestRowWidth，用百分比会随窗口
-        // 尺寸变化把开始/停止按钮裁掉。宽度 = 内容 + 卡片左右内边距 32 + 栏间距 6 +
-        // 余量 22（body 真出纵向滚动条时它占约 17px，仍容得下，不会再顶出横向滚动条）。
-        // 余量不要再往下压：低于 17px 时滚动条一出就会挤出横向滚动条。
+        // 左栏固定宽度而非百分比，否则窗口变窄时会裁掉开始/停止按钮。
+        // +60 = 卡片内边距 32 + 栏间距 6 + 余量 22（容得下 body 的纵向滚动条，不能再压低）。
         var top = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -289,12 +287,13 @@ internal sealed class MainForm : Form
         _statusLabel.BackColor = Theme.Bg;
         // 高度 40 以容纳右端版本 + 作者两行文字
         var statusBar = new Panel { Dock = DockStyle.Bottom, Height = 40, BackColor = Theme.Bg, Padding = new Padding(4, 4, 0, 0) };
-        statusBar.Controls.Add(_statusLabel);    // Dock=Fill 先加
-        statusBar.Controls.Add(BuildVersionPanel());   // Dock=Right 后加，占右端
+        // 先加 Dock=Fill 再加 Dock=Right，后者才能占住右端
+        statusBar.Controls.Add(_statusLabel);
+        statusBar.Controls.Add(BuildVersionPanel());
 
         var holder = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
-        holder.Controls.Add(top);          // Dock=Fill 先加
-        holder.Controls.Add(statusBar);    // Dock=Bottom 后加
+        holder.Controls.Add(top);
+        holder.Controls.Add(statusBar);
         return holder;
     }
 
@@ -405,9 +404,8 @@ internal sealed class MainForm : Form
         var card = NewCard();
         card.Margin = new Padding(0);
 
-        // 单列纵向排布：各段标题在上、内容在下，整体宽度统一为 TestRowWidth，多余横向空间让给日志。
-        // AutoScroll 是兜底：不同 DPI / 系统字体下各段实际高度会有出入，一旦纵向放不下就出现
-        // 滚动条，而不是把底部的开始/停止按钮直接裁掉。正常情况下内容能放下，不会出现滚动条。
+        // 单列纵向排布，各段统一 TestRowWidth，多余横向空间让给日志。
+        // AutoScroll 是兜底：高 DPI / 大字体下内容放不下时出滚动条，而不是裁掉底部的开始/停止按钮。
         var body = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -486,8 +484,7 @@ internal sealed class MainForm : Form
         const int runGap = 10;
         int runBtnWidth = (TestRowWidth - runGap) / 2;
         var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Margin = new Padding(0, 0, 0, 6) };
-        // 开始键改成空心描边：选中的测试模式/范围已经是实心 AMD 红，再来一块大红会互相抢。
-        // 保留红描边 + 浅红字守住品牌色，但不再是实心色块，视觉冲击降下来。
+        // 空心描边而非实心：选中的测试模式/范围已经是实心 AMD 红，两块大红会互相抢视觉。
         _startBtn.Normal = Theme.SurfaceAlt;
         _startBtn.Hover = Theme.Border;
         _startBtn.Outline = Theme.Accent;
@@ -664,13 +661,12 @@ internal sealed class MainForm : Form
         okBtn.FlatAppearance.BorderColor = Theme.Border;
         var cancelBtn = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Width = 88, Height = 30, FlatStyle = FlatStyle.Flat, BackColor = Theme.SurfaceAlt, ForeColor = Theme.TextHi };
         cancelBtn.FlatAppearance.BorderColor = Theme.Border;
-        // 整组靠右，组内从左往右：确定在左、取消在右
         var btnRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Anchor = AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Surface, Margin = new Padding(14, 4, 14, 12) };
         btnRow.Controls.Add(okBtn);
         btnRow.Controls.Add(cancelBtn);
 
-        // 两行都排进同一个 TableLayoutPanel：之前按钮行用 Dock=Bottom、内容行不 Dock，
-        // 未停靠的内容不会给停靠的兄弟让位，确定/取消被复选框盖住点不到，只能关窗口（=取消）。
+        // 两行必须排进同一个 TableLayoutPanel：未停靠的内容不会给 Dock=Bottom 的兄弟让位，
+        // 复选框会盖住确定/取消。
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -1073,9 +1069,10 @@ internal sealed class MainForm : Form
         btnBar.Controls.Add(clearBtn);
         btnBar.Controls.Add(saveBtn);
 
-        card.Controls.Add(box);                     // 填充
-        card.Controls.Add(btnBar);                  // 底部按钮
-        card.Controls.Add(SectionTitle("运行日志")); // 顶部标题
+        // 添加顺序决定停靠优先级：标题占顶、按钮占底、日志框填中间
+        card.Controls.Add(box);
+        card.Controls.Add(btnBar);
+        card.Controls.Add(SectionTitle("运行日志"));
         return card;
     }
 
@@ -1210,7 +1207,7 @@ internal sealed class MainForm : Form
         };
         PillButton Btn(string text, Action click)
         {
-            var b = Ghost(text);   // 四个按钮统一灰色
+            var b = Ghost(text);
             b.Size = new Size(96, 32);
             b.Margin = new Padding(0, 0, 0, 8);
             b.Click += (_, _) => click();
@@ -1411,9 +1408,9 @@ internal sealed class MainForm : Form
         Height = 26,
         ForeColor = Theme.TextLo,
         BackColor = Theme.Surface,
-        // 右对齐：文字紧贴第一列数字框，不再吊在左边空一大段
+        // 右对齐，让文字紧贴第一列数字框
         TextAlign = ContentAlignment.MiddleRight,
-        // 上下 5：与数字框同步拉开行距，五个频率档之间不再贴在一起
+        // 上下 5：与数字框同步拉开五个频率档之间的行距
         Margin = new Padding(0, 5, 6, 5),
     };
 
@@ -1452,9 +1449,8 @@ internal sealed class MainForm : Form
         var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
         bool ok = Tuning.Apply(vals, "MANUAL", null, "手动应用");
         Log.Write($"手动应用 CO: [{string.Join(", ", vals)}]" + (ok ? "" : "（写入异常，详见上方）"));
-        // 手动写入即视为用户接管本次恢复：崩溃恢复的基准取自 journal 最后一条，而手动应用
-        // 也会记进同一个 journal，若脏标记还在，下次开始测试会在用户刚设的值上再 +StepOnError
-        // （如崩溃于 -10、手动改 -8，开测后变成 -6）。清除脏标记后走正常分支，从 CPU 实际值起步。
+        // 手动写入即视为用户接管本次恢复。手动值也会记进 journal，脏标记若还在，下次开测会在
+        // 用户刚设的值上再 +StepOnError（崩溃于 -10、手动改 -8，开测就成了 -6）。
         if (ok && Workspace.WasInterrupted())
         {
             Workspace.ClearInProgress();
@@ -1624,8 +1620,7 @@ internal sealed class MainForm : Form
         if (edc > 0) _edcBox.Value = Math.Clamp(edc, (int)_edcBox.Minimum, (int)_edcBox.Maximum);
         if (tdc > 0) _tdcBox.Value = Math.Clamp(tdc, (int)_tdcBox.Minimum, (int)_tdcBox.Maximum);
 
-        // FMax 在 Zen3 上没有写入命令（PPT / TDC / EDC 三项有，故 Apply 照常可用）。
-        // 置灰输入框挡住修改即可，标签保持原样；原因写进运行日志，不占 UI 版面。
+        // FMax 在 Zen3 上没有写入命令，置灰输入框挡住修改；PPT / TDC / EDC 仍可写，Apply 照常可用。
         _fmaxWritable = RyzenSmu.IsFMaxWriteSupported();
         if (!_fmaxWritable)
         {
@@ -1732,11 +1727,11 @@ internal sealed class MainForm : Form
     {
         try
         {
-            // 开发/散文件部署：磁盘上的 ICON.ico
+            // 磁盘上的 ICON.ico
             string ico = Path.Combine(Workspace.BaseDir, "ICON.ico");
             if (File.Exists(ico)) { Icon = new Icon(ico); return; }
 
-            // 单文件发布：磁盘无 ICON.ico，从内嵌资源加载
+            // 磁盘上没有时回退到内嵌资源
             using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("RyzenPboStudio.ICON.ico");
             if (stream != null) Icon = new Icon(stream);
         }
@@ -2186,7 +2181,7 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>把测试范围解析成 (要压的逻辑核, 对应物理核)。全部核心返回 (null, null)，
-    /// 表示走原有命令行路径，行为与加这个功能之前完全一致。</summary>
+    /// 表示不限定核心、走 y-cruncher 命令行路径。</summary>
     private (List<int>? logical, List<int>? physical) ResolveScope(string scope, int ccd)
     {
         switch (scope)
@@ -2247,7 +2242,7 @@ internal sealed class MainForm : Form
         _logBoxTesting.Clear();
     }
 
-    /// <summary>手动导出当前日志到文件（启动不再自动落盘，仅点此按钮时写出）。</summary>
+    /// <summary>手动导出当前日志到文件；日志不自动落盘，仅点此按钮时写出。</summary>
     private void SaveLog()
     {
         using var dlg = new SaveFileDialog

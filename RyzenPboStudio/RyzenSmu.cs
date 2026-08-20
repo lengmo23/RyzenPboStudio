@@ -187,7 +187,7 @@ internal static class RyzenSmu
     public static int? LastTdcLimit { get; private set; }
     public static int? LastEdcLimit { get; private set; }
 
-    // PBO 解锁时 SMU 把表头的 PPT / TDC / EDC 上限报成 999 哨兵（Vermeer 实测），那不是可写回参数框的有效值。
+    // PBO 解锁时 SMU 把表头的 PPT / TDC / EDC 上限报成 999 哨兵，那不是可写回参数框的有效值。
     private const float PtLimitSentinel = 999f;
 
     /// <summary>PM Table 中逐世代、逐型号浮动的偏移。表头上 PPT / TDC / THM 的位置分两代：
@@ -213,7 +213,7 @@ internal static class RyzenSmu
 
     /// <summary>该槽位是否被熔丝屏蔽。每核段按槽位排列、屏蔽槽填 0，探测时必须跳过这些位置，
     /// 否则 9900X3D / 7900X 这类带空洞的型号永远凑不出 cores 个连续的合法电压。
-    /// 槽位表尚未建立时按全部有效处理（保持与旧判据一致）。</summary>
+    /// 槽位表尚未建立时按全部有效处理。</summary>
     private static bool IsSlotMaskedNoLock(int slot) =>
         _slotDisabled is { } d && slot >= 0 && slot < d.Length && d[slot];
 
@@ -432,14 +432,13 @@ internal static class RyzenSmu
     }
 
     // Vermeer 的 CCD 温度寄存器沿用 Zen2 的地址。ZenStates 的 GetSingleCcdTemperature 按
-    // family >= 19H 一刀切选了 Raphael 的 0x59B08，而 Vermeer 同为 19H（model 0x21），
-    // 于是读到的值算出的温度越界、被当作无效返回 0，界面上 HOT 一直是 "--"。
-    // 5800X3D 实测：0x59954 得 51.75°C，同时刻 Tctl 51.88°C。
+    // family >= 19H 一刀切选 Raphael 的 0x59B08，而 Vermeer 同为 19H（model 0x21），
+    // 读出的值算出的温度越界、被当作无效返回 0，故这里单独走 0x59954。
     private const uint VermeerCcdTempReg = 0x00059954;
 
     /// <summary>读取指定 CCD 的热点温度（°C）；读不到或超出量程返回 0。
     /// 只有 Vermeer 走自己的寄存器，其余型号仍交给 ZenStates——那边对 Zen2/Zen4/Zen5 是对的，
-    /// 同为 Zen3 的 Chagall / Milan 手头没有实机可验，不擅自套用。</summary>
+    /// 同为 Zen3 的 Chagall / Milan 未经验证，不擅自套用。</summary>
     public static float ReadCcdTemperature(uint ccd)
     {
         try

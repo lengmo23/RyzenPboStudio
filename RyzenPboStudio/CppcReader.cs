@@ -14,8 +14,8 @@ internal static class CppcReader
     private const string Provider = "Microsoft-Windows-Kernel-Processor-Power";
     private const int ScanLimit = 512;      // 每次开机只记 logicalCores 条，扫这么多足够翻到最近一轮
     private const int TimeoutMs = 2000;     // 日志过大时查询会拖慢启动，超时就放弃
-    // 日志里会混着更早的批次：5700X 上实测同一个 lp0 既有 157% 也有一条 100%（启动早期 CPPC 尚未生效
-    // 时记下的）。开机枚举整批在几秒内写完，故只收与最新一条同批的记录，隔了这么久的一律丢掉。
+    // 日志里混着更早的批次（启动早期 CPPC 尚未生效时记下的那些）。开机枚举整批在几秒内写完，
+    // 故只收与最新一条同批的记录。
     private static readonly TimeSpan BatchWindow = TimeSpan.FromMinutes(5);
 
     /// <summary>按物理核返回 MaximumPerformancePercent；读不到返回 null。
