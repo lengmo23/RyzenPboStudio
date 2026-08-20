@@ -187,22 +187,24 @@ internal static class RyzenSmu
     public static int? LastTdcLimit { get; private set; }
     public static int? LastEdcLimit { get; private set; }
 
-    // PPT / TDC / THM 在 Raphael、DragonRange、GraniteRidge 三代表头位置一致，用绝对索引即可。
-    // EDC 与每核电压、VDDCR_CPU 遥测组的位置逐型号不同，见 ProbePtLayout。
-    internal const int PtPptLimitIdx   = 2;
-    internal const int PtPptCurrentIdx = 3;
-    internal const int PtTdcLimitIdx   = 8;
-    internal const int PtTdcCurrentIdx = 9;
-    internal const int PtThmLimitIdx   = 10;
+    // PBO 解锁时 SMU 把表头的 PPT / TDC / EDC 上限报成 999 哨兵（Vermeer 实测），那不是可写回参数框的有效值。
+    private const float PtLimitSentinel = 999f;
 
-    /// <summary>PM Table 中随型号浮动的偏移。VDDCR_CPU 遥测组起点 Raphael 在 0xB8、DragonRange 在 0xBC、
-    /// GraniteRidge 在 0xC0——同为 Zen4 也能差一个 float，每核电压段更是三者互异，按代号写死覆盖不全。</summary>
+    /// <summary>PM Table 中逐世代、逐型号浮动的偏移。表头上 PPT / TDC / THM 的位置分两代：
+    /// Zen4/Zen5（Raphael、DragonRange、GraniteRidge 三代一致）与 Zen3（Vermeer 另起一套 limit/value 顺排）。
+    /// EDC、每核电压段与 VDDCR_CPU 遥测组还要再逐型号浮动——遥测组起点 Raphael 在 0xB8、DragonRange 在 0xBC、
+    /// GraniteRidge 在 0xC0，同为 Zen4 也能差一个 float，按代号写死覆盖不全。</summary>
     internal sealed class PtLayout
     {
-        public int CpuVidIdx;        // 遥测组 {VID, TEL, I, P, TEMP} 的起点
-        public int CpuTelIdx;        // 组内第 2 项，实测电压：TEL × I = P 恒成立
+        public int PptLimitIdx;
+        public int PptCurrentIdx;
+        public int TdcLimitIdx;
+        public int TdcCurrentIdx;
+        public int ThmLimitIdx;
         public int EdcLimitIdx;
         public int EdcCurrentIdx;
+        public int CpuVidIdx;        // 遥测组 {VID, TEL, I, P} 的起点
+        public int CpuTelIdx;        // 组内第 2 项，实测电压：TEL × I = P 恒成立
         public int PerCoreVoltIdx;   // 每核电压段起点；-1 表示未探到，此时每核 VID 不显示
     }
 
@@ -216,15 +218,25 @@ internal static class RyzenSmu
         _slotDisabled is { } d && slot >= 0 && slot < d.Length && d[slot];
 
     /// <summary>探测 PM Table 布局，探不中返回 null（调用方走回退路径）。
-    /// 遥测组用表头两个镜像值定位：idx19 与组内 VID、idx20 与组内功率都是逐位相等的同一个 float，
-    /// 不需要容差，因此不会被空闲态的低电流噪声干扰。每核电压段用「cores 个电压紧跟同样长的温度段」
-    /// 定位——两段在表里始终相邻，该组合在 7800X3D / 7945HX / 9950X 三份实机转储上均唯一命中。
-    /// cores 传的是槽位数而非有效核数：每核段按槽位排列，屏蔽槽填 0，故这些位置不参与匹配。
+    /// 先按 Zen4/Zen5 表头认，不中再按 Zen3 表头认；两套判据在 7945HX / 9950X / 5700X 三份实机转储上
+    /// 各自唯一命中且互不误认。每核电压段两代共用一套探测，见 ProbePerCoreVolt。
     /// 每核段探不中时 PerCoreVoltIdx 为 -1，调用方应继续重试而不是锁定这份残缺布局。</summary>
     internal static PtLayout? ProbePtLayout(float[]? t, int cores)
     {
         if (t == null || cores <= 0 || t.Length < 70) return null;
 
+        var lay = ProbeZen4Header(t) ?? ProbeZen3Header(t);
+        if (lay == null) return null;
+
+        lay.PerCoreVoltIdx = ProbePerCoreVolt(t, cores);
+        return lay;
+    }
+
+    /// <summary>Zen4 / Zen5 表头：PPT / TDC / THM 在固定绝对索引，EDC 与遥测组随型号浮动。
+    /// 遥测组用表头两个镜像值定位：idx19 与组内 VID、idx20 与组内功率都是逐位相等的同一个 float，
+    /// 不需要容差，因此不会被空闲态的低电流噪声干扰。</summary>
+    private static PtLayout? ProbeZen4Header(float[] t)
+    {
         float vidRef = t[19], pwrRef = t[20];
         if (vidRef is not (> 0.3f and < 2.0f) || pwrRef <= 0) return null;
 
@@ -235,24 +247,68 @@ internal static class RyzenSmu
         }
         if (baseIdx < 0 || baseIdx + 16 >= t.Length) return null;
 
-        int voltIdx = -1;
+        return new PtLayout
+        {
+            PptLimitIdx   = 2,
+            PptCurrentIdx = 3,
+            TdcLimitIdx   = 8,
+            TdcCurrentIdx = 9,
+            ThmLimitIdx   = 10,
+            EdcLimitIdx   = baseIdx + 15,
+            EdcCurrentIdx = baseIdx + 16,
+            CpuVidIdx     = baseIdx,
+            CpuTelIdx     = baseIdx + 1,
+        };
+    }
+
+    /// <summary>Zen3（Vermeer）表头：PPT / TDC / THM / FIT / EDC / VID 六组 {limit, value} 自 idx0 顺排，
+    /// 与 Zen4 整体错位，故不能共用绝对索引。Zen3 表头没有 Zen4 那对 idx19 / idx20 镜像，遥测组改用
+    /// idx11（VID_VALUE）的镜像定位并以 TEL × I = P 验算。先校验表头形状再找镜像，避免在别代表上误认。</summary>
+    private static PtLayout? ProbeZen3Header(float[] t)
+    {
+        if (!IsPtTemp(t[4]) || !IsPtTemp(t[5])) return null;                                   // THM {上限, 当前}
+        if (t[10] is not (> 0.3f and < 2.0f) || t[11] is not (> 0.3f and < 2.0f)) return null; // VID {上限, 当前}
+        if (t[1] <= 0 || t[3] <= 0 || t[9] <= 0) return null;                                  // PPT / TDC / EDC 当前值
+
+        float vidRef = t[11];
+        int baseIdx = -1;
+        for (int i = 12; i + 3 < t.Length && i < 200; i++)
+        {
+            if (t[i] != vidRef) continue;
+            float tel = t[i + 1], cur = t[i + 2], pwr = t[i + 3];
+            if (tel is not (> 0.3f and < 2.0f) || cur <= 0 || pwr <= 0) continue;
+            if (Math.Abs(tel * cur - pwr) <= pwr * 0.005f) { baseIdx = i; break; }
+        }
+        if (baseIdx < 0) return null;
+
+        return new PtLayout
+        {
+            PptLimitIdx   = 0,
+            PptCurrentIdx = 1,
+            TdcLimitIdx   = 2,
+            TdcCurrentIdx = 3,
+            ThmLimitIdx   = 4,
+            EdcLimitIdx   = 8,
+            EdcCurrentIdx = 9,
+            CpuVidIdx     = baseIdx,
+            CpuTelIdx     = baseIdx + 1,
+        };
+    }
+
+    /// <summary>每核电压段用「cores 个电压紧跟同样长的温度段」定位——两段在表里始终相邻，该组合在
+    /// 7800X3D / 7945HX / 9950X / 5700X 四份实机转储上均唯一命中。cores 传的是槽位数而非有效核数：
+    /// 每核段按槽位排列，屏蔽槽填 0，故这些位置不参与匹配。探不中返回 -1。</summary>
+    private static int ProbePerCoreVolt(float[] t, int cores)
+    {
         for (int i = 24; i + 2 * cores <= t.Length; i++)
         {
             if (IsPtVolt(t[i - 1])) continue;   // 段首之前必须断开，避免落在长电压段的中间
             bool ok = true;
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtVolt(t[i + k]);
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtTemp(t[i + cores + k]);
-            if (ok) { voltIdx = i; break; }
+            if (ok) return i;
         }
-
-        return new PtLayout
-        {
-            CpuVidIdx      = baseIdx,
-            CpuTelIdx      = baseIdx + 1,
-            EdcLimitIdx    = baseIdx + 15,
-            EdcCurrentIdx  = baseIdx + 16,
-            PerCoreVoltIdx = voltIdx,
-        };
+        return -1;
     }
 
     /// <summary>设置 PPT（持续功率上限，W）。</summary>
@@ -334,9 +390,10 @@ internal static class RyzenSmu
                     && cpu.powerTable?.Table is { } tbl
                     && ProbePtLayout(tbl, coreCount) is { } lay && tbl.Length > lay.EdcLimitIdx)
                 {
-                    return ((int)Math.Round(tbl[PtPptLimitIdx]),
-                            (int)Math.Round(tbl[lay.EdcLimitIdx]),
-                            (int)Math.Round(tbl[PtTdcLimitIdx]));
+                    float ppt = tbl[lay.PptLimitIdx], edc = tbl[lay.EdcLimitIdx], tdc = tbl[lay.TdcLimitIdx];
+                    // 哨兵上限说明 PBO 已解锁，表里没有可写回参数框的数值，退回熔丝／系统上限。
+                    if (ppt < PtLimitSentinel && edc < PtLimitSentinel && tdc < PtLimitSentinel)
+                        return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
                 }
 
                 var sys = cpu.GetSystemPowerLimit();
@@ -370,6 +427,28 @@ internal static class RyzenSmu
         catch (Exception e)
         {
             Log.Write($"设置负压异常: {e.Message}", "ERROR");
+            return false;
+        }
+    }
+
+    /// <summary>当前 CPU 的 SMU 是否有「设置全核 boost 上限」这条消息。
+    /// Zen3（Vermeer）继承 Zen2 的消息表，那里只有读（GetBoostLimitFrequency 0x6E）没有写，
+    /// Rsmu 与 MP1 两个 ID 都是 0——而 SetBoostLimitAllCore 并不校验 ID，会照发一条消息 0 给 SMU，
+    /// 故必须在调用前拦下。0x70 自 Zen4 才出现，Zen5 由 Zen4Settings 继承。</summary>
+    public static bool IsFMaxWriteSupported()
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var smu = GetCpu().smu;
+                return smu.Rsmu.SMU_MSG_SetBoostLimitFrequencyAllCores != 0
+                    || smu.Mp1Smu.SMU_MSG_SetBoostLimitFrequencyAllCores != 0;
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Write($"检测 FMax 写入支持失败: {e.Message}", "WARN");
             return false;
         }
     }

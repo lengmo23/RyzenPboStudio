@@ -115,8 +115,9 @@ internal sealed class MonitorView : UserControl
     private readonly double p0BaseMHz;   // P0 标称基频，用于 ΔAPERF/ΔMPERF×P0 算忙时频率（本机 TSC 不可读）
     private readonly TelVoltCalib telCalib;
     // PM Table 头部的全局 VDDCR_CPU 遥测组 {VID, TEL, I, P, TEMP}，由 TEL×I=P 验证（SOC 组与 MISC 组
-    // 结构相同、验算同样成立）。组起点逐型号浮动（Raphael 0xB8 / DragonRange 0xBC / GraniteRidge 0xC0），
-    // 每核电压段亦然，故首次读到表时由 RyzenSmu.ProbePtLayout 探测一次。每核电压是各核经 LDO 后的
+    // 结构相同、验算同样成立）。组起点逐型号浮动（Raphael 0xB8 / DragonRange 0xBC / GraniteRidge 0xC0 /
+    // Vermeer 0xA0），表头上 PPT / TDC / THM 的位置还分 Zen4 与 Zen3 两代，每核电压段亦逐型号浮动，
+    // 故首次读到表时由 RyzenSmu.ProbePtLayout 探测一次。每核电压是各核经 LDO 后的
     // die 电压，恒低于上游请求 VID 约 10mV，取其最大值并不等于整体 VID。
     private RyzenSmu.PtLayout? ptLayout;
     /// <summary>身份条／CCD 行／限制条共用的栅格列数，取限制条格数；三条共用同一次取整才能逐条对齐。</summary>
@@ -351,6 +352,21 @@ internal sealed class MonitorView : UserControl
                 perf[i] = nominal > 0 ? highest * 100 / nominal : highest;
             }
         }
+
+        // Zen3 没有 MSR CPPC（CPUID Fn8000_0008_EBX[27]=0，实测 5800X3D 上三个 MSR 均读回全 0），
+        // 退到取自 ACPI _CPC 的事件 55；两条路径同刻度，5700X 上逐核与 HYDRA 相符。
+        if (perf.All(v => v == 0))
+        {
+            int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
+            if (CppcReader.Read((int)cores, tpc) is { } fromLog) perf = fromLog;
+        }
+
+        // BIOS 里关掉 CPPC 时每核报同一个值（实测 5800X3D 全核 133%），排名无从谈起：
+        // 归零当作读不到处理，CPPC 行显示 "-" 且不标金银核，好过按同分硬排出一金一银。
+        var livePerf = Enumerable.Range(0, (int)cores)
+            .Where(i => slotDisabled.Length <= i || !slotDisabled[i])
+            .Select(i => perf[i]).ToArray();
+        if (livePerf.Distinct().Count() <= 1) Array.Clear(perf);
 
         // 金银核：按 CPPC 全局排名取前两个，先银后金 —— 排名第一的标银(✦)，第二的标金(★)，
         // 只标这两个（不标铜核）。CPPC 并列同分时按核号从小到大，即同分中的第一个为银、第二个为金。
@@ -714,13 +730,13 @@ internal sealed class MonitorView : UserControl
                 pptLimit = tdcLimit = edcLimit = thmLimit = 0;
                 if (ptLayout is { } ptLay && cpu.powerTable?.Table is { } tbl && tbl.Length > ptLay.EdcCurrentIdx)
                 {
-                    pptCurrent = tbl[RyzenSmu.PtPptCurrentIdx];
-                    pptLimit   = (int)Math.Round(tbl[RyzenSmu.PtPptLimitIdx]);
-                    tdcCurrent = tbl[RyzenSmu.PtTdcCurrentIdx];
-                    tdcLimit   = (int)Math.Round(tbl[RyzenSmu.PtTdcLimitIdx]);
+                    pptCurrent = tbl[ptLay.PptCurrentIdx];
+                    pptLimit   = (int)Math.Round(tbl[ptLay.PptLimitIdx]);
+                    tdcCurrent = tbl[ptLay.TdcCurrentIdx];
+                    tdcLimit   = (int)Math.Round(tbl[ptLay.TdcLimitIdx]);
                     edcCurrent = tbl[ptLay.EdcCurrentIdx];
                     edcLimit   = (int)Math.Round(tbl[ptLay.EdcLimitIdx]);
-                    thmLimit   = (int)Math.Round(tbl[RyzenSmu.PtThmLimitIdx]);
+                    thmLimit   = (int)Math.Round(tbl[ptLay.ThmLimitIdx]);
                 }
                 else
                 {
@@ -902,7 +918,11 @@ internal sealed class CcdView
             for (int k = 0; k < coreCount; k++)
             {
                 int gc = baseCore + k;
-                dgv.Rows[RowCppc].Cells[k + 1].Value = slotDisabled.Length > gc && slotDisabled[gc] ? "-" : (perf.Length > gc ? perf[gc] : 0).ToString();
+                // 0 表示这颗核没有 CPPC 读数（Zen3 无 MSR 且事件日志也没有，或 BIOS 关了 CPPC），
+                // 显示 "-"；填 0 会被当成"排名垫底"读错。
+                bool noData = slotDisabled.Length > gc && slotDisabled[gc];
+                uint v = perf.Length > gc ? perf[gc] : 0;
+                dgv.Rows[RowCppc].Cells[k + 1].Value = noData || v == 0 ? "-" : v.ToString();
             }
 
         title = new DbLabel

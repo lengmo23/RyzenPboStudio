@@ -31,8 +31,13 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     throw "找不到 $exePath，请先执行 dotnet publish 输出到 $BinDir。"
 }
 
+# ProductVersion 形如 "2.1+<commit>"。csproj 里版本写两段时这里也只有两段，
+# 补成三段以对上程序内 Updater.CurrentVersion 的显示和 GitHub tag；
+# 解析不出来就直接报错，别让哈希混进 zip 文件名。
 $version = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
 if ($version -match '^([0-9]+\.[0-9]+\.[0-9]+)') { $version = $Matches[1] }
+elseif ($version -match '^([0-9]+\.[0-9]+)') { $version = "$($Matches[1]).0" }
+else { throw "无法从 ProductVersion 解析版本号: $version" }
 Write-Host "版本: $version"
 
 # 运行时产物不属于交付内容
