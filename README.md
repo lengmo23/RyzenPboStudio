@@ -1,6 +1,6 @@
 # AMD Ryzen PBO Studio
 
-面向 AMD Ryzen 7000/9000 系列 CPU 的 PBO Studio 调节工具
+面向 AMD Ryzen CPU 的 PBO Studio 调节工具 (现已支持5000/7000/9000系CPU)
 ![主界面](pbo.png)
 
 ![测试页](testing.png)
@@ -9,30 +9,43 @@
 
 ### 实时监控
 
-频率读数优先采用 HW P-state 快照（MSR `0xC0010293`），与 HWiNFO 的 Core Clock 同源同口径；
-若检测到 HWiNFO 正在运行并已开启共享内存，则直接采用其读数以保证一致。
+频率读数优先采用 HW P-state 快照 MSR `0xC0010293`
+若 HWiNFO 正在运行并已开启共享内存，则直接采用HWINFO传感器数据为准。
 
 ### 手动调参
 
 - **Curve Optimizer**：逐物理核心设置负压偏移，支持配置存档与载入
-- **Curve Shaper**：5 个频率档 × 3 个温度档的完整网格 (7000系CPU不支持)
-- **PBO 限制**：FMax、PPT、EDC、TDC 一次性下发
+- **Curve Shaper**：5 个频率档 × 3 个温度档的完整网格 
+- **PBO Limit**：FMax、PPT、EDC、TDC 一次性下发 
 
 ### 自动负压测试
 
 提供三种压测编排：
 
-| 模式 | 说明 |
-|---|---|
+| 模式 | 说明                                                         |
+| ---- | ------------------------------------------------------------ |
 | 单项 | 从 VT3、BKT、SVT、BBP、SFTv4、SNT、FFTv4、N63 中指定一种算法 |
-| 顺序 | VT3 → BKT → SVT 依次执行，默认 20 / 10 / 10 轮 |
-| 组合 | 三种算法同时施压，默认 10 轮 |
+| 顺序 | VT3 → BKT → SVT 依次执行，默认 20 / 10 / 10 轮             |
+| 组合 | VT3,BKT,SVT三种算法组合测试，默认 10 轮                      |
 
-每轮时长与轮数可自行设定。测试过程中若 y-cruncher 报出运算错误，程序解析出错的逻辑核心并
-映射到物理核心，将其负压回退一档（默认 +2）后重跑整轮，直至通过。调整方向单调，只朝更保守
-的一侧移动，不会往复震荡。
+每轮时长与轮数可自行设定，默认120s/轮
 
-也可切换为手动模式：报错时仅提示并停止，不改动任何已设定的参数。
+测试范围可再行限定：
+
+| 范围     | 说明                                     |
+| -------- | ---------------------------------------- |
+| 全部核心 | 所有核心一起压测                         |
+| 自定义   | 自行勾选参与压测的核心                   |
+| 单个 CCD | 只压指定的那个 CCD（双 CCD可见）        |
+| 逐 CCD   | 每个 CCD 各跑一遍完整轮次（双 CCD可见） |
+
+限定范围后，未选中的核心保持空闲。需要注意单 CCD 压测时功耗预算集中在被测 CCD 上，频率会高于
+全核负载的情形，得到的结论不能直接套用到全核。
+
+测试过程中若 y-cruncher 报出运算错误，程序解析出错的逻辑核心并
+映射到物理核心，将其负压回退一档（默认 +2）后重跑整轮，直至通过。
+
+可切换为手动模式：报错时仅提示并停止，不改动任何已设定的参数。
 
 ### 异常中断恢复
 
@@ -40,13 +53,25 @@
 
 ## 环境要求
 
-| 项目 | 要求 |
-|---|---|
-| 处理器 | AMD Ryzen 7000 / 9000 系 CPU |
-| 操作系统 | Windows 10 / 11 x64 |
-| 运行时 | [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)（需 Desktop 版本，ASP.NET Core Runtime 不适用） |
-| 驱动 | [PawnIO](https://pawnio.eu)。Curve Optimizer 的读写经由它访问 SMU，未安装则无法启动 |
-| 权限 | 必须以管理员身份运行 |
+| 项目     | 要求                                                                                                      |
+| -------- | --------------------------------------------------------------------------------------------------------- |
+| 处理器   | AMD Ryzen 5000 / 7000 / 9000 系 CPU                                                                       |
+| 操作系统 | Windows 10 / 11 x64                                                                                       |
+| 运行环境 | [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)                                 |
+| 驱动     | [PawnIO](https://pawnio.eu)。程序的全部硬件读写（SMU 命令、MSR、SMN 寄存器）都经由它进行，未安装则无法启动 |
+| 权限     | 管理员身份运行                                                                                            |
+
+各世代可用的功能有所差异：
+
+| 功能            | 5000 系               | 7000 系 | 9000 系 |
+| --------------- | --------------------- | ------- | ------- |
+| Curve Optimizer | 支持                  | 支持    | 支持    |
+| Curve Shaper    | 不支持                | 不支持  | 支持    |
+| PPT / EDC / TDC | 支持                  | 支持    | 支持    |
+| 修改 FMax       | 不支持                | 支持    | 支持    |
+| CPPC 核心排名   | 需在 BIOS 中开启 CPPC | 支持    | 支持    |
+
+5000 系的 CPPC 读数取自 Windows 内核电源事件，BIOS 中未开启 CPPC 时该行显示为空。
 
 ## 使用
 
@@ -87,9 +112,9 @@ dotnet publish .\RyzenPboStudio\RyzenPboStudio.csproj -c Release -r win-x64 --se
 
 ## 作者
 
-DY冷漠_OC调试 —— [@lengmo23](https://github.com/lengmo23)
+ [@lengmo23](https://github.com/lengmo23)
 
-Copyright © 2026 DY冷漠_OC调试
+Copyright © 2026 [@lengmo23](https://github.com/lengmo23)
 
 ## 许可
 
