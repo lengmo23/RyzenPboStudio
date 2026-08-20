@@ -41,6 +41,7 @@ internal sealed class MainForm : Form
     private readonly List<NumericUpDown> _coCells = new();
     private int _coSlotCount;
     private readonly NumericUpDown _fmaxBox = new();
+    private bool _fmaxWritable = true;
 
     // ── PBO 限制参数条（fmax 复用 _fmaxBox）─────────────────────────────────
     private readonly NumericUpDown _pptBox = new();
@@ -1497,12 +1498,15 @@ internal sealed class MainForm : Form
         uint ppt = (uint)_pptBox.Value;
         uint edc = (uint)_edcBox.Value;
         uint tdc = (uint)_tdcBox.Value;
-        bool okF = RyzenSmu.SetFMax(fmax);
+        // 不支持 FMax 写入的 CPU 上跳过这一条：SetBoostLimitAllCore 不校验消息 ID，
+        // 硬调会往 SMU 发一条消息 0，且必然失败、把另外三项的真实结果一起染成「部分失败」。
+        bool okF = !_fmaxWritable || RyzenSmu.SetFMax(fmax);
         bool okP = RyzenSmu.SetPptLimit(ppt);
         bool okE = RyzenSmu.SetEdcLimit(edc);
         bool okT = RyzenSmu.SetTdcLimit(tdc);
         bool ok = okF && okP && okE && okT;
-        Log.Write($"应用 PBO 限制: FMax {fmax} MHz / PPT {ppt} W / EDC {edc} A / TDC {tdc} A" + (ok ? "" : "（部分写入失败，详见上方）"));
+        string fmaxPart = _fmaxWritable ? $"FMax {fmax} MHz / " : "FMax 跳过（不支持）/ ";
+        Log.Write($"应用 PBO 限制: {fmaxPart}PPT {ppt} W / EDC {edc} A / TDC {tdc} A" + (ok ? "" : "（部分写入失败，详见上方）"));
         SetStatus(ok ? "已应用 PBO 限制（FMax/PPT/EDC/TDC）" : "PBO 限制应用部分失败", ok ? Theme.Success : Theme.Accent);
     }
 
@@ -1619,6 +1623,15 @@ internal sealed class MainForm : Form
         if (ppt > 0) _pptBox.Value = Math.Clamp(ppt, (int)_pptBox.Minimum, (int)_pptBox.Maximum);
         if (edc > 0) _edcBox.Value = Math.Clamp(edc, (int)_edcBox.Minimum, (int)_edcBox.Maximum);
         if (tdc > 0) _tdcBox.Value = Math.Clamp(tdc, (int)_tdcBox.Minimum, (int)_tdcBox.Maximum);
+
+        // FMax 在 Zen3 上没有写入命令（PPT / TDC / EDC 三项有，故 Apply 照常可用）。
+        // 置灰输入框挡住修改即可，标签保持原样；原因写进运行日志，不占 UI 版面。
+        _fmaxWritable = RyzenSmu.IsFMaxWriteSupported();
+        if (!_fmaxWritable)
+        {
+            _fmaxBox.Enabled = false;
+            Log.Write("当前 CPU 的 SMU 无 FMax 写入命令，已禁用该项；PPT / TDC / EDC 不受影响");
+        }
     }
 
     // ── 构件工厂 ────────────────────────────────────────────────────────────
