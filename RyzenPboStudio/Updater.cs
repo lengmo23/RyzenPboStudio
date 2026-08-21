@@ -49,6 +49,24 @@ internal static class Updater
     /// <summary>发布页地址，供「查看更新内容」等场景打开。</summary>
     public const string ReleasesPage = $"{HomePage}/releases";
 
+    /// <summary>所有下载源都失败时给出的网盘地址，由用户手动下载后覆盖安装。</summary>
+    public const string PanUrl = "https://wwbnf.lanzoum.com/b01eupfd7c";
+
+    /// <summary>网盘提取码。</summary>
+    public const string PanCode = "csdf";
+
+    /// <summary>下载源，按顺序尝试。空前缀是直连 GitHub，始终排第一；其余是社区镜像，
+    /// 做法都是把原始 URL 拼在自己域名后面转发。镜像失效、限速、跑路都是常态，
+    /// 因此逐个试、全失败才报错，且每次下完都要核对大小——镜像挂掉时往往返回一个
+    /// HTML 错误页，光看 HTTP 200 分辨不出来。</summary>
+    private static readonly (string Prefix, string Name)[] DownloadSources =
+    {
+        ("", "GitHub"),
+        ("https://ghfast.top/", "ghfast.top"),
+        ("https://gh-proxy.com/", "gh-proxy.com"),
+        ("https://ghproxy.net/", "ghproxy.net"),
+    };
+
     public static Version CurrentVersion =>
         typeof(Updater).Assembly.GetName().Version is { } v ? new Version(v.Major, v.Minor, v.Build) : new Version(0, 0, 0);
 
@@ -150,21 +168,62 @@ internal static class Updater
         return Version.TryParse(t, out Version? parsed) && (version = parsed) != null;
     }
 
-    /// <summary>下载 zip 到临时目录。progress 回调传 0-100。</summary>
-    public static async Task<string> DownloadAsync(UpdateInfo info, IProgress<int>? progress, CancellationToken token = default)
+    /// <summary>下载 zip 到临时目录，直连失败则依次改用镜像。progress 回调传 0-100，
+    /// onSource 在每次换源时告知源名，供界面显示当前正从哪里下载。</summary>
+    public static async Task<string> DownloadAsync(UpdateInfo info, IProgress<int>? progress,
+        Action<string>? onSource = null, CancellationToken token = default)
     {
         string dir = Path.Combine(Path.GetTempPath(), "RyzenPboStudioUpdate");
         Directory.CreateDirectory(dir);
         string zipPath = Path.Combine(dir, $"update-{info.Tag}.zip");
 
-        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+        var errors = new List<string>();
+        foreach ((string prefix, string name) in DownloadSources)
+        {
+            token.ThrowIfCancellationRequested();
+            onSource?.Invoke(name);
+            try
+            {
+                await FetchAsync(prefix.Length == 0 ? info.DownloadUrl : prefix + info.DownloadUrl,
+                    zipPath, info.Size, progress, token);
+                Log.Write($"更新包下载完成（{name}）");
+                return zipPath;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;   // 用户取消，不再往下试
+            }
+            catch (Exception e)
+            {
+                Log.Write($"从 {name} 下载更新包失败：{e.Message}", "WARN");
+                errors.Add($"{name}：{e.Message}");
+            }
+        }
+
+        throw new IOException("所有下载源均失败。\n" + string.Join("\n", errors));
+    }
+
+    /// <summary>从单个 URL 下载并核对大小。大小取自 GitHub API 报告的资产尺寸，
+    /// 对不上就当这一源失败——镜像失效时常返回 HTML 错误页，只看状态码分辨不出来。</summary>
+    private static async Task FetchAsync(string url, string zipPath, long expectedSize,
+        IProgress<int>? progress, CancellationToken token)
+    {
+        // 显式指明走系统代理。国内多数用户靠 clash 一类工具设置系统代理访问 GitHub，
+        // 这也是 HttpClient 的默认行为，写出来是免得日后被误改。
+        using var handler = new HttpClientHandler
+        {
+            UseProxy = true,
+            Proxy = HttpClient.DefaultProxy,
+            UseDefaultCredentials = true,
+        };
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(30) };
         http.DefaultRequestHeaders.UserAgent.ParseAdd($"RyzenPboStudio/{CurrentVersion}");
 
         using (HttpResponseMessage resp = await http.GetAsync(
-                   info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, token))
+                   url, HttpCompletionOption.ResponseHeadersRead, token))
         {
             resp.EnsureSuccessStatusCode();
-            long total = resp.Content.Headers.ContentLength ?? info.Size;
+            long total = resp.Content.Headers.ContentLength ?? expectedSize;
 
             using Stream src = await resp.Content.ReadAsStreamAsync(token);
             using var dst = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
@@ -180,7 +239,9 @@ internal static class Updater
             }
         }
 
-        return zipPath;
+        long actual = new FileInfo(zipPath).Length;
+        if (expectedSize > 0 && actual != expectedSize)
+            throw new IOException($"文件大小不符，应为 {expectedSize} 字节、实际 {actual} 字节");
     }
 
     /// <summary>

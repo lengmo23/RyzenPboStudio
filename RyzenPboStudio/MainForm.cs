@@ -968,20 +968,26 @@ internal sealed class MainForm : Form
         string zipPath;
         try
         {
+            // 百分比每 80KB 报一次，47MB 的整包会报上百次；只在数值真的变了才刷界面。
+            int lastPercent = -1;
+            string source = "";
             var progress = new Progress<int>(p =>
             {
-                if (!IsDisposed) _updateLink.Text = $"下载中 {p}%";
+                if (IsDisposed || p == lastPercent) return;
+                lastPercent = p;
+                _updateLink.Text = $"下载中 {p}%";
+                SetStatus($"正在下载更新 {info.Tag}（{source}） {p}%", Theme.Warn);
             });
             SetStatus($"正在下载更新 {info.Tag}...", Theme.Warn);
-            zipPath = await Updater.DownloadAsync(info, progress);
+            zipPath = await Updater.DownloadAsync(info, progress,
+                s => { source = s; lastPercent = -1; });   // 换源后让下一次回调必定刷新
         }
         catch (Exception e)
         {
             RefreshUpdateLinkText();
             SetStatus("更新下载失败", Theme.Accent);
             Log.Write($"更新下载失败：{e.Message}", "WARN");
-            MessageBox.Show($"下载更新失败：{e.Message}", "更新",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ShowPanFallbackDialog(info.Tag);
             return;
         }
 
@@ -1020,6 +1026,140 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>用系统默认浏览器打开链接。</summary>
+    /// <summary>下载源全部失败后的兜底提示：给出网盘地址与提取码。
+    /// 两个框都是只读 TextBox 而非 Label，用户可以直接选中复制——MessageBox 里的文字选不中。</summary>
+    private void ShowPanFallbackDialog(string tag)
+    {
+        using var dlg = new Form
+        {
+            Text = "下载更新失败",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            BackColor = Theme.Surface,
+            ForeColor = Theme.TextHi,
+            Font = new Font(Theme.FontFamily, 9F),
+        };
+
+        var tip = new Label
+        {
+            Text = $"GitHub 与各镜像源均无法下载 {tag}。\n可从网盘手动下载，解压后覆盖到本程序目录（logs 与 profiles 请保留）。",
+            AutoSize = true,
+            ForeColor = Theme.TextLo,
+            BackColor = Theme.Surface,
+            Margin = new Padding(2, 0, 2, 10),
+        };
+
+        var grid = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            RowCount = 2,
+            AutoSize = true,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        grid.Controls.Add(NewFieldLabel("网盘链接"), 0, 0);
+        var urlBox = NewCopyableBox(Updater.PanUrl, 300);
+        grid.Controls.Add(urlBox, 1, 0);
+        grid.Controls.Add(NewFieldLabel("提取密码"), 0, 1);
+        var codeBox = NewCopyableBox(Updater.PanCode, 300);
+        grid.Controls.Add(codeBox, 1, 1);
+
+        var copyBtn = NewDialogButton("复制链接和密码", 130);
+        copyBtn.Click += (_, _) =>
+        {
+            try
+            {
+                Clipboard.SetText($"{Updater.PanUrl}\n提取密码：{Updater.PanCode}");
+                copyBtn.Text = "已复制";
+            }
+            catch (Exception ex)
+            {
+                // 剪贴板偶尔被别的进程占用，复制不了就让用户自己选中文本框
+                Log.Write($"复制网盘地址失败：{ex.Message}", "WARN");
+                copyBtn.Text = "复制失败";
+            }
+        };
+        var openBtn = NewDialogButton("打开网盘", 96);
+        openBtn.Click += (_, _) => OpenUrl(Updater.PanUrl);
+        var closeBtn = NewDialogButton("关闭", 80);
+        closeBtn.DialogResult = DialogResult.Cancel;
+
+        var btnRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Anchor = AnchorStyles.Right,
+            FlowDirection = FlowDirection.LeftToRight,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0, 12, 0, 0),
+        };
+        btnRow.Controls.Add(copyBtn);
+        btnRow.Controls.Add(openBtn);
+        btnRow.Controls.Add(closeBtn);
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Theme.Surface,
+            Padding = new Padding(16, 14, 16, 12),
+        };
+        for (int i = 0; i < 3; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(tip, 0, 0);
+        layout.Controls.Add(grid, 0, 1);
+        layout.Controls.Add(btnRow, 0, 2);
+
+        dlg.Controls.Add(layout);
+        dlg.CancelButton = closeBtn;
+        dlg.AutoSize = true;
+        dlg.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        dlg.ShowDialog(this);
+    }
+
+    private static Label NewFieldLabel(string text) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        ForeColor = Theme.TextLo,
+        BackColor = Theme.Surface,
+        Margin = new Padding(0, 7, 10, 4),
+    };
+
+    /// <summary>只读但可选中复制的文本框。用 ReadOnly 而不是 Enabled=false：
+    /// 禁用的 TextBox 会被系统改成灰底，且文字选不中。</summary>
+    private static TextBox NewCopyableBox(string text, int width) => new()
+    {
+        Text = text,
+        ReadOnly = true,
+        Width = width,
+        BackColor = Theme.SurfaceAlt,
+        ForeColor = Theme.TextHi,
+        BorderStyle = BorderStyle.FixedSingle,
+        Font = new Font(Theme.MonoFamily, 9.5F),
+        Margin = new Padding(0, 4, 0, 4),
+    };
+
+    private static Button NewDialogButton(string text, int width)
+    {
+        var b = new Button
+        {
+            Text = text,
+            Width = width,
+            Height = 30,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.SurfaceAlt,
+            ForeColor = Theme.TextHi,
+            Margin = new Padding(8, 0, 0, 0),
+        };
+        b.FlatAppearance.BorderColor = Theme.Border;
+        return b;
+    }
+
     private static void OpenUrl(string url)
     {
         try
