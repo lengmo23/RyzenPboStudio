@@ -260,6 +260,12 @@ internal static class Journal
 {
     public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_offsets.ndjson");
 
+    /// <summary>用户在测试未运行时手动下发的负压：接管上次中断的负压，恢复时不再回退一档。</summary>
+    public const string ManualTakeover = "manual-takeover";
+
+    /// <summary>用户在测试运行中手动下发的负压：其后若死机，仍按正常规则回退。</summary>
+    public const string ManualInTest = "manual-in-test";
+
     public static void Record(IReadOnlyList<int> offsets, string mode, string? phase, string reason)
     {
         try
@@ -280,8 +286,8 @@ internal static class Journal
         }
     }
 
-    /// <summary>读取最后一条有效记录的负压（跳过断电导致损坏的尾行）。</summary>
-    public static List<int>? ReadLastOffsets()
+    /// <summary>读取最后一条有效记录（跳过断电导致损坏的尾行）。</summary>
+    public static AppliedEntry? ReadLastEntry()
     {
         try
         {
@@ -294,7 +300,7 @@ internal static class Journal
                 try
                 {
                     var entry = JsonSerializer.Deserialize<AppliedEntry>(line);
-                    if (entry?.Offsets is { Count: > 0 }) return entry.Offsets;
+                    if (entry?.Offsets is { Count: > 0 }) return entry;
                 }
                 catch
                 {
@@ -308,6 +314,8 @@ internal static class Journal
         }
         return null;
     }
+
+    public static List<int>? ReadLastOffsets() => ReadLastEntry()?.Offsets;
 }
 
 /// <summary>下发负压的唯一入口：先落盘日志，再写入 CPU（persist-before-apply）。</summary>
