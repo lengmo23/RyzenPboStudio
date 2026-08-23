@@ -265,7 +265,7 @@ internal static class YCruncher
                 if (!autoAdjust)
                 {
                     // 手动模式：只提醒，不动负压，交由用户自行判断如何调整
-                    Log.Write("手动模式：检测到报错核心，未自动调整负压。请手动调整后重新开始测试。", "WARN");
+                    Log.Write("手动模式：检测到报错核心，未调整负压，测试停止", "WARN");
                     onManualError?.Invoke(crashedPhysical);
                     return (false, current);
                 }
@@ -287,7 +287,7 @@ internal static class YCruncher
                 // 先落盘再下发：万一应用后立刻死机，这组负压已在磁盘上
                 if (!Tuning.Apply(current, mode, algoLabel, "backoff"))
                 {
-                    Log.Write("应用负压失败！", "ERROR");
+                    Log.Write("应用负压失败", "ERROR");
                     return (false, current);
                 }
 
@@ -304,7 +304,7 @@ internal static class YCruncher
                 if (!autoAdjust)
                 {
                     // 手动模式：y-cruncher 崩溃同样只提醒，不动负压
-                    Log.Write("手动模式：y-cruncher 崩溃（视为负压不稳定），未自动调整负压。请手动调整后重新开始测试。", "WARN");
+                    Log.Write("手动模式：y-cruncher 崩溃（视为负压不稳定），未调整负压，测试停止", "WARN");
                     onManualError?.Invoke(new List<int>());
                     return (false, current);
                 }
@@ -327,15 +327,15 @@ internal static class YCruncher
                 if (!anyReduced)
                 {
                     Log.Write(scopeCores is { Count: > 0 }
-                        ? "y-cruncher 崩溃，但本次测试范围内的核心负压已全为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试。"
-                        : "y-cruncher 崩溃，但所有核心负压已为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试。", "ERROR");
+                        ? "y-cruncher 崩溃，但本次测试范围内的核心负压已全为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试"
+                        : "y-cruncher 崩溃，但所有核心负压已为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试", "ERROR");
                     return (false, current);
                 }
 
                 Log.Write($"检测到 y-cruncher 崩溃，视为不稳定：相关物理核心负压各 +{Config.StepOnError} → [{string.Join(", ", current)}]", "WARN");
                 if (!Tuning.Apply(current, mode, algoLabel, "yc-crash-backoff"))
                 {
-                    Log.Write("应用负压失败！", "ERROR");
+                    Log.Write("应用负压失败", "ERROR");
                     return (false, current);
                 }
 
@@ -388,7 +388,7 @@ internal static class YCruncher
             if (current[i] != live[i]) { current[i] = live[i]; changed = true; }
         }
         if (changed)
-            Log.Write($"已按当前实际负压刷新回退基准（跟随测试中途手动调整）: [{string.Join(", ", current)}]", "WARN");
+            Log.Write($"CPU 当前负压: [{string.Join(", ", current)}]", "WARN");
     }
 
     private static void TryKill(Process proc)
