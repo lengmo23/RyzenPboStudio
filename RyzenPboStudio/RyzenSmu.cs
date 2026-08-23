@@ -419,7 +419,7 @@ internal static class RyzenSmu
                     if (IsSlotDisabledNoLock(cpu, i)) continue;
                     var (ccd, core) = MapIndex(cpu, i);
                     if (!cpu.SetPsmMarginSingleCore(cpu.MakeCoreMask(core, ccd, 0), offsets[i]))
-                        Log.Write($"设置负压警告: 核心 {i} (CCD{ccd} Core{core}) 写入返回 false", "WARN");
+                        Log.Write($"负压写入失败: 核心 {i} (CCD{ccd} Core{core}) 返回 false", "WARN");
                 }
                 return true;
             }

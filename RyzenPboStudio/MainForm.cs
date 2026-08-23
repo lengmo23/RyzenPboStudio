@@ -136,12 +136,12 @@ internal sealed class MainForm : Form
             if (Journal.ReadLastEntry()?.Reason == Journal.ManualTakeover)
             {
                 SetStatus($"上次测试异常中断 · 负压已手动接管，开始后按此值续跑{resumeHint}", Theme.Warn);
-                Log.Write($"检测到上次测试异常中断，但之后已手动应用过 CO：点击「开始测试」将按这组手动值继续，不再回退一档{resumeHint}", "WARN");
+                Log.Write($"上次测试异常中断，手动接管负压后不再自动调整{resumeHint}", "WARN");
             }
             else
             {
                 SetStatus($"上次测试异常中断 · 开始后将自动回退恢复负压{resumeHint}", Theme.Warn);
-                Log.Write($"检测到上次测试异常中断（疑似死机/断电），点击「开始测试」将从崩溃前负压回退一档继续{resumeHint}", "WARN");
+                Log.Write($"上次测试异常中断（疑似死机/断电）：开始测试时崩溃前负压 +{Config.StepOnError}{resumeHint}", "WARN");
             }
         }
     }
@@ -1604,11 +1604,11 @@ internal sealed class MainForm : Form
         if (ok && Workspace.WasInterrupted())
         {
             if (testRunning)
-                Log.Write($"测试进行中手动应用 CO：若报错，回退将以这组值为基准 +{Config.StepOnError}", "WARN");
+                Log.Write("检测到手动应用 CO：后续回退以此值为基准", "WARN");
             else
             {
                 // 脏标记保留：中断的测试阶段仍要续跑，只是负压听用户的，不再叠加 +StepOnError。
-                Log.Write("已接管上次中断的负压：开始测试将直接用这组值，不再回退一档；中断的测试阶段照常续跑", "WARN");
+                Log.Write("检测到手动应用 CO，测试沿用手动设定续跑", "WARN");
                 SetStatus("已接管中断负压 · 开始后按此值续跑", Theme.Warn);
                 return;
             }
@@ -2034,8 +2034,8 @@ internal sealed class MainForm : Form
         {
             bool hardReset = Workspace.RecentKernelPowerEvent();
             Log.Write(hardReset
-                ? "检测到上次测试异常中断 + 内核电源事件（疑似死机/断电），进行恢复..."
-                : "检测到上次测试未正常结束，进行恢复...", "WARN");
+                ? "上次测试异常中断 + 内核电源事件（疑似死机/断电），执行恢复"
+                : "上次测试未正常结束，执行恢复", "WARN");
 
             // 崩溃前负压：优先取落盘日志最后一条，其次状态文件
             offsets = lastApplied is { Count: > 0 }
@@ -2069,7 +2069,7 @@ internal sealed class MainForm : Form
             var preRecovery = new List<int>(offsets);
             if (manualTakeover)
             {
-                Log.Write($"中断后已手动接管负压: [{string.Join(", ", offsets)}]，按这组值起跑，不再回退一档", "WARN");
+                Log.Write($"手动应用负压: [{string.Join(", ", offsets)}]", "WARN");
             }
             else
             {
@@ -2081,7 +2081,7 @@ internal sealed class MainForm : Form
 
             if (!Tuning.Apply(offsets, _testMode, seqResumePhase, "crash-recovery"))
             {
-                Log.Write("死机恢复设置负压失败！", "ERROR");
+                Log.Write("死机恢复设置负压失败", "ERROR");
                 return;
             }
 
