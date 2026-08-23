@@ -18,6 +18,11 @@ internal sealed class CoProfile
             if (File.Exists(FilePath))
                 return JsonSerializer.Deserialize<CoProfile>(File.ReadAllText(FilePath)) ?? new CoProfile();
         }
+        catch (JsonException e)
+        {
+            Log.Write($"CO 配置已损坏，丢弃: {e.Message}", "WARN");
+            try { File.Delete(FilePath); } catch { }
+        }
         catch (Exception e)
         {
             Log.Write($"读取 CO 配置失败: {e.Message}", "WARN");
@@ -29,7 +34,7 @@ internal sealed class CoProfile
     {
         try
         {
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            DurableIO.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception e)
         {
