@@ -379,6 +379,7 @@ internal static class CoreTopology
     private static int[]? _map;
     private static bool _loaded;
 
+    /// <summary>逻辑核 → OS 物理核序号（连续编号，不含屏蔽核，与 SMU 槽位不是一回事）。</summary>
     public static int PhysicalOf(int logical)
     {
         if (!_loaded)
@@ -417,11 +418,11 @@ internal static class CoreTopology
         return result;
     }
 
-    /// <summary>指定 CCD 的物理核序号列表（升序），与报错解析用的物理核编号同一口径。</summary>
+    /// <summary>指定 CCD 的 OS 物理核序号列表（升序）。索引负压表前需经 RyzenSmu.OsCoreToSlot 转成槽位。</summary>
     public static List<int> PhysicalCoresOfCcd(int ccd) =>
         LogicalCoresOfCcd(ccd).Select(PhysicalOf).Distinct().OrderBy(x => x).ToList();
 
-    /// <summary>物理核序号 → 其全部逻辑核（升序）。找不到时回退到 2n / 2n+1。</summary>
+    /// <summary>OS 物理核序号 → 其全部逻辑核（升序）。找不到时回退到 2n / 2n+1。</summary>
     public static List<int> LogicalCoresOfPhysical(IEnumerable<int> physicalCores)
     {
         var want = new HashSet<int>(physicalCores);

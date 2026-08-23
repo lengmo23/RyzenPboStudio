@@ -111,6 +111,24 @@ internal static class RyzenSmu
         catch { return slot; }
     }
 
+    /// <summary>OS 物理核序号 → 槽位。屏蔽核使 OS 编号与槽位错位（如 9600X 屏蔽槽 4/5 时
+    /// OS 核 4/5 实为槽位 6/7），凡是拿 OS 编号索引负压表的地方都要先过这里。
+    /// 查不到时原样返回，至少不会指向别的核。</summary>
+    public static int OsCoreToSlot(int osCore)
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                EnsureSlotMap(GetCpu());
+                for (int s = 0; s < _slotOsCore!.Length; s++)
+                    if (_slotOsCore[s] == osCore) return s;
+            }
+        }
+        catch { }
+        return osCore;
+    }
+
     private static bool IsSlotDisabledNoLock(Cpu cpu, int slot)
     {
         EnsureSlotMap(cpu);
