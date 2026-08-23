@@ -22,7 +22,9 @@
     <BuildDate>$([System.DateTime]::Now.ToString("yyyy-MM-dd"))</BuildDate>
     <!-- 不依赖 wmic：CPU 信息走注册表 + GetLogicalProcessorInformation -->
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- 不能开启：invariant 模式下 WinForms 处理输入法切换（WM_INPUTLANGCHANGE）时会查
+         culture 1033，查不到即抛 CultureNotFoundException 打穿消息循环，切一次输入法就崩溃 -->
+    <InvariantGlobalization>false</InvariantGlobalization>
     <ToolBundlePath>obj\$(Configuration)\$(TargetFramework)\tool-bundle.zip</ToolBundlePath>
   </PropertyGroup>
 
