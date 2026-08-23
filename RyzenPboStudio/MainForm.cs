@@ -132,8 +132,17 @@ internal sealed class MainForm : Form
             string resumeHint = st != null && st.TestMode == "SEQ" && !string.IsNullOrEmpty(st.SeqPhase)
                 ? $" · 将从中断的 {st.SeqPhase} 阶段继续"
                 : "";
-            SetStatus($"上次测试异常中断 · 开始后将自动回退恢复负压{resumeHint}", Theme.Warn);
-            Log.Write($"检测到上次测试异常中断（疑似死机/断电），点击「开始测试」将从崩溃前负压回退一档继续{resumeHint}", "WARN");
+            // 中断后已手动改过负压：那组值算用户接管，开测时原样沿用，只续跑测试阶段
+            if (Journal.ReadLastEntry()?.Reason == Journal.ManualTakeover)
+            {
+                SetStatus($"上次测试异常中断 · 负压已手动接管，开始后按此值续跑{resumeHint}", Theme.Warn);
+                Log.Write($"检测到上次测试异常中断，但之后已手动应用过 CO：点击「开始测试」将按这组手动值继续，不再回退一档{resumeHint}", "WARN");
+            }
+            else
+            {
+                SetStatus($"上次测试异常中断 · 开始后将自动回退恢复负压{resumeHint}", Theme.Warn);
+                Log.Write($"检测到上次测试异常中断（疑似死机/断电），点击「开始测试」将从崩溃前负压回退一档继续{resumeHint}", "WARN");
+            }
         }
     }
 
@@ -1587,14 +1596,22 @@ internal sealed class MainForm : Form
     private void OnCoApply()
     {
         var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
-        bool ok = Tuning.Apply(vals, "MANUAL", null, "手动应用");
+        // 测试进行中的手动调整不算接管：那之后若死机，仍应按正常规则回退一档。
+        bool testRunning = _testTask is { IsCompleted: false };
+        string reason = testRunning ? Journal.ManualInTest : Journal.ManualTakeover;
+        bool ok = Tuning.Apply(vals, "MANUAL", null, reason);
         Log.Write($"手动应用 CO: [{string.Join(", ", vals)}]" + (ok ? "" : "（写入异常，详见上方）"));
-        // 手动写入即视为用户接管本次恢复。手动值也会记进 journal，脏标记若还在，下次开测会在
-        // 用户刚设的值上再 +StepOnError（崩溃于 -10、手动改 -8，开测就成了 -6）。
         if (ok && Workspace.WasInterrupted())
         {
-            Workspace.ClearInProgress();
-            Log.Write("已手动应用 CO，清除上次测试的中断标记：本次不再自动回退恢复负压", "WARN");
+            if (testRunning)
+                Log.Write($"测试进行中手动应用 CO：若报错，回退将以这组值为基准 +{Config.StepOnError}", "WARN");
+            else
+            {
+                // 脏标记保留：中断的测试阶段仍要续跑，只是负压听用户的，不再叠加 +StepOnError。
+                Log.Write("已接管上次中断的负压：开始测试将直接用这组值，不再回退一档；中断的测试阶段照常续跑", "WARN");
+                SetStatus("已接管中断负压 · 开始后按此值续跑", Theme.Warn);
+                return;
+            }
         }
         SetStatus(ok ? "已手动应用 Curve Optimizer" : "CO 应用失败", ok ? Theme.Success : Theme.Accent);
     }
@@ -2001,7 +2018,10 @@ internal sealed class MainForm : Form
         // 先判断上次是否异常中断（脏标记），再立即为本次运行打标记
         bool interrupted = Workspace.WasInterrupted();
         var prev = Workspace.LoadState();
-        var lastApplied = Journal.ReadLastOffsets();
+        var lastEntry = Journal.ReadLastEntry();
+        var lastApplied = lastEntry?.Offsets;
+        // 中断后用户手动改过负压：以这组值起跑，不再叠加 +StepOnError
+        bool manualTakeover = lastEntry?.Reason == Journal.ManualTakeover;
         Workspace.MarkInProgress($"start {DateTime.Now:O}");
 
         int numCores = RyzenSmu.SlotCount;
@@ -2047,10 +2067,17 @@ internal sealed class MainForm : Form
             }
 
             var preRecovery = new List<int>(offsets);
-            for (int i = 0; i < offsets.Count; i++)
-                if (!RyzenSmu.IsSlotDisabled(i)) offsets[i] += Config.StepOnError;
-            Log.Write($"崩溃前负压: [{string.Join(", ", preRecovery)}]", "WARN");
-            Log.Write($"恢复：所有物理核心负压 +{Config.StepOnError} → [{string.Join(", ", offsets)}]");
+            if (manualTakeover)
+            {
+                Log.Write($"中断后已手动接管负压: [{string.Join(", ", offsets)}]，按这组值起跑，不再回退一档", "WARN");
+            }
+            else
+            {
+                for (int i = 0; i < offsets.Count; i++)
+                    if (!RyzenSmu.IsSlotDisabled(i)) offsets[i] += Config.StepOnError;
+                Log.Write($"崩溃前负压: [{string.Join(", ", preRecovery)}]", "WARN");
+                Log.Write($"恢复：所有物理核心负压 +{Config.StepOnError} → [{string.Join(", ", offsets)}]");
+            }
 
             if (!Tuning.Apply(offsets, _testMode, seqResumePhase, "crash-recovery"))
             {
