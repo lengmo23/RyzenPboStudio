@@ -27,6 +27,12 @@ internal sealed class CsState
             if (File.Exists(FilePath))
                 return JsonSerializer.Deserialize<CsState>(File.ReadAllText(FilePath)) ?? new CsState();
         }
+        catch (JsonException e)
+        {
+            // 断电常把文件留成一串 0x00，内容已无从恢复，删掉以免每次启动重复报错
+            Log.Write($"CS 备用状态已损坏，丢弃: {e.Message}", "WARN");
+            try { File.Delete(FilePath); } catch { }
+        }
         catch (Exception e)
         {
             Log.Write($"读取 CS 备用状态失败: {e.Message}", "WARN");
@@ -38,7 +44,7 @@ internal sealed class CsState
     {
         try
         {
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            DurableIO.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception e)
         {

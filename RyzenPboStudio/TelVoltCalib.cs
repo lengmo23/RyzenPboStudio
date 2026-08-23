@@ -40,6 +40,11 @@ internal sealed class TelVoltCalib
                     Index = p.TelIdx;
             }
         }
+        catch (JsonException e)
+        {
+            Log.Write($"TEL 校准数据已损坏，丢弃: {e.Message}", "WARN");
+            try { File.Delete(FilePath); } catch { }
+        }
         catch (Exception e)
         {
             Log.Write($"读取 TEL 校准失败: {e.Message}", "WARN");
@@ -88,7 +93,7 @@ internal sealed class TelVoltCalib
         Index = idx;
         try
         {
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(new Persist { TelIdx = idx, TableVersion = tableVersion }));
+            DurableIO.WriteAllText(FilePath, JsonSerializer.Serialize(new Persist { TelIdx = idx, TableVersion = tableVersion }));
         }
         catch (Exception e)
         {
