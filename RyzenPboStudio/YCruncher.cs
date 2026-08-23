@@ -115,7 +115,7 @@ internal static class YCruncher
     /// 自动模式下报错则对应物理核心 +StepOnError 后重跑整轮，直到通过或被取消；
     /// 手动模式(autoAdjust=false)下报错只提醒并停止，不改动任何负压。返回 (是否通过, 最终负压)。
     /// logicalCores 非空时只压这些逻辑核（走 config 文件，命令行的 stress 不支持指定核心），
-    /// scopeCores 则限定 y-cruncher 整体崩溃时的负压回退范围，避免误伤未参与本次测试的核心。
+    /// scopeCores（槽位口径）则限定 y-cruncher 整体崩溃时的负压回退范围，避免误伤未参与本次测试的核心。
     /// </summary>
     public static (bool ok, List<int> offsets) RunStressTest(
         IReadOnlyList<string> algorithms, int iterations, List<int> offsets,
@@ -257,28 +257,32 @@ internal static class YCruncher
             if (failed.Count > 0)
             {
                 var crashedLogical = failed.ToList();
-                var crashedPhysical = crashedLogical.Select(CoreTopology.PhysicalOf).Distinct().OrderBy(x => x).ToList();
+                // 逻辑核 → OS 物理核 → 槽位。负压表按槽位索引，少了后一步会写到屏蔽槽上
+                var crashedSlots = crashedLogical
+                    .Select(CoreTopology.PhysicalOf)
+                    .Select(RyzenSmu.OsCoreToSlot)
+                    .Distinct().OrderBy(x => x).ToList();
 
                 Log.Write($"报错逻辑核心: [{string.Join(", ", crashedLogical)}]", "WARN");
-                Log.Write($"对应物理核心: [{string.Join(", ", crashedPhysical)}]", "WARN");
+                Log.Write($"对应物理核心: [{string.Join(", ", crashedSlots)}]", "WARN");
 
                 if (!autoAdjust)
                 {
                     // 手动模式：只提醒，不动负压，交由用户自行判断如何调整
                     Log.Write("手动模式：检测到报错核心，未调整负压，测试停止", "WARN");
-                    onManualError?.Invoke(crashedPhysical);
+                    onManualError?.Invoke(crashedSlots);
                     return (false, current);
                 }
 
                 RefreshBaselineFromCpu(current);
 
-                foreach (int ph in crashedPhysical)
+                foreach (int slot in crashedSlots)
                 {
-                    if (ph >= 0 && ph < current.Count)
+                    if (slot >= 0 && slot < current.Count)
                     {
-                        int old = current[ph];
-                        current[ph] = old + Config.StepOnError;
-                        Log.Write($"  物理核心 {ph}: {old} → {current[ph]} (+{Config.StepOnError})");
+                        int old = current[slot];
+                        current[slot] = old + Config.StepOnError;
+                        Log.Write($"  物理核心 {slot}: {old} → {current[slot]} (+{Config.StepOnError})");
                     }
                 }
 

@@ -554,7 +554,9 @@ internal sealed class MainForm : Form
         var specs = new List<(string, string, string)>();
         for (int c = 0; c < ccds; c++)
         {
-            var cores = CoreTopology.PhysicalCoresOfCcd(c);
+            // 提示里的核心编号要跟 CO 编辑器的槽位一致，不能用 OS 物理核序号
+            var cores = CoreTopology.PhysicalCoresOfCcd(c)
+                .Select(RyzenSmu.OsCoreToSlot).OrderBy(x => x).ToList();
             specs.Add(($"CCD{c}", $"CCD{c}",
                 $"只压 CCD{c}（物理核 {string.Join(", ", cores)}）\n另一个 CCD 空闲时功耗预算全给被测 CCD，\n频率比全核负载时更高，结论不能直接套用到全核"));
         }
@@ -2357,12 +2359,16 @@ internal sealed class MainForm : Form
             {
                 var logical = CoreTopology.LogicalCoresOfCcd(ccd);
                 if (logical.Count == 0) return (null, null);   // 拓扑读不到就退回全核，不因此中断测试
-                return (logical, CoreTopology.PhysicalCoresOfCcd(ccd));
+                var slots = CoreTopology.PhysicalCoresOfCcd(ccd)
+                    .Select(RyzenSmu.OsCoreToSlot).OrderBy(x => x).ToList();
+                return (logical, slots);
             }
             case "CUSTOM":
             {
                 if (_customCores.Count == 0) return (null, null);
-                var logical = CoreTopology.LogicalCoresOfPhysical(_customCores);
+                // 复选框给的是槽位，问逻辑核之前要换回 OS 物理核序号
+                var osCores = _customCores.Select(RyzenSmu.SlotToOsCore).Where(c => c >= 0).ToList();
+                var logical = CoreTopology.LogicalCoresOfPhysical(osCores);
                 if (logical.Count == 0) return (null, null);
                 return (logical, new List<int>(_customCores));
             }
