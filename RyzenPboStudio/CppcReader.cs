@@ -4,11 +4,9 @@ using System.Xml.Linq;
 namespace RyzenPboStudio;
 
 /// <summary>CPPC 每核性能排名的备用来源：Windows 内核电源事件 55。
-/// Zen3（Vermeer）的 CPUID Fn8000_0008_EBX[27] 为 0，MSR CPPC_CAP1/CAP2/REQ 在硬件上不存在——
-/// 实测 5800X3D 上三个 MSR 读取均返回成功但值全为 0，写 CPPC_ENABLE 也变不出来。
-/// Windows 走 ACPI _CPC 拿同一份数据，开机枚举处理器时逐逻辑核记进事件 55，
-/// 其 MaximumPerformancePercent 与 MSR 路径的 Highest×100/Nominal 同刻度
-/// （9950X 上 16 个核逐核相等，故两条路径的读数可以直接互换）。</summary>
+/// Zen3（Vermeer）的 CPUID Fn8000_0008_EBX[27] 为 0，MSR CPPC_CAP1/CAP2/REQ 在硬件上不存在，
+/// 三个 MSR 均读回全 0。Windows 走 ACPI _CPC 拿同一份数据，开机枚举处理器时逐逻辑核记进事件 55，
+/// 其 MaximumPerformancePercent 与 MSR 路径的 Highest×100/Nominal 同刻度，两条路径可直接互换。</summary>
 internal static class CppcReader
 {
     private const string Provider = "Microsoft-Windows-Kernel-Processor-Power";

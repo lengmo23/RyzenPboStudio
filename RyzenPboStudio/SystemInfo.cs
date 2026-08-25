@@ -5,8 +5,7 @@ using Microsoft.Win32;
 namespace RyzenPboStudio;
 
 /// <summary>
-/// CPU / 权限相关查询。原 Python 版用 wmic 取 CPU 名称和核心数，
-/// wmic 已在新版 Windows 11 中移除，这里改用注册表 + Win32 API，去掉该隐患。
+/// CPU / 权限相关查询。一律走注册表 + Win32 API：wmic 已在新版 Windows 11 中移除，不能依赖。
 /// </summary>
 internal static class SystemInfo
 {
@@ -55,7 +54,7 @@ internal static class SystemInfo
         }
     }
 
-    /// <summary>物理核心数。失败时回退为 逻辑核心数 / 2（与原版一致）。</summary>
+    /// <summary>物理核心数。失败时回退为 逻辑核心数 / 2。</summary>
     public static int GetPhysicalCoreCount()
     {
         try
@@ -373,7 +372,7 @@ internal static class SystemInfo
     }
 }
 
-/// <summary>逻辑核→物理核映射的缓存包装，拿不到拓扑时回退到旧的 c/2 假设。</summary>
+/// <summary>逻辑核→物理核映射的缓存包装，拿不到拓扑时回退到 c/2 假设。</summary>
 internal static class CoreTopology
 {
     private static int[]? _map;
