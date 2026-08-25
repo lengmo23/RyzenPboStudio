@@ -991,7 +991,14 @@ internal sealed class MainForm : Form
             });
             SetStatus($"正在下载更新 {info.Tag}...", Theme.Warn);
             zipPath = await Updater.DownloadAsync(info, progress,
-                s => { source = s; lastPercent = -1; });   // 换源后让下一次回调必定刷新
+                s => { source = s; lastPercent = -1; },   // 换源后让下一次回调必定刷新
+                // 连接与换源期间没有进度可报，把阶段文字直接写到状态条，等待过程才可见
+                stage => Ui(() =>
+                {
+                    if (IsDisposed) return;
+                    _updateLink.Text = "下载中...";
+                    SetStatus($"更新 {info.Tag} · {stage}", Theme.Warn);
+                }));
         }
         catch (Exception e)
         {

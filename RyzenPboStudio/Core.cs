@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace RyzenPboStudio;
 
-/// <summary>用户可调参数（对应原 Python 文件顶部的常量）。</summary>
+/// <summary>用户可调参数。</summary>
 internal static class Config
 {
     public const int DefaultDuration = 120; // 每轮测试时间（秒）
@@ -15,7 +15,7 @@ internal static class Config
     public const int StepOnError = 2;       // 每次报错后负压增加的步长
 }
 
-/// <summary>日志：仅输出到界面（事件）。不再自动落盘，需用户在界面点「保存日志」手动导出。</summary>
+/// <summary>日志：仅输出到界面（事件）；落盘需用户在界面点「保存日志」手动导出。</summary>
 internal static class Log
 {
     public static event Action<string>? OnLine;
@@ -27,7 +27,7 @@ internal static class Log
     }
 }
 
-/// <summary>持久化的测试状态（JSON 字段名与原 Python 版保持一致，可互读）。</summary>
+/// <summary>持久化的测试状态。JSON 字段名是跨版本互读的契约，改名会让旧状态文件失效。</summary>
 internal sealed class TestState
 {
     [JsonPropertyName("offsets")] public List<int> Offsets { get; set; } = new();
@@ -82,7 +82,7 @@ internal static class ProcUtil
 /// <summary>工作目录、路径、状态文件、关机标记等。</summary>
 internal static class Workspace
 {
-    /// <summary>EXE 所在目录（外部工具基于这里查找）。运行时产物不再散落在此，见 LogsDir / ProfilesDir。</summary>
+    /// <summary>EXE 所在目录（外部工具基于这里查找）。运行时产物见 LogsDir / ProfilesDir。</summary>
     public static readonly string BaseDir =
         AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
 

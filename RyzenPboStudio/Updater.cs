@@ -55,10 +55,15 @@ internal static class Updater
     /// <summary>网盘提取码。</summary>
     public const string PanCode = "csdf";
 
-    /// <summary>下载源，按顺序尝试。空前缀是直连 GitHub，始终排第一；其余是社区镜像，
-    /// 做法都是把原始 URL 拼在自己域名后面转发。镜像失效、限速、跑路都是常态，
-    /// 因此逐个试、全失败才报错，且每次下完都要核对大小——镜像挂掉时往往返回一个
-    /// HTML 错误页，光看 HTTP 200 分辨不出来。</summary>
+    /// <summary>下载源，按顺序尝试：空前缀是直连 GitHub，其余是把原始 URL 拼在自己域名后转发的
+    /// 社区镜像。镜像随时可能失效或限速，故逐个试、全失败才报错。</summary>
+    /// <summary>单个源的响应头等待上限：这么久拿不到响应头就判它不可用，直接换下一个。</summary>
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>传输过程中的空闲上限：连续这么久收不到新数据才判失败。只要还在收数据就不会超时，
+    /// 因此慢速网络下的大包不会被误杀。</summary>
+    private static readonly TimeSpan IdleTimeout = TimeSpan.FromSeconds(20);
+
     private static readonly (string Prefix, string Name)[] DownloadSources =
     {
         ("", "GitHub"),
@@ -169,9 +174,10 @@ internal static class Updater
     }
 
     /// <summary>下载 zip 到临时目录，直连失败则依次改用镜像。progress 回调传 0-100，
-    /// onSource 在每次换源时告知源名，供界面显示当前正从哪里下载。</summary>
+    /// onSource 在每次换源时告知源名，onStage 推送「正在连接 / 正在换源」等阶段文字，
+    /// 让界面在还没有进度可报的等待期间也有反馈。</summary>
     public static async Task<string> DownloadAsync(UpdateInfo info, IProgress<int>? progress,
-        Action<string>? onSource = null, CancellationToken token = default)
+        Action<string>? onSource = null, Action<string>? onStage = null, CancellationToken token = default)
     {
         string dir = Path.Combine(Path.GetTempPath(), "RyzenPboStudioUpdate");
         Directory.CreateDirectory(dir);
@@ -182,21 +188,23 @@ internal static class Updater
         {
             token.ThrowIfCancellationRequested();
             onSource?.Invoke(name);
+            onStage?.Invoke($"正在连接 {name}…");
             try
             {
                 await FetchAsync(prefix.Length == 0 ? info.DownloadUrl : prefix + info.DownloadUrl,
-                    zipPath, info.Size, progress, token);
+                    zipPath, info.Size, progress, onStage, name, token);
                 Log.Write($"更新包下载完成（{name}）");
                 return zipPath;
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                throw;   // 用户取消，不再往下试
+                throw;   // 仅用户主动取消走这里；超时由 FetchAsync 转成 TimeoutException，照常换源
             }
             catch (Exception e)
             {
                 Log.Write($"从 {name} 下载更新包失败：{e.Message}", "WARN");
                 errors.Add($"{name}：{e.Message}");
+                onStage?.Invoke($"{name} {ShortReason(e)}，正在换源…");
             }
         }
 
@@ -206,33 +214,58 @@ internal static class Updater
     /// <summary>从单个 URL 下载并核对大小。大小取自 GitHub API 报告的资产尺寸，
     /// 对不上就当这一源失败——镜像失效时常返回 HTML 错误页，只看状态码分辨不出来。</summary>
     private static async Task FetchAsync(string url, string zipPath, long expectedSize,
-        IProgress<int>? progress, CancellationToken token)
+        IProgress<int>? progress, Action<string>? onStage, string sourceName, CancellationToken token)
     {
-        // 显式指明走系统代理。国内多数用户靠 clash 一类工具设置系统代理访问 GitHub，
-        // 这也是 HttpClient 的默认行为，写出来是免得日后被误改。
+        // 显式指明走系统代理：国内多数用户靠 clash 一类工具设置系统代理访问 GitHub。
         using var handler = new HttpClientHandler
         {
             UseProxy = true,
             Proxy = HttpClient.DefaultProxy,
             UseDefaultCredentials = true,
         };
-        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(30) };
+        // 不用 HttpClient.Timeout：它限制的是整个请求的总时长，慢速网络下的大包会被误杀。
+        // 改由下面两个链接 CTS 分别看住「连不上」与「连上后不再来数据」。
+        using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         http.DefaultRequestHeaders.UserAgent.ParseAdd($"RyzenPboStudio/{CurrentVersion}");
 
-        using (HttpResponseMessage resp = await http.GetAsync(
-                   url, HttpCompletionOption.ResponseHeadersRead, token))
+        using var headCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        headCts.CancelAfter(ConnectTimeout);
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, headCts.Token);
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            throw new TimeoutException($"{ConnectTimeout.TotalSeconds:0} 秒无响应");
+        }
+
+        using (resp)
         {
             resp.EnsureSuccessStatusCode();
             long total = resp.Content.Headers.ContentLength ?? expectedSize;
+            onStage?.Invoke($"正在从 {sourceName} 下载…");
 
             using Stream src = await resp.Content.ReadAsStreamAsync(token);
             using var dst = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
 
             byte[] buffer = new byte[81920];
             long done = 0;
-            int read;
-            while ((read = await src.ReadAsync(buffer, token)) > 0)
+            using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            idleCts.CancelAfter(IdleTimeout);
+            while (true)
             {
+                int read;
+                try
+                {
+                    read = await src.ReadAsync(buffer, idleCts.Token);
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"传输停滞 {IdleTimeout.TotalSeconds:0} 秒");
+                }
+                if (read <= 0) break;
+                idleCts.CancelAfter(IdleTimeout);   // 收到数据就把空闲计时推后
                 await dst.WriteAsync(buffer.AsMemory(0, read), token);
                 done += read;
                 if (total > 0) progress?.Report((int)(done * 100 / total));
@@ -243,6 +276,16 @@ internal static class Updater
         if (expectedSize > 0 && actual != expectedSize)
             throw new IOException($"文件大小不符，应为 {expectedSize} 字节、实际 {actual} 字节");
     }
+
+    /// <summary>把下载失败的原因压成状态条放得下的短语。</summary>
+    private static string ShortReason(Exception e) => e switch
+    {
+        TimeoutException => e.Message,
+        HttpRequestException { StatusCode: { } code } => $"返回 {(int)code}",
+        HttpRequestException => "连接失败",
+        IOException => "内容不完整",
+        _ => "失败",
+    };
 
     /// <summary>
     /// 解压到临时目录并定位新版本的根目录（发布包顶层是一个版本命名的文件夹）。
