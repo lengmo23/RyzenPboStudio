@@ -224,6 +224,7 @@ internal static class RyzenSmu
         public int CpuVidIdx;        // 遥测组 {VID, TEL, I, P} 的起点
         public int CpuTelIdx;        // 组内第 2 项，实测电压：TEL × I = P 恒成立
         public int PerCoreVoltIdx;   // 每核电压段起点；-1 表示未探到，此时每核 VID 不显示
+        public int PerCoreFreqIdx;   // 每核频率段起点(GHz)；-1 表示未探到，此时频率回退 MSR 档位快照
     }
 
     private static bool IsPtVolt(float v) => v is >= 0.20f and <= 1.60f;
@@ -247,6 +248,7 @@ internal static class RyzenSmu
         if (lay == null) return null;
 
         lay.PerCoreVoltIdx = ProbePerCoreVolt(t, cores);
+        lay.PerCoreFreqIdx = ProbePerCoreFreq(t, lay.PerCoreVoltIdx, cores);
         return lay;
     }
 
@@ -325,6 +327,30 @@ internal static class RyzenSmu
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtVolt(t[i + k]);
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtTemp(t[i + cores + k]);
             if (ok) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>每核频率段（GHz），其后紧跟同样长的每核有效频率段。段位置逐代不同——Zen4/Zen5 紧跟
+    /// 每核温度段，Zen3(Vermeer) 中间还隔着两段，故自温度段之后按段长逐段扫，不写死偏移。
+    /// 判据是「本段是合理频率且下一段不超过本段」；有效频率给 10% 余量：两段不是同一瞬间采样，
+    /// 9950X 实测转储里出现过 FREQEFF 5.503 高于 CORE_FREQ 5.450 的倒挂。屏蔽槽填 0，跳过不参与匹配。
+    /// SMU 报的这份频率读表即得、不必绑核，空闲核不会被唤醒拉到 boost 档。探不中返回 -1。</summary>
+    private static int ProbePerCoreFreq(float[] t, int voltIdx, int cores)
+    {
+        if (voltIdx < 0) return -1;
+        for (int seg = 2; seg <= 6; seg++)
+        {
+            int f = voltIdx + seg * cores;
+            if (f + 2 * cores > t.Length) break;
+            bool ok = true;
+            for (int k = 0; k < cores && ok; k++)
+            {
+                if (IsSlotMaskedNoLock(k)) continue;
+                float freq = t[f + k], eff = t[f + cores + k];
+                ok = freq is >= 0.2f and <= 7.5f && eff >= -0.01f && eff <= freq * 1.10f;
+            }
+            if (ok) return f;
         }
         return -1;
     }

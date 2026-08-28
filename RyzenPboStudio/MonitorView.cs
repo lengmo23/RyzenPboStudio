@@ -490,8 +490,8 @@ internal sealed class MonitorView : UserControl
         catch { return false; }
     }
 
-    // 后台采样：每秒一窗。FREQ 取 HW P-state FID 快照(0xC0010293)，回退 ΔAPERF/ΔMPERF×P0；
-    // EFFREQ = ΔAPERF/ΔTSC×TSC频率，TSC 不可读时回退墙钟。
+    // 后台采样：每秒一窗。FREQ 取 PM Table 的每核频率，PM Table 不可用时回退 HW P-state 档位快照
+    // (0xC0010293)，再不行用 ΔAPERF/ΔMPERF×TSC频率；EFFREQ = ΔAPERF/ΔTSC×TSC频率，TSC 不可读时回退墙钟。
     // APERF/MPERF/TSC 逐 SMT 线程采样，每核取最忙线程；只在窗口首尾各采一次，
     // 避免高频 affinity 读 MSR 反复唤醒空闲核、把它们拉到 boost 污染频率读数。
     private void Worker()
@@ -547,9 +547,9 @@ internal sealed class MonitorView : UserControl
                     catch { /* 本轮 PM Table 不可用 */ }
                     if (pmRefreshed && cpu.powerTable?.Table is { } tbl)
                     {
-                        // 每核电压段探不中时不锁定这份残缺布局：屏蔽槽/深度空闲会让某一帧匹配不上，
+                        // 每核电压段或频率段探不中时不锁定这份残缺布局：屏蔽槽/深度空闲会让某一帧匹配不上，
                         // 下一帧还有机会。探到完整布局后才停止重试。
-                        if (ptLayout is not { PerCoreVoltIdx: >= 0 })
+                        if (ptLayout is not { PerCoreVoltIdx: >= 0, PerCoreFreqIdx: >= 0 })
                             ptLayout = RyzenSmu.ProbePtLayout(tbl, n) ?? ptLayout;
                         if (ptLayout is { } lay)
                         {
@@ -578,6 +578,8 @@ internal sealed class MonitorView : UserControl
             // 窗口终点：各核每个 SMT 线程的 APERF / MPERF / TSC
             lock (RyzenSmu.IoLock)
             {
+                // PM Table 能给出每核频率时就不读这个 MSR：读 per-core MSR 必须绑核，绑核会唤醒空闲核
+                bool needMsrFreq = ptLayout is not { PerCoreFreqIdx: >= 0 };
                 for (int i = 0; i < n; i++)
                 {
                     for (int t = 0; t < tpc; t++)
@@ -586,7 +588,7 @@ internal sealed class MonitorView : UserControl
                         lastTick[x] = Stopwatch.GetTimestamp();
                         ReadCounters(i, t, out lastA[x], out lastM[x], out lastT[x]);
                     }
-                    psSnap[i] = ReadMsr(i, 0xC0010293);   // HW P-state 为物理核共享，读线程 0 即可
+                    if (needMsrFreq) psSnap[i] = ReadMsr(i, 0xC0010293);   // HW P-state 为物理核共享，读线程 0 即可
                 }
             }
 
@@ -658,9 +660,8 @@ internal sealed class MonitorView : UserControl
                 busyFreq[i] = (bestM > 0 && tscFreqMHz > 0) ? (double)bestA / bestM * tscFreqMHz : effFreq[i];
             }
 
-            // FREQ 优先用 HW P-state FID 快照（MSR 0xC0010293，与 HWiNFO "Core N Clock" 同源同口径）：
-            // Zen5(家族1Ah+) 频率 = fid[11:0]×5MHz；更早代际用 fid/dfs 算倍频×100。快照恒为离散 boost 档
-            // （如 5725/5450），而 APERF/MPERF 平均含升降频斜坡会偏离档位。MSR 读 0（不可读）时保留平均值回退。
+            // PM Table 不可用时的回退：HW P-state 档位快照。Zen5(家族1Ah+) 频率 = fid[11:0]×5MHz，
+            // 更早代际用 fid/dfs 算倍频×100。读它要绑核、会唤醒空闲核把频率拉到满档，只能当兜底。
             double bclkCorr = bclk > 0 ? bclk / 100.0 : 1.0;
             for (int i = 0; i < n; i++)
             {
@@ -676,6 +677,16 @@ internal sealed class MonitorView : UserControl
                 }
                 if (snapMHz > 0) busyFreq[i] = snapMHz;
             }
+
+            // FREQ 首选 PM Table 的每核频率：SMU 直接报告，读表不绑核，空闲核不会被唤醒拉到 boost 档，
+            // 与 Hydra 的每核频率同源。ΔAPERF/ΔMPERF 是活动平均（会算出超过档位的值），
+            // MSR 档位快照则绑核即唤醒、恒读满档，两者都反映不出降 Fmax 后的真实跳动。
+            if (ptLayout is { PerCoreFreqIdx: >= 0 } ptl && ptSnap is { } pts && pts.Length > ptl.PerCoreFreqIdx + n)
+                for (int i = 0; i < n; i++)
+                {
+                    double mhz = pts[ptl.PerCoreFreqIdx + i] * 1000.0;
+                    if (mhz > 0) busyFreq[i] = mhz;
+                }
 
             // 若 HWiNFO 在运行并开启共享内存，FREQ 直接采用其 Core Clock 原值，与 HWiNFO 完全一致；否则保留自算忙时频率
             var hwClocks = HwInfoReader.ReadCoreClocks();
