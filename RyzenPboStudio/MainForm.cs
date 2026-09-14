@@ -2009,8 +2009,7 @@ internal sealed class MainForm : Form
         _testCompletedNormally = false;
         try
         {
-            RunTest();
-            _testCompletedNormally = true;
+            _testCompletedNormally = RunTest();
         }
         catch (Exception e)
         {
@@ -2022,7 +2021,8 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void RunTest()
+    /// <summary>返回 true 表示所有测试都已跑完；未跑完（含 y-cruncher 中途退出、下发负压失败）返回 false。</summary>
+    private bool RunTest()
     {
         // 先判断上次是否异常中断（脏标记），再立即为本次运行打标记
         bool interrupted = Workspace.WasInterrupted();
@@ -2091,7 +2091,7 @@ internal sealed class MainForm : Form
             if (!Tuning.Apply(offsets, _testMode, seqResumePhase, "crash-recovery"))
             {
                 Log.Write("死机恢复设置负压失败", "ERROR");
-                return;
+                return false;
             }
 
             if (_testMode == "SEQ" && !string.IsNullOrEmpty(seqResumePhase))
@@ -2137,6 +2137,7 @@ internal sealed class MainForm : Form
         int scopeStart = eachCcd ? Math.Clamp(_scopeCcd, 0, CoreTopology.CcdCount - 1) : 0;
         int scopeEnd = eachCcd ? CoreTopology.CcdCount - 1 : 0;
 
+        bool allPassed = true;
         for (int pass = scopeStart; pass <= scopeEnd; pass++)
         {
             if (_stopRequested) break;
@@ -2148,7 +2149,11 @@ internal sealed class MainForm : Form
 
             bool passOk = RunOnePass(scopeLogical, scopeCores, scopeLabel);
             seqResumePhase = null;   // 下一个 CCD 从第一个阶段重新开始
-            if (!passOk) break;      // 本轮没跑完（取消／无法继续），不再往下一个 CCD 走
+            if (!passOk)             // 本轮没跑完（取消／无法继续），不再往下一个 CCD 走
+            {
+                allPassed = false;
+                break;
+            }
             if (pass < scopeEnd)
             {
                 Log.Write($">>> CCD{pass} 测试完成，清理进程...");
@@ -2257,6 +2262,17 @@ internal sealed class MainForm : Form
             return passOk;
         }
 
+        // 非用户停止却没跑完：不能当作测试完成输出最终结果
+        if (!allPassed && !_stopRequested)
+        {
+            Log.Write($"测试未完成，未生成最终结果。当前负压: [{string.Join(", ", offsets)}]", "WARN");
+            Workspace.ClearState();
+            Workspace.ClearInProgress();   // 未发生死机，保留脏标记会让下次开测再叠加一次回退
+            var partialSnapshot = new List<int>(offsets);
+            Ui(() => _offsetsLabel.Text = $"当前负压: [{string.Join(", ", partialSnapshot)}]");
+            return false;
+        }
+
         Log.Write("\n" + new string('=', 50));
         Log.Write("最终负压设置:");
         for (int i = 0; i < offsets.Count; i++)
@@ -2292,6 +2308,7 @@ internal sealed class MainForm : Form
 
         var finalSnapshot = new List<int>(offsets);
         Ui(() => _offsetsLabel.Text = $"最终负压: [{string.Join(", ", finalSnapshot)}]");
+        return true;
     }
 
     private void TestFinished()
@@ -2305,6 +2322,8 @@ internal sealed class MainForm : Form
 
         if (_testCompletedNormally && !_stopRequested)
             MessageBox.Show("测试已完成！", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        else if (!_stopRequested)
+            MessageBox.Show("测试未跑完，未生成最终结果，原因见运行日志。", "测试未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         else
             MessageBox.Show("测试已停止，进程已清理完成。", "已停止", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
