@@ -681,10 +681,11 @@ internal sealed class MonitorView : UserControl
             // FREQ 首选 PM Table 的每核频率：SMU 直接报告，读表不绑核，空闲核不会被唤醒拉到 boost 档，
             // 与 Hydra 的每核频率同源。ΔAPERF/ΔMPERF 是活动平均（会算出超过档位的值），
             // MSR 档位快照则绑核即唤醒、恒读满档，两者都反映不出降 Fmax 后的真实跳动。
+            // SMU 按 100MHz 外频报这份频率，超外频时同样要按 BCLK 换算。
             if (ptLayout is { PerCoreFreqIdx: >= 0 } ptl && ptSnap is { } pts && pts.Length > ptl.PerCoreFreqIdx + n)
                 for (int i = 0; i < n; i++)
                 {
-                    double mhz = pts[ptl.PerCoreFreqIdx + i] * 1000.0;
+                    double mhz = pts[ptl.PerCoreFreqIdx + i] * 1000.0 * bclkCorr;
                     if (mhz > 0) busyFreq[i] = mhz;
                 }
 
