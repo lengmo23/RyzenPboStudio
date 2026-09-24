@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -74,38 +75,82 @@ internal static class YCruncher
         return path;
     }
 
-    /// <summary>强制结束 y-cruncher 及其架构子进程。</summary>
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string? lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryInformationJobObject(IntPtr hJob, int infoClass, out JobBasicAccounting info, int size, IntPtr retLen);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobBasicAccounting
+    {
+        public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetInformationJobObject(IntPtr hJob, int infoClass, ref JobExtendedLimit info, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobExtendedLimit
+    {
+        // JOBOBJECT_BASIC_LIMIT_INFORMATION
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+        // IO_COUNTERS
+        public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+
+    private const int JobObjectBasicAccountingInformation = 1;
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    // Holds only the y-cruncher processes this app started; its arch child (e.g. "24-ZN5 ~ Komari")
+    // joins automatically, so Kill() never touches a y-cruncher the user launched separately.
+    // The handle is never closed: the OS closes it when this app exits (even if killed), which ends the job.
+    private static readonly Lazy<IntPtr> Job = new(CreateJob);
+
+    private static IntPtr CreateJob()
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) return job;
+        var limit = new JobExtendedLimit { LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE };
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limit, Marshal.SizeOf<JobExtendedLimit>()))
+            Log.Write($"设置 y-cruncher 进程作业随程序退出失败 (错误 {Marshal.GetLastWin32Error()})", "WARN");
+        return job;
+    }
+
+    /// <summary>强制结束本程序启动的 y-cruncher 及其架构子进程。</summary>
     public static void Kill()
     {
+        IntPtr job = Job.Value;
+        if (job == IntPtr.Zero) return;
+
         Log.Write("正在强制结束 y-cruncher 进程...");
+        TerminateJobObject(job, 1);
 
-        foreach (var p in Process.GetProcessesByName("y-cruncher"))
-        {
-            try
-            {
-                p.Kill(entireProcessTree: true);
-                p.WaitForExit(3000);
-                Log.Write($"已结束进程: {p.ProcessName} (PID: {p.Id})");
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
-
-        // 兜底：清理 y-cruncher 启动的架构子进程，如 "24-ZN5 ~ Komari"
-        foreach (var p in Process.GetProcesses())
-        {
-            try
-            {
-                string n = p.ProcessName;
-                if (Regex.IsMatch(n, @"^\d{2}-") && n.Contains('~'))
-                {
-                    p.Kill(entireProcessTree: true);
-                    Log.Write($"已结束进程: {n} (PID: {p.Id})");
-                }
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
+        // 终止是异步的，等进程真正退出（释放内存）后再开下一阶段
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 3000
+               && QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out var info,
+                                            Marshal.SizeOf<JobBasicAccounting>(), IntPtr.Zero)
+               && info.ActiveProcesses > 0)
+            Thread.Sleep(50);
 
         Log.Write("y-cruncher 进程清理完成");
     }
@@ -176,6 +221,8 @@ internal static class YCruncher
                 proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lines.Add(e.Data); };
 
                 proc.Start();
+                if (Job.Value == IntPtr.Zero || !AssignProcessToJobObject(Job.Value, proc.Handle))
+                    Log.Write($"y-cruncher 加入进程作业失败 (错误 {Marshal.GetLastWin32Error()})，结束测试时可能无法清理其子进程", "WARN");
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
 
