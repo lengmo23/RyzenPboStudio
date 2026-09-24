@@ -812,7 +812,7 @@ internal sealed class MonitorView : UserControl
                     {
                         double sum = 0; int cnt = 0;
                         for (int i = 0; i < n; i++)
-                            if ((uint)i / coresPerCcd == c) { sum += fOcc[i]; cnt++; }
+                            if ((uint)i / coresPerCcd == c && !slotDisabled[i]) { sum += fOcc[i]; cnt++; }
                         ccdViews[c].UpdateHeader(cnt > 0 ? sum / cnt : 0, fTemp[c]);
                         ccdViews[c].UpdateData(fFreq, fEff, fVolt, fCo, fOcc, coresPerCcd);
                     }
