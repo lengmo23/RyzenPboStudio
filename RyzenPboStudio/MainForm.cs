@@ -76,8 +76,8 @@ internal sealed class MainForm : Form
     private int _singleRounds = Config.DefaultBkt;   // 单项测试轮数（默认 10）
     private List<int> _initialOffsets = new();
 
-    // 测试范围：ALL=全部核心（走原有命令行，行为不变），CCD=单个 CCD，
-    // EACH=逐 CCD 依次跑完整轮次，CUSTOM=自定义物理核。后三者走 y-cruncher 配置文件限定逻辑核。
+    // 测试范围：ALL=全部核心（走命令行），CCD=单个 CCD，EACH=逐 CCD 依次跑完整轮次，
+    // CUSTOM=自定义物理核。后三者走 y-cruncher 配置文件限定逻辑核。
     private string _testScope = "ALL";
     private int _scopeCcd;
     private List<int> _customCores = new();
@@ -86,7 +86,7 @@ internal sealed class MainForm : Form
     private static readonly string[] ComboAlgos = { "VSTv3", "BKT", "SVT" };
     private const int ComboRounds = 10;
 
-    // 单项测试下拉选项：显示文本 + 传给 y-cruncher 的组件名（全部已验证合法；VSTv3 是 VT3 的别名）。
+    // 单项测试下拉选项：显示文本 + 传给 y-cruncher 的组件名（VSTv3 是 VT3 的别名）。
     private static readonly (string display, string mode, string algo)[] ModeOptions =
     {
         ("BKT — Basecase + Karatsuba (Scalar Integer)", "BKT", "BKT"),
@@ -102,8 +102,7 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = "AMD Ryzen PBO Studio";
-        // 宽度容纳双 CCD 并排（9950X 等 16 核），不做横向滚动；
-        // 高度给测试设置卡留出内容与开始/停止之间的呼吸空间，放不下的屏幕由 FitToScreen 等比缩回
+        // 宽度容纳双 CCD 并排；屏幕放不下时由 FitToScreen 等比缩小
         ClientSize = new Size(1370, 950);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -272,8 +271,8 @@ internal sealed class MainForm : Form
         var cfg = BuildConfigCard();
         var logCard = BuildLogCard(_logBoxTesting);
 
-        // 左栏固定宽度而非百分比，否则窗口变窄时会裁掉开始/停止按钮。
-        // +60 = 卡片内边距 32 + 栏间距 6 + 余量 22（容得下 body 的纵向滚动条，不能再压低）。
+        // 左栏固定宽度，窗口变窄时不裁掉开始/停止按钮。
+        // +60 = 卡片内边距 32 + 栏间距 6 + 纵向滚动条余量 22。
         var top = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -413,8 +412,7 @@ internal sealed class MainForm : Form
         var card = NewCard();
         card.Margin = new Padding(0);
 
-        // 单列纵向排布，各段统一 TestRowWidth，多余横向空间让给日志。
-        // AutoScroll 是兜底：高 DPI / 大字体下内容放不下时出滚动条，而不是裁掉底部的开始/停止按钮。
+        // 单列纵向排布，各段统一 TestRowWidth；高 DPI 下放不下时出滚动条，不裁掉开始/停止按钮。
         var body = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -448,7 +446,7 @@ internal sealed class MainForm : Form
         _durationBox.Text = _durationSeconds.ToString();
         _roundsBox.Text = _singleRounds.ToString();
 
-        // 多项测试（顺序 / 组合）：两键横排，测哪些项、跑几轮放悬停提示，标题后的 ⓘ 是可悬停的提示
+        // 多项测试（顺序 / 组合）：两键横排，测试项与轮数放在悬停提示里
         var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int modeGap = 10;
         int modeBtnWidth = (TestRowWidth - modeGap) / 2;
@@ -462,7 +460,7 @@ internal sealed class MainForm : Form
         modeRow.Controls.Add(_seqBtn);
         modeRow.Controls.Add(_comboBtn);
 
-        // 负压调整方式：自动回退 / 手动（只提醒）。两键横排等分一行，省下的纵向空间给测试范围。
+        // 负压调整方式：自动回退 / 手动（只提醒），两键横排等分一行
         var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int adjGap = 10;
         int adjBtnWidth = (TestRowWidth - adjGap) / 2;
@@ -486,14 +484,13 @@ internal sealed class MainForm : Form
             ("自定义…", "CUSTOM", "自行勾选参与压测的物理核心"),
         });
         var scopeRow2 = BuildCcdScopeRow();
-        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 6);   // 与 CCD 行拉开，别看着像同一行
+        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 6);   // 与 CCD 行拉开间距
 
-        // 开始 / 停止：停靠卡片底部（不随内容排在最后），两键等分 TestRowWidth（含中间 10px 间隔）。
-        // 这样内容与按钮之间的留白由卡片高度自动分配，换 DPI 时按钮也始终贴底。
+        // 开始 / 停止：停靠卡片底部，两键等分 TestRowWidth（含中间 10px 间隔）
         const int runGap = 10;
         int runBtnWidth = (TestRowWidth - runGap) / 2;
         var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Margin = new Padding(0, 0, 0, 6) };
-        // 空心描边而非实心：选中的测试模式/范围已经是实心 AMD 红，两块大红会互相抢视觉。
+        // 空心描边，与实心红的已选模式/范围按钮区分
         _startBtn.Normal = Theme.SurfaceAlt;
         _startBtn.Hover = Theme.Border;
         _startBtn.Outline = Theme.Accent;
@@ -676,8 +673,7 @@ internal sealed class MainForm : Form
         btnRow.Controls.Add(okBtn);
         btnRow.Controls.Add(cancelBtn);
 
-        // 两行必须排进同一个 TableLayoutPanel：未停靠的内容不会给 Dock=Bottom 的兄弟让位，
-        // 复选框会盖住确定/取消。
+        // 复选框与按钮放在同一个 TableLayoutPanel 里，避免复选框盖住确定/取消
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -895,8 +891,7 @@ internal sealed class MainForm : Form
     {
         if (_updateBusy) return;
 
-        // 压测期间不允许更新：更新要退出程序，中途退出会留下脏标记，
-        // 且 CO 已下发到 CPU，应当先让测试正常收尾。
+        // 压测期间不更新：更新需退出程序，应先让测试正常收尾
         if (_testTask is { IsCompleted: false })
         {
             if (manual)
@@ -938,8 +933,7 @@ internal sealed class MainForm : Form
             _knownNewVersion = info.Version;
             RefreshUpdateLinkText();
 
-            // 用户点过「否」的版本，启动时不再弹窗打扰；状态条仍显示有新版本，
-            // 点「有新版本 vX.Y.Z」照样能走更新流程。
+            // 用户跳过的版本启动时不再弹窗，状态条仍显示新版本，点击可更新
             if (!manual && Updater.IsSkipped(info.Version)) return;
 
             string notes = info.Notes.Length > 600 ? info.Notes[..600] + "\n..." : info.Notes;
@@ -979,7 +973,7 @@ internal sealed class MainForm : Form
         string zipPath;
         try
         {
-            // 百分比每 80KB 报一次，47MB 的整包会报上百次；只在数值真的变了才刷界面。
+            // 百分比变化时才刷新界面
             int lastPercent = -1;
             string source = "";
             var progress = new Progress<int>(p =>
@@ -1043,9 +1037,7 @@ internal sealed class MainForm : Form
         Close();
     }
 
-    /// <summary>用系统默认浏览器打开链接。</summary>
-    /// <summary>下载源全部失败后的兜底提示：给出网盘地址与提取码。
-    /// 两个框都是只读 TextBox 而非 Label，用户可以直接选中复制——MessageBox 里的文字选不中。</summary>
+    /// <summary>下载源全部失败后的兜底提示：给出网盘地址与提取码，用只读 TextBox 显示以便复制。</summary>
     private void ShowPanFallbackDialog(string tag)
     {
         using var dlg = new Form
@@ -1178,6 +1170,7 @@ internal sealed class MainForm : Form
         return b;
     }
 
+    /// <summary>用系统默认浏览器打开链接。</summary>
     private static void OpenUrl(string url)
     {
         try
@@ -1605,7 +1598,7 @@ internal sealed class MainForm : Form
     private void OnCoApply()
     {
         var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
-        // 测试进行中的手动调整不算接管：那之后若死机，仍应按正常规则回退一档。
+        // 测试中手动调整不算接管，之后若死机仍按正常规则回退一档
         bool testRunning = _testTask is { IsCompleted: false };
         string reason = testRunning ? Journal.ManualInTest : Journal.ManualTakeover;
         bool ok = Tuning.Apply(vals, "MANUAL", null, reason);
@@ -1616,7 +1609,7 @@ internal sealed class MainForm : Form
                 Log.Write("检测到手动应用 CO：后续回退以此值为基准", "WARN");
             else
             {
-                // 脏标记保留：中断的测试阶段仍要续跑，只是负压听用户的，不再叠加 +StepOnError。
+                // 保留脏标记以续跑中断的阶段，但沿用用户设定的负压，不再叠加 +StepOnError
                 Log.Write("检测到手动应用 CO，测试沿用手动设定续跑", "WARN");
                 SetStatus("已接管中断负压 · 开始后按此值续跑", Theme.Warn);
                 return;
@@ -1660,8 +1653,7 @@ internal sealed class MainForm : Form
         uint ppt = (uint)_pptBox.Value;
         uint edc = (uint)_edcBox.Value;
         uint tdc = (uint)_tdcBox.Value;
-        // 不支持 FMax 写入的 CPU 上跳过这一条：SetBoostLimitAllCore 不校验消息 ID，
-        // 硬调会往 SMU 发一条消息 0，且必然失败、把另外三项的真实结果一起染成「部分失败」。
+        // 不支持 FMax 写入时跳过：SetBoostLimitAllCore 不校验消息 ID，会向 SMU 发送消息 0
         bool okF = !_fmaxWritable || RyzenSmu.SetFMax(fmax);
         bool okP = RyzenSmu.SetPptLimit(ppt);
         bool okE = RyzenSmu.SetEdcLimit(edc);
@@ -2339,7 +2331,7 @@ internal sealed class MainForm : Form
     private (string algo, int iters) GetTestConfig(string mode)
     {
         string algo = Array.Find(ModeOptions, o => o.mode == mode).algo;
-        if (string.IsNullOrEmpty(algo)) algo = "VSTv3"; // 兜底（理论上不会命中，SEQ/COMBO 不走这里）
+        if (string.IsNullOrEmpty(algo)) algo = "VSTv3"; // 兜底
         return (algo, _singleRounds);
     }
 
@@ -2499,8 +2491,7 @@ internal sealed class MainForm : Form
             _cts?.Cancel();
         }
 
-        // 关键：只有用户主动关闭才清脏标记。系统重启/关机/被结束进程时保留脏标记，
-        // 以便下次启动识别为「上次测试中断」并从中断的 phase 续跑（含负压回退恢复）。
+        // 只有用户主动关闭才清脏标记；其余情况保留，下次启动按「上次测试中断」续跑并回退负压。
         if (userClosing)
             Workspace.ClearInProgress();
         YCruncher.Kill();

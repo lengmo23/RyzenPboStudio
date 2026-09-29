@@ -4,9 +4,8 @@ using System.Text.Json.Serialization;
 namespace RyzenPboStudio;
 
 /// <summary>
-/// Curve Shaper 备用模式状态。旧 BIOS 上 GetCurveShaperMargin 读回 raw args 全 0（无读取接口，
-/// 但写入的 CS 电压已生效），此时软件保存用户最后应用的 CS margin，刷新时回退到此值，
-/// 避免编辑器被读回的 0 重置。新 BIOS 下 raw args 每档低位带 tier 编号(0..4)，故不会全 0。
+/// Curve Shaper 备用模式状态。旧 BIOS 无 CS 读取接口（读回全 0，但写入已生效），
+/// 此时保存用户最后应用的 CS margin，刷新时回填，避免编辑器被读回的 0 重置。
 /// </summary>
 internal sealed class CsState
 {

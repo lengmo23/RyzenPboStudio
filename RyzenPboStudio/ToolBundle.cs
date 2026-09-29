@@ -21,10 +21,7 @@ internal sealed class ToolBundleFile
     [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
 }
 
-/// <summary>
-/// 把内嵌的第三方工具包释放到受保护的公共缓存目录，并在使用前校验每个文件。
-/// 外部工具必须落盘后才能作为独立进程运行；分发物本身仍然只有一个 EXE。
-/// </summary>
+/// <summary>把内嵌的第三方组件包（inpoutx64.dll）释放到 %ProgramData% 下的受保护目录，使用前逐文件校验 SHA-256。</summary>
 internal static class ToolBundle
 {
     private const string ResourceName = "RyzenPboStudio.Resources.tool-bundle.zip";

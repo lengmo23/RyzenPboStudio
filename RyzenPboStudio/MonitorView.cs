@@ -99,8 +99,8 @@ internal sealed class StatCellControl : Control
     }
 }
 
-/// <summary>嵌入主程序的每核监控面板（移植自 MonitorTest）：复用 RyzenSmu 的共享 Cpu，
-/// 仅在可见时后台轮询，所有 Cpu 访问在 RyzenSmu.IoLock 下串行，避免与负压读写抢占 SMU。</summary>
+/// <summary>每核监控面板：复用 RyzenSmu 的共享 Cpu，仅在可见时后台轮询，
+/// 所有 Cpu 访问在 RyzenSmu.IoLock 下串行，避免与负压读写抢占 SMU。</summary>
 internal sealed class MonitorView : UserControl
 {
     private readonly Cpu cpu;
@@ -114,11 +114,8 @@ internal sealed class MonitorView : UserControl
     private readonly string installedMemory;
     private readonly double p0BaseMHz;   // P0 标称基频，用于 ΔAPERF/ΔMPERF×P0 算忙时频率（本机 TSC 不可读）
     private readonly TelVoltCalib telCalib;
-    // PM Table 头部的全局 VDDCR_CPU 遥测组 {VID, TEL, I, P, TEMP}，由 TEL×I=P 验证（SOC 组与 MISC 组
-    // 结构相同、验算同样成立）。组起点逐型号浮动（Raphael 0xB8 / DragonRange 0xBC / GraniteRidge 0xC0 /
-    // Vermeer 0xA0），表头上 PPT / TDC / THM 的位置还分 Zen4 与 Zen3 两代，每核电压段亦逐型号浮动，
-    // 故首次读到表时由 RyzenSmu.ProbePtLayout 探测一次。每核电压是各核经 LDO 后的
-    // die 电压，恒低于上游请求 VID 约 10mV，取其最大值并不等于整体 VID。
+    // PM Table 布局（全局 VDDCR_CPU 遥测组、PPT/TDC/THM、每核电压与频率段）逐型号浮动，
+    // 由 RyzenSmu.ProbePtLayout 探测。每核电压是 LDO 后的 die 电压，比请求 VID 低约 10mV。
     private RyzenSmu.PtLayout? ptLayout;
     /// <summary>身份条／CCD 行／限制条共用的栅格列数，取限制条格数；三条共用同一次取整才能逐条对齐。</summary>
     private const int StripCols = 8;
@@ -154,8 +151,7 @@ internal sealed class MonitorView : UserControl
         catch { p0DefMHz = 0; }
         installedMemory = SystemInfo.GetInstalledMemory();
 
-        // 注册表 ~MHz 由 HAL 在启动时以独立时基实测后写入，已经含外频；P0 定义频率是按 BCLK=100
-        // 参考的标称值。两者相除即真实外频，见 ResolveBclk()。
+        // 注册表 ~MHz 已含外频，除以 P0 定义频率（按 BCLK=100）即真实外频，见 ResolveBclk()
         regBaseMHz = SystemInfo.GetBaseFrequencyMHz();
         try
         {
@@ -191,11 +187,9 @@ internal sealed class MonitorView : UserControl
     }
 
     /// <summary>
-    /// 取 (BCLK1, CPU 时钟域外频)。cpu.GetBclk() 读的是 CG PLL 配置寄存器，即同步域的基准外频；
-    /// 主板走外置时钟发生器时 CPU_CLK 不由该 PLL 定频，异步外频下它仍是 100，与 CPU 实际外频无关。
-    /// CPU 侧因此改用 注册表~MHz ÷ P0定义频率 反推——外频档位都是 0.05MHz 的整数倍，按此吸附掉
-    /// ~MHz 只有整数精度带来的零头；反推不成立时依次退回 HWiNFO 的 Bus Clock 与 PLL 读数。
-    /// 调用方需持有 IoLock。
+    /// 取 (BCLK1, CPU 时钟域外频)。cpu.GetBclk() 读 CG PLL 寄存器，外置时钟发生器 / 异步外频下恒为 100，
+    /// 故 CPU 域外频用 注册表~MHz ÷ P0定义频率 反推，并吸附到 0.05MHz 档位；
+    /// 反推失败时依次退回 HWiNFO 的 Bus Clock 与 PLL 读数。调用方需持有 IoLock。
     /// </summary>
     private (double Pll, double Core) ResolveBclk()
     {
@@ -206,8 +200,7 @@ internal sealed class MonitorView : UserControl
         double core = 0;
         if (regBaseMHz > 0 && p0DefMHz > 0)
         {
-            // 范围卡在实际可用的外频区间内：若某代际 P0 定义的不是基频、或 ~MHz 写的是别的口径，
-            // 比值会明显跑飞，此时宁可退回下面两级（至少不比现状差）也不显示一个错的外频。
+            // 超出合理外频区间视为反推无效，交给下面的回退
             double derived = regBaseMHz / p0DefMHz * 100.0;
             if (derived is >= 90 and <= 130) core = Math.Round(Math.Round(derived / 0.05) * 0.05, 2);
         }
@@ -270,8 +263,7 @@ internal sealed class MonitorView : UserControl
         return t;
     }
 
-    /// <summary>建一条 StripCols 列的等宽栅格。三条横条都用它，列边界因而落在同一批像素上——
-    /// 各按自己的列数独立取整时，8 列的第 4 列右缘与 2 列的中缝会差几个像素。</summary>
+    /// <summary>建一条 StripCols 列的等宽栅格。三条横条共用它，竖缝才能逐像素对齐。</summary>
     private static TableLayoutPanel NewStripGrid(int rows, int topMargin = 0, int bottomMargin = 0)
     {
         var t = new TableLayoutPanel
@@ -361,16 +353,13 @@ internal sealed class MonitorView : UserControl
             if (CppcReader.Read((int)cores, tpc) is { } fromLog) perf = fromLog;
         }
 
-        // BIOS 关掉 CPPC 时每核报同一个值，排名无从谈起：归零当作读不到，CPPC 行显示 "-"
-        // 且不标金银核，好过按同分硬排出一金一银。
+        // BIOS 关掉 CPPC 时每核同值，无法排名：归零按读不到处理，显示 "-" 且不标金银核
         var livePerf = Enumerable.Range(0, (int)cores)
             .Where(i => slotDisabled.Length <= i || !slotDisabled[i])
             .Select(i => perf[i]).ToArray();
         if (livePerf.Distinct().Count() <= 1) Array.Clear(perf);
 
-        // 金银核：按 CPPC 全局排名取前两个，先银后金 —— 排名第一的标银(✦)，第二的标金(★)，
-        // 只标这两个（不标铜核）。CPPC 并列同分时按核号从小到大，即同分中的第一个为银、第二个为金。
-        // 按核索引定位而非按数值匹配，避免并列同分时标出多个。
+        // 金银核：CPPC 排名第一标银(✦)、第二标金(★)，同分按核号升序；按核索引定位，同分时不会标出多个
         int goldCore = -1, silverCore = -1;
         var ranked = Enumerable.Range(0, (int)cores)
             .Where(i => (slotDisabled.Length <= i || !slotDisabled[i]) && perf[i] > 0)
@@ -379,8 +368,7 @@ internal sealed class MonitorView : UserControl
         if (ranked.Count > 0) silverCore = ranked[0];
         if (ranked.Count > 1) goldCore = ranked[1];
 
-        // 始终显示两栏（与上下两条等宽对齐）；单 CCD 机型时 CCD#1 显示空表而非隐藏。
-        // 与身份条／限制条共用 StripCols 栅格，每个面板跨 StripCols/CCD 数 列，竖缝逐条对齐。
+        // 始终显示两栏，单 CCD 机型的 CCD#1 显示空表；与身份条／限制条共用 StripCols 栅格
         int displayCcds = (int)Math.Max(2u, ccds);
         var grid = NewStripGrid(rows: 1);
         int span = Math.Max(1, StripCols / displayCcds);
@@ -462,9 +450,8 @@ internal sealed class MonitorView : UserControl
         catch { return 0; }
     }
 
-    /// <summary>在一次亲和性绑定内连读该逻辑线程的 APERF / MPERF / TSC，使三者成为同一时刻的原子快照。
-    /// 分三次 ReadMsrTx 会各自切换两次亲和性，满载核上每次切换都要排队等一个调度时间片，
-    /// ΔAPERF 与 ΔTSC 覆盖的窗口因此错开、共模抵消不干净；合并后每线程只切 2 次而非 6 次。</summary>
+    /// <summary>在一次亲和性绑定内连读该逻辑线程的 APERF / MPERF / TSC，使三者近似同一时刻的快照，
+    /// 减少满载核上切换亲和性带来的采样错位。</summary>
     private bool ReadCounters(int i, int thread, out ulong aperf, out ulong mperf, out ulong tsc)
     {
         aperf = mperf = tsc = 0;
@@ -499,15 +486,13 @@ internal sealed class MonitorView : UserControl
         int n = (int)cores;
         int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
 
-        // CO 是设定值不是实时遥测，没必要每轮全核读一遍：读得越密越容易撞上别人占用 SMU 邮箱。
-        // 缓存跨轮保留最近一次读到的有效值，读失败时沿用它而不是显示 0。
+        // CO 是设定值，每 2s 读一次即可，减少与其他软件争用 SMU 邮箱；读失败时沿用缓存值
         var coCache = new int[n];
         var coClock = Stopwatch.StartNew();
         long coNextMs = 0;
 
-        // TSC 频率自校准：TSC 恒定频率、不随升降频变化，固定拿一个参考线程跨轮累积长窗口算
-        // ΔTSC/Δt；窗口越长，绑核读取那几十毫秒的采样偏移占比越小。注册表 ~MHz 由 HAL 开机时
-        // 写入，开机后再改 BCLK（外置时钟发生器的板子）它就偏了，故标定成功后优先用标定值。
+        // TSC 频率自校准：用一个参考线程跨轮累积长窗口算 ΔTSC/Δt。注册表 ~MHz 只在开机时写入，
+        // 开机后改 BCLK 会失准，故标定成功后优先用标定值。
         int tscRefSlot = -1;
         long tscBaseTick = 0;
         ulong tscBase = 0;
@@ -678,10 +663,8 @@ internal sealed class MonitorView : UserControl
                 if (snapMHz > 0) busyFreq[i] = snapMHz;
             }
 
-            // FREQ 首选 PM Table 的每核频率：SMU 直接报告，读表不绑核，空闲核不会被唤醒拉到 boost 档，
-            // 与 Hydra 的每核频率同源。ΔAPERF/ΔMPERF 是活动平均（会算出超过档位的值），
-            // MSR 档位快照则绑核即唤醒、恒读满档，两者都反映不出降 Fmax 后的真实跳动。
-            // SMU 按 100MHz 外频报这份频率，超外频时同样要按 BCLK 换算。
+            // FREQ 首选 PM Table 的每核频率：读表不绑核，不会唤醒空闲核。
+            // SMU 按 100MHz 外频报这份频率，需按 BCLK 换算。
             if (ptLayout is { PerCoreFreqIdx: >= 0 } ptl && ptSnap is { } pts && pts.Length > ptl.PerCoreFreqIdx + n)
                 for (int i = 0; i < n; i++)
                 {
@@ -771,14 +754,13 @@ internal sealed class MonitorView : UserControl
                 uclk = cpu.powerTable?.UCLK ?? 0;
             }
 
-            // TEL/VID：直读 PM Table 头部的全局 VDDCR_CPU 遥测（0xC0 请求 VID / 0xC4 实测电压），
-            // 与 HYDRA 的 VID / TEL 同源，不依赖 HWiNFO。
+            // TEL/VID：直读 PM Table 的全局 VDDCR_CPU 遥测（请求 VID / 实测电压），不依赖 HWiNFO
             double peakVid = maxCpuVid is > 0.3 and < 2.0 ? maxCpuVid : 0;
             double telVolt = peakVid > 0 && maxCpuTel is > 0.3 and < 2.0 ? maxCpuTel : 0;
             // 只有 VID 与 TEL 同源于全局遥测四元组时 Vdroop 才有意义；走回退路径时两者口径不同，不显示。
             bool vdroopValid = peakVid > 0 && telVolt > 0;
 
-            // 回退：表里读不到全局遥测（非 GraniteRidge / 表布局不同）时，VID 用各核峰值近似，
+            // 回退：表里读不到全局遥测时，VID 用各核峰值近似，
             // TEL 用 HWiNFO 的 SVI3 读数并喂给校准器收敛出本地索引。
             if (peakVid <= 0)
                 for (int i = 0; i < n; i++) if (maxVolt[i] > peakVid) peakVid = maxVolt[i];
