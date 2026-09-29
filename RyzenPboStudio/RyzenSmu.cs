@@ -49,7 +49,7 @@ internal static class RyzenSmu
         }
     }
 
-    /// <summary>线性物理核心索引 → (ccd, core)。按 ccd-major 连续排列，与原 ryzen-smu-cli 排序一致。</summary>
+    /// <summary>线性物理核心索引 → (ccd, core)。按 ccd-major 连续排列。</summary>
     private static (uint ccd, uint core) MapIndex(Cpu cpu, int index)
     {
         var topo = cpu.info.topology;
@@ -139,8 +139,7 @@ internal static class RyzenSmu
     private static int DecodeMargin(uint raw) => (short)(raw & 0xffff);
 
     /// <summary>
-    /// 读单核 CO 负压；失败返回 null。SMU 邮箱被其它软件（HWiNFO / Ryzen Master）或本进程其它命令占用时
-    /// 事务会返回非 OK，ZenStates 随即把 args 清零，直接当 0 用会让读数在真值与 0 之间乱跳，所以重试几次再放弃。
+    /// 读单核 CO 负压；失败返回 null。SMU 邮箱被其他软件占用时事务会失败并返回全 0，故重试几次。
     /// 调用方需持有 <see cref="IoLock"/>。
     /// </summary>
     public static int? TryReadMargin(Cpu cpu, uint ccd, uint core)
@@ -208,10 +207,8 @@ internal static class RyzenSmu
     // PBO 解锁时 SMU 把表头的 PPT / TDC / EDC 上限报成 999 哨兵，那不是可写回参数框的有效值。
     private const float PtLimitSentinel = 999f;
 
-    /// <summary>PM Table 中逐世代、逐型号浮动的偏移。表头上 PPT / TDC / THM 的位置分两代：
-    /// Zen4/Zen5（Raphael、DragonRange、GraniteRidge 三代一致）与 Zen3（Vermeer 另起一套 limit/value 顺排）。
-    /// EDC、每核电压段与 VDDCR_CPU 遥测组还要再逐型号浮动——遥测组起点 Raphael 在 0xB8、DragonRange 在 0xBC、
-    /// GraniteRidge 在 0xC0，同为 Zen4 也能差一个 float，按代号写死覆盖不全。</summary>
+    /// <summary>PM Table 中逐世代、逐型号浮动的偏移。PPT / TDC / THM 分 Zen4/Zen5 与 Zen3 两套表头；
+    /// EDC、每核电压段与 VDDCR_CPU 遥测组逐型号浮动（如遥测组起点 0xB8 / 0xBC / 0xC0），需运行时探测。</summary>
     internal sealed class PtLayout
     {
         public int PptLimitIdx;
@@ -230,15 +227,13 @@ internal static class RyzenSmu
     private static bool IsPtVolt(float v) => v is >= 0.20f and <= 1.60f;
     private static bool IsPtTemp(float v) => v is >= 15f and <= 115f;
 
-    /// <summary>该槽位是否被熔丝屏蔽。每核段按槽位排列、屏蔽槽填 0，探测时必须跳过这些位置，
-    /// 否则 9900X3D / 7900X 这类带空洞的型号永远凑不出 cores 个连续的合法电压。
+    /// <summary>该槽位是否被熔丝屏蔽。每核段按槽位排列、屏蔽槽填 0，探测时需跳过。
     /// 槽位表尚未建立时按全部有效处理。</summary>
     private static bool IsSlotMaskedNoLock(int slot) =>
         _slotDisabled is { } d && slot >= 0 && slot < d.Length && d[slot];
 
     /// <summary>探测 PM Table 布局，探不中返回 null（调用方走回退路径）。
-    /// 先按 Zen4/Zen5 表头认，不中再按 Zen3 表头认；两套判据在 7945HX / 9950X / 5700X 三份实机转储上
-    /// 各自唯一命中且互不误认。每核电压段两代共用一套探测，见 ProbePerCoreVolt。
+    /// 先按 Zen4/Zen5 表头认，不中再按 Zen3 表头认。
     /// 每核段探不中时 PerCoreVoltIdx 为 -1，调用方应继续重试而不是锁定这份残缺布局。</summary>
     internal static PtLayout? ProbePtLayout(float[]? t, int cores)
     {
@@ -253,8 +248,7 @@ internal static class RyzenSmu
     }
 
     /// <summary>Zen4 / Zen5 表头：PPT / TDC / THM 在固定绝对索引，EDC 与遥测组随型号浮动。
-    /// 遥测组用表头两个镜像值定位：idx19 与组内 VID、idx20 与组内功率都是逐位相等的同一个 float，
-    /// 不需要容差，因此不会被空闲态的低电流噪声干扰。</summary>
+    /// 遥测组用表头镜像值定位：idx19 等于组内 VID、idx20 等于组内功率（逐位相等）。</summary>
     private static PtLayout? ProbeZen4Header(float[] t)
     {
         float vidRef = t[19], pwrRef = t[20];
@@ -281,9 +275,8 @@ internal static class RyzenSmu
         };
     }
 
-    /// <summary>Zen3（Vermeer）表头：PPT / TDC / THM / FIT / EDC / VID 六组 {limit, value} 自 idx0 顺排，
-    /// 与 Zen4 整体错位，故不能共用绝对索引。Zen3 表头没有 Zen4 那对 idx19 / idx20 镜像，遥测组改用
-    /// idx11（VID_VALUE）的镜像定位并以 TEL × I = P 验算。先校验表头形状再找镜像，避免在别代表上误认。</summary>
+    /// <summary>Zen3（Vermeer）表头：PPT / TDC / THM / FIT / EDC / VID 六组 {limit, value} 自 idx0 顺排。
+    /// 遥测组用 idx11（VID_VALUE）的镜像定位并以 TEL × I = P 验算；先校验表头形状，避免误认别代的表。</summary>
     private static PtLayout? ProbeZen3Header(float[] t)
     {
         if (!IsPtTemp(t[4]) || !IsPtTemp(t[5])) return null;                                   // THM {上限, 当前}
@@ -315,9 +308,8 @@ internal static class RyzenSmu
         };
     }
 
-    /// <summary>每核电压段用「cores 个电压紧跟同样长的温度段」定位——两段在表里始终相邻，该组合在
-    /// 7800X3D / 7945HX / 9950X / 5700X 四份实机转储上均唯一命中。cores 传的是槽位数而非有效核数：
-    /// 每核段按槽位排列，屏蔽槽填 0，故这些位置不参与匹配。探不中返回 -1。</summary>
+    /// <summary>每核电压段用「cores 个电压紧跟同样长的温度段」定位。cores 为槽位数（含屏蔽槽），
+    /// 屏蔽槽填 0 不参与匹配。探不中返回 -1。</summary>
     private static int ProbePerCoreVolt(float[] t, int cores)
     {
         for (int i = 24; i + 2 * cores <= t.Length; i++)
@@ -331,11 +323,9 @@ internal static class RyzenSmu
         return -1;
     }
 
-    /// <summary>每核频率段（GHz），其后紧跟同样长的每核有效频率段。段位置逐代不同——Zen4/Zen5 紧跟
-    /// 每核温度段，Zen3(Vermeer) 中间还隔着两段，故自温度段之后按段长逐段扫，不写死偏移。
-    /// 判据是「本段是合理频率且下一段不超过本段」；有效频率给 10% 余量：两段不是同一瞬间采样，
-    /// 9950X 实测转储里出现过 FREQEFF 5.503 高于 CORE_FREQ 5.450 的倒挂。屏蔽槽填 0，跳过不参与匹配。
-    /// SMU 报的这份频率读表即得、不必绑核，空闲核不会被唤醒拉到 boost 档。探不中返回 -1。</summary>
+    /// <summary>每核频率段（GHz），其后紧跟同样长的每核有效频率段。段位置逐代不同，故自温度段之后逐段扫描。
+    /// 判据为「本段是合理频率且下一段不超过本段」，有效频率留 10% 余量（两段非同一瞬间采样）。
+    /// 屏蔽槽跳过。探不中返回 -1。</summary>
     private static int ProbePerCoreFreq(float[] t, int voltIdx, int cores)
     {
         if (voltIdx < 0) return -1;
@@ -475,14 +465,10 @@ internal static class RyzenSmu
         }
     }
 
-    // Vermeer 的 CCD 温度寄存器沿用 Zen2 的地址。ZenStates 的 GetSingleCcdTemperature 按
-    // family >= 19H 一刀切选 Raphael 的 0x59B08，而 Vermeer 同为 19H（model 0x21），
-    // 读出的值算出的温度越界、被当作无效返回 0，故这里单独走 0x59954。
+    // Vermeer 的 CCD 温度寄存器沿用 Zen2 地址；ZenStates 对 family 19H 统一用 Raphael 的 0x59B08，在 Vermeer 上读不出
     private const uint VermeerCcdTempReg = 0x00059954;
 
-    /// <summary>读取指定 CCD 的热点温度（°C）；读不到或超出量程返回 0。
-    /// 只有 Vermeer 走自己的寄存器，其余型号仍交给 ZenStates——那边对 Zen2/Zen4/Zen5 是对的，
-    /// 同为 Zen3 的 Chagall / Milan 未经验证，不擅自套用。</summary>
+    /// <summary>读取指定 CCD 的热点温度（°C）；读不到或超出量程返回 0。仅 Vermeer 走自己的寄存器。</summary>
     public static float ReadCcdTemperature(uint ccd)
     {
         try
@@ -506,10 +492,8 @@ internal static class RyzenSmu
         }
     }
 
-    /// <summary>当前 CPU 的 SMU 是否有「设置全核 boost 上限」这条消息。
-    /// Zen3（Vermeer）继承 Zen2 的消息表，那里只有读（GetBoostLimitFrequency 0x6E）没有写，
-    /// Rsmu 与 MP1 两个 ID 都是 0——而 SetBoostLimitAllCore 并不校验 ID，会照发一条消息 0 给 SMU，
-    /// 故必须在调用前拦下。0x70 自 Zen4 才出现，Zen5 由 Zen4Settings 继承。</summary>
+    /// <summary>当前 CPU 的 SMU 是否有「设置全核 boost 上限」消息（0x70，Zen4 起才有）。
+    /// Zen3 上该消息 ID 为 0，而 SetBoostLimitAllCore 不校验 ID，会发出消息 0，必须在调用前拦下。</summary>
     public static bool IsFMaxWriteSupported()
     {
         try

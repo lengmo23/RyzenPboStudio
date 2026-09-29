@@ -4,16 +4,14 @@ using System.Xml.Linq;
 namespace RyzenPboStudio;
 
 /// <summary>CPPC 每核性能排名的备用来源：Windows 内核电源事件 55。
-/// Zen3（Vermeer）的 CPUID Fn8000_0008_EBX[27] 为 0，MSR CPPC_CAP1/CAP2/REQ 在硬件上不存在，
-/// 三个 MSR 均读回全 0。Windows 走 ACPI _CPC 拿同一份数据，开机枚举处理器时逐逻辑核记进事件 55，
-/// 其 MaximumPerformancePercent 与 MSR 路径的 Highest×100/Nominal 同刻度，两条路径可直接互换。</summary>
+/// Zen3 没有 CPPC MSR（CPUID Fn8000_0008_EBX[27]=0），Windows 经 ACPI _CPC 在开机时逐逻辑核记入事件 55，
+/// 其 MaximumPerformancePercent 与 MSR 路径的 Highest×100/Nominal 同刻度。</summary>
 internal static class CppcReader
 {
     private const string Provider = "Microsoft-Windows-Kernel-Processor-Power";
     private const int ScanLimit = 512;      // 每次开机只记 logicalCores 条，扫这么多足够翻到最近一轮
     private const int TimeoutMs = 2000;     // 日志过大时查询会拖慢启动，超时就放弃
-    // 日志里混着更早的批次（启动早期 CPPC 尚未生效时记下的那些）。开机枚举整批在几秒内写完，
-    // 故只收与最新一条同批的记录。
+    // 只收与最新一条同一批（同次开机）的记录
     private static readonly TimeSpan BatchWindow = TimeSpan.FromMinutes(5);
 
     /// <summary>按物理核返回 MaximumPerformancePercent；读不到返回 null。

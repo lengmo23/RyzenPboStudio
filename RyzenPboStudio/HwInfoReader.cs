@@ -71,7 +71,6 @@ internal static class HwInfoReader
                 int z = Array.IndexOf(lbl, (byte)0);
                 if (z <= 0) continue;
                 string s = Encoding.ASCII.GetString(lbl, 0, z);
-                // Zen5 叫 "CPU VDDCR_VDD Voltage (SVI3 TFN)"，Zen4 叫 "CPU Core Voltage (SVI3 TFN)"
                 if (!s.StartsWith("CPU VDDCR_VDD Voltage", StringComparison.Ordinal) &&
                     !s.StartsWith("CPU Core Voltage", StringComparison.Ordinal)) continue;
                 double val = acc.ReadDouble(b + ValueOffset);

@@ -35,9 +35,8 @@ internal static class YCruncher
     }
 
     /// <summary>
-    /// 写一份限定逻辑核心的 stress 配置。y-cruncher 的 config 是 JSON 风格但数组元素用空格分隔、
-    /// 不能用逗号；字段名与类型按 v0.8.7 的实际要求，缺一个都会直接抛 KeyNotFoundException。
-    /// 内存按「选中核心数 / 全部逻辑核数」等比缩放，使每线程内存量与全核默认时保持一致。
+    /// 写一份限定逻辑核心的 stress 配置。数组元素用空格分隔；v0.8.7 要求下列字段齐全，缺一个即报错。
+    /// 内存按「选中核心数 / 全部逻辑核数」等比缩放，使每线程内存量与全核时一致。
     /// </summary>
     private static string WriteStressConfig(
         IReadOnlyList<string> algorithms, int durationSeconds, int iterations, IReadOnlyList<int> logicalCores)
@@ -120,9 +119,9 @@ internal static class YCruncher
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
 
-    // Holds only the y-cruncher processes this app started; its arch child (e.g. "24-ZN5 ~ Komari")
-    // joins automatically, so Kill() never touches a y-cruncher the user launched separately.
-    // The handle is never closed: the OS closes it when this app exits (even if killed), which ends the job.
+    // 只收纳本程序启动的 y-cruncher，其架构子进程（如 "24-ZN5 ~ Komari"）自动加入，
+    // Kill() 因此不会波及用户单独打开的 y-cruncher。句柄不主动关闭：程序退出（含被强制结束）时
+    // 由系统关闭，KILL_ON_JOB_CLOSE 随之结束作业内全部进程。
     private static readonly Lazy<IntPtr> Job = new(CreateJob);
 
     private static IntPtr CreateJob()
