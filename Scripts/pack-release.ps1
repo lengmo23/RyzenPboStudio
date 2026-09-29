@@ -76,6 +76,7 @@ function New-Package {
 
     # 用仓库根目录的 README / 第三方声明覆盖构建输出里 ZenStates-Core 自带的那份
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $stage 'README.md') -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'README_zh_cn.md') -Destination (Join-Path $stage 'README_zh_cn.md') -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Force
 
     # 注意 Updater.CheckAsync 是靠名字里的 "update" / "full" 关键字挑包的，
