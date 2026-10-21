@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using OpenHardwareMonitor.Hardware;   // GroupAffinity
 using ZenStates.Core;
 
@@ -117,7 +118,7 @@ internal sealed class MonitorView : UserControl
     // PM Table 布局（全局 VDDCR_CPU 遥测组、PPT/TDC/THM、每核电压与频率段）逐型号浮动，
     // 由 RyzenSmu.ProbePtLayout 探测。每核电压是 LDO 后的 die 电压，比请求 VID 低约 10mV。
     private RyzenSmu.PtLayout? ptLayout;
-    /// <summary>身份条／CCD 行／限制条共用的栅格列数，取限制条格数；三条共用同一次取整才能逐条对齐。</summary>
+    /// <summary>CCD 行／限制条共用的栅格列数，取限制条格数；两条共用同一次取整才能逐条对齐。</summary>
     private const int StripCols = 8;
 
     private Thread? worker;
@@ -143,8 +144,9 @@ internal sealed class MonitorView : UserControl
 
     public void EndQuiet() => quiet = false;
 
-    // 身份条（CPU / 主板 / 内存 / 显卡）与限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
-    private StatCellControl _cpuVal = null!, _moboVal = null!, _memVal = null!, _gpuVal = null!;
+    // 顶部标题栏（硬件信息）与限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
+    private HeaderBar _header = null!;
+    private string _cpuLine = "", _gpuOsLine = "";   // 标题栏第 1 / 3 行的静态部分，内存时钟与时间每轮追加
     private StatCellControl _bclkVal = null!, _telVidVal = null!, _vdroopVal = null!, _thmVal = null!, _tdcVal = null!, _edcVal = null!, _pptVal = null!, _fmaxVal = null!;
     private CcdView[] ccdViews = null!;
 
@@ -169,7 +171,9 @@ internal sealed class MonitorView : UserControl
                 p0DefMHz = ReadP0DefMHz();
         }
         catch { p0DefMHz = 0; }
-        installedMemory = SystemInfo.GetInstalledMemory();
+        string memVendor = SystemInfo.GetMemoryVendor();
+        string memSize = SystemInfo.GetInstalledMemory();
+        installedMemory = memVendor.Length > 0 && memSize != "—" ? $"{memVendor} {memSize}" : memSize;
 
         // 注册表 ~MHz 已含外频，除以 P0 定义频率（按 BCLK=100）即真实外频，见 ResolveBclk()
         regBaseMHz = SystemInfo.GetBaseFrequencyMHz();
@@ -187,7 +191,7 @@ internal sealed class MonitorView : UserControl
         telCalib = new TelVoltCalib(tv);
 
         BuildUi();
-        FillIdentityStrip();
+        FillHeader();
     }
 
     private const uint P0DefMsr = 0xC0010064;   // P-State 0 Definition
@@ -244,31 +248,19 @@ internal sealed class MonitorView : UserControl
             RowCount = 3,
             Margin = new Padding(0),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));   // 身份条：CPU|主板 / 内存|显卡（两行）
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));   // 标题栏：图标 + 程序名，右侧三行硬件信息
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // CCD 每核监控
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));   // 限制条
 
-        root.Controls.Add(BuildIdentityStrip(), 0, 0);
+        _header = new HeaderBar { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
+        root.Controls.Add(_header, 0, 0);
         root.Controls.Add(BuildCcdRow(), 0, 1);
         root.Controls.Add(BuildLimitStrip(), 0, 2);
         Controls.Add(root);
     }
 
-    /// <summary>顶部身份条：2×2 两行（CPU|主板 / 内存|显卡），主板等长型号可完整显示。
-    /// 每格跨半条栅格，左右分界与 CCD 面板、限制条对齐。</summary>
-    private Control BuildIdentityStrip()
-    {
-        var t = NewStripGrid(rows: 2, bottomMargin: 4);
-        int half = StripCols / 2;
-        _cpuVal  = StatCellAt(t, 0,    0, "AMD CPU", center: false, span: half);
-        _moboVal = StatCellAt(t, half, 0, "主板",    center: false, span: half);
-        _memVal  = StatCellAt(t, 0,    1, "内存",    center: false, span: half);
-        _gpuVal  = StatCellAt(t, half, 1, "显卡",    center: false, span: half);
-        return t;
-    }
-
     /// <summary>底部限制条：BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax 八格，
-    /// 即 StripCols 栅格的一格一列。身份条与 CCD 行跨 4 列，三条共用同一套取整，竖缝逐条对齐。</summary>
+    /// 即 StripCols 栅格的一格一列。CCD 行每个 CCD 跨 4 列，两条共用同一套取整，竖缝逐条对齐。</summary>
     private Control BuildLimitStrip()
     {
         var t = NewStripGrid(rows: 1, topMargin: 4);
@@ -283,7 +275,7 @@ internal sealed class MonitorView : UserControl
         return t;
     }
 
-    /// <summary>建一条 StripCols 列的等宽栅格。三条横条共用它，竖缝才能逐像素对齐。</summary>
+    /// <summary>建一条 StripCols 列的等宽栅格。CCD 行与限制条共用它，竖缝才能逐像素对齐。</summary>
     private static TableLayoutPanel NewStripGrid(int rows, int topMargin = 0, int bottomMargin = 0)
     {
         var t = new TableLayoutPanel
@@ -299,15 +291,26 @@ internal sealed class MonitorView : UserControl
         return t;
     }
 
-    /// <summary>静态身份信息不依赖监控线程，界面建立后立即显示。</summary>
-    private void FillIdentityStrip()
+    /// <summary>标题栏三行硬件信息（仿 HYDRA）。静态部分不依赖监控线程，界面建立后立即显示；
+    /// 第 1 行的内存时钟与第 3 行的时间由监控线程每轮追加。</summary>
+    private void FillHeader()
     {
-        _cpuVal.Text = string.IsNullOrWhiteSpace(cpu.info.cpuName)
-            ? SystemInfo.GetCpuName()
-            : cpu.info.cpuName.Trim();
-        _moboVal.Text = SystemInfo.GetMotherboard();
-        _memVal.Text = installedMemory;
-        _gpuVal.Text = SystemInfo.GetGpuName();
+        string name = string.IsNullOrWhiteSpace(cpu.info.cpuName) ? SystemInfo.GetCpuName() : cpu.info.cpuName.Trim();
+        name = Regex.Replace(name, @"\s+\d+-Core Processor$", "");   // AMD Ryzen 9 9950X 16-Core Processor → AMD Ryzen 9 9950X
+        _cpuLine = $"{name} Stepping {cpu.info.stepping}";
+
+        string bios = SystemInfo.GetBiosVersion();
+        uint smu = cpu.smu.Version;
+        string smuText = smu > 0 ? $"{(smu >> 16) & 0xFF}.{(smu >> 8) & 0xFF}.{smu & 0xFF:00}" : "";
+        string biosPart = bios.Length > 0 ? $"BIOS {bios}" + (smuText.Length > 0 ? $" ({smuText})" : "") : "";
+
+        string gpu = SystemInfo.GetGpuName();
+        string driver = gpu == "—" ? "" : SystemInfo.GetGpuDriverVersion(gpu);
+        _gpuOsLine = $"{gpu}{(driver.Length > 0 ? $" ({driver})" : "")}   {SystemInfo.GetOsVersion()}";
+
+        _header.SetLine(0, $"{_cpuLine}   {installedMemory}");
+        _header.SetLine(1, $"{SystemInfo.GetMotherboard()}   {biosPart}");
+        _header.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
         UpdateBclkCell();
     }
 
@@ -330,7 +333,7 @@ internal sealed class MonitorView : UserControl
         return clocks.Length > 0 ? $"{installedMemory} · {clocks}" : installedMemory;
     }
 
-    /// <summary>单元格：上方暗色标题 + 下方数值。center 时居中（限制条），否则左对齐（身份条）。返回数值标签供刷新。</summary>
+    /// <summary>单元格：上方暗色标题 + 下方数值。center 时居中，否则左对齐。返回数值标签供刷新。</summary>
     private static StatCellControl StatCell(TableLayoutPanel parent, int col, string title, bool center) => StatCellAt(parent, col, 0, title, center);
 
     private static StatCellControl StatCellAt(TableLayoutPanel parent, int col, int row, string title, bool center, int span = 1)
@@ -389,7 +392,7 @@ internal sealed class MonitorView : UserControl
         if (ranked.Count > 0) silverCore = ranked[0];
         if (ranked.Count > 1) goldCore = ranked[1];
 
-        // 始终显示两栏，单 CCD 机型的 CCD#1 显示空表；与身份条／限制条共用 StripCols 栅格
+        // 始终显示两栏，单 CCD 机型的 CCD#1 显示空表；与限制条共用 StripCols 栅格
         int displayCcds = (int)Math.Max(2u, ccds);
         var grid = NewStripGrid(rows: 1);
         int span = Math.Max(1, StripCols / displayCcds);
@@ -420,7 +423,7 @@ internal sealed class MonitorView : UserControl
         base.OnHandleCreated(e);
         // 控件加入尚未显示的 Form 时不一定触发 VisibleChanged；
         // 句柄创建是监控真正可用的可靠时点。
-        FillIdentityStrip();
+        FillHeader();
         if (Visible) StartWorker();
     }
 
@@ -819,7 +822,8 @@ internal sealed class MonitorView : UserControl
                 if (!IsHandleCreated) continue;
                 BeginInvoke(() =>
                 {
-                    _memVal.Text    = FormatMemory(fclk, uclk);
+                    _header.SetLine(0, $"{_cpuLine}   {FormatMemory(fclk, uclk)}");
+                    _header.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
                     UpdateBclkCell();
                     _telVidVal.Text = $"{(telVolt > 0 ? telVolt.ToString("F3") : "--")} / {(peakVid > 0 ? peakVid.ToString("F3") : "--")} V";
                     _vdroopVal.Text = vdroopValid ? $"{(peakVid - telVolt) / peakVid * 100.0:F1} %" : "--";
@@ -845,7 +849,7 @@ internal sealed class MonitorView : UserControl
 }
 
 // 单个 CCD 面板：标题 + 表格（行=CPPC/AMD CO/EFFREQ/FREQ/VID，列=各核）。
-// 表格列用 Fill 模式填满半幅面板，使左右边缘与上方身份条/下方限制条对齐。
+// 表格列用 Fill 模式填满半幅面板，使左右边缘与下方限制条对齐。
 internal sealed class CcdView
 {
     private const int RowCppc = 0, RowCo = 1, RowEff = 2, RowFreq = 3, RowVid = 4;

@@ -205,6 +205,82 @@ internal static class SystemInfo
     private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum,
         ref DisplayDevice lpDisplayDevice, uint dwFlags);
 
+    /// <summary>BIOS 版本号（注册表 BIOS 键的 BIOSVersion）。失败返回空串。</summary>
+    public static string GetBiosVersion()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\BIOS");
+            return (key?.GetValue("BIOSVersion") as string ?? "").Trim();
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>内存条厂商（SMBIOS Type 17，经 ZenStates-Core 解析），多种品牌混插时用 / 连接。取不到返回空串。</summary>
+    public static string GetMemoryVendor()
+    {
+        try
+        {
+            var names = ZenStates.Core.SystemInfo.SMBios.MemoryDevices
+                .Where(d => d.Size > 0)
+                .Select(d => (d.ManufacturerName ?? "").Trim())
+                .Where(n => n.Length > 0 && !n.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return string.Join(" / ", names);
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>显卡驱动版本：按型号在显示类驱动键里找 DriverVersion。NVIDIA 换算成其自家版本号
+    /// （32.0.15.8157 → 581.57，取末两段拼接后的最后 5 位），其余厂商原样返回。取不到返回空串。</summary>
+    public static string GetGpuDriverVersion(string gpuName)
+    {
+        try
+        {
+            using var classKey = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}");
+            if (classKey == null) return "";
+            foreach (var sub in classKey.GetSubKeyNames())
+            {
+                if (sub.Length != 4 || !int.TryParse(sub, out _)) continue;
+                using var dev = classKey.OpenSubKey(sub);
+                if (!string.Equals((dev?.GetValue("DriverDesc") as string ?? "").Trim(), gpuName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                string ver = (dev?.GetValue("DriverVersion") as string ?? "").Trim();
+                var parts = ver.Split('.');
+                if (gpuName.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) && parts.Length == 4)
+                {
+                    string digits = parts[2] + parts[3];
+                    if (digits.Length >= 5)
+                    {
+                        string last5 = digits[^5..];
+                        return $"{last5[..3]}.{last5[3..]}";
+                    }
+                }
+                return ver;
+            }
+        }
+        catch { /* 注册表不可用 */ }
+        return "";
+    }
+
+    /// <summary>系统版本，如 "Win11 Pro (24H2)"。Win11 的注册表 ProductName 仍写 Windows 10，按内部版本号 ≥ 22000 更正。</summary>
+    public static string GetOsVersion()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+            string name = (key?.GetValue("ProductName") as string ?? "").Trim();
+            string display = (key?.GetValue("DisplayVersion") as string ?? "").Trim();
+            if (int.TryParse(key?.GetValue("CurrentBuildNumber") as string, out int build) && build >= 22000)
+                name = name.Replace("Windows 10", "Windows 11");
+            name = name.Replace("Windows ", "Win");
+            return display.Length > 0 ? $"{name} ({display})" : name;
+        }
+        catch { return ""; }
+    }
+
     /// <summary>SMBIOS 报告的物理内存总容量。失败返回 "—"。</summary>
     public static string GetInstalledMemory()
     {
