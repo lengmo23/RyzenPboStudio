@@ -125,7 +125,7 @@ internal static class VoltageAlign
 
     /// <summary>Runs the alignment. Returns the offsets last applied to the CPU (also after cancel), or null when
     /// nothing was applied.</summary>
-    public static List<int>? Run(MonitorView? monitor, AlignTarget target, int editorMin, ResultsWindow win, CancellationToken ct)
+    public static List<int>? Run(MonitorView? monitor, AlignTarget target, int editorMin, ResultsPanel win, CancellationToken ct)
     {
         Log.Write($"电压对齐开始：目标 {Name(target)}，各 CCD 独立对齐");
         using var scb = SingleCoreBoost.Open(monitor);
@@ -238,7 +238,7 @@ internal static class VoltageAlign
         return ok;
     }
 
-    private static Dictionary<int, ScbRow> MeasurePass(SingleCoreBoost scb, List<int> slots, string tag, ResultsWindow win, CancellationToken ct)
+    private static Dictionary<int, ScbRow> MeasurePass(SingleCoreBoost scb, List<int> slots, string tag, ResultsPanel win, CancellationToken ct)
     {
         win.SetTable(SingleCoreBoost.Columns);
         int done = 0;
@@ -271,7 +271,7 @@ internal static class VoltageAlign
 
     private static List<int> Finish(SingleCoreBoost scb, List<int> offsets, Dictionary<int, ScbRow> baseline,
                                     Dictionary<int, ScbRow> latest, Dictionary<int, int> targets, double slope, int coMin,
-                                    HashSet<int> clamped, ResultsWindow win, bool cancelled, int iterations = 0)
+                                    HashSet<int> clamped, ResultsPanel win, bool cancelled, int iterations = 0)
     {
         win.SetTable(ResultColumns);
         var sb = new StringBuilder();

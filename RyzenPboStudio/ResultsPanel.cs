@@ -1,37 +1,39 @@
 namespace RyzenPboStudio;
 
-/// <summary>Non-modal table window for Single Core Boost and voltage alignment. Every public method may be called
-/// from the worker thread; calls after the window is closed are dropped. Closing or pressing 取消 while the work
-/// is still running invokes the cancel callback.</summary>
-internal sealed class ResultsWindow : Form
+/// <summary>Result table for Single Core Boost and voltage alignment, hosted on the TESTING page. Every public method
+/// except Begin may be called from the worker thread.</summary>
+internal sealed class ResultsPanel : Panel
 {
+    private readonly Label title;
     private readonly Label status;
     private readonly DataGridView grid;
     private readonly TextBox summary;
-    private readonly Button actionBtn;
-    private readonly Action onCancel;
-    private bool finished;
 
-    public ResultsWindow(string title, Action onCancel)
+    public ResultsPanel()
     {
-        this.onCancel = onCancel;
-        Text = title;
-        BackColor = Theme.Bg;
+        BackColor = Theme.Surface;
         ForeColor = Theme.TextHi;
         Font = new Font(Theme.FontFamily, 9F);
-        StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(1080, 560);
-        MinimumSize = new Size(640, 360);
-        ShowInTaskbar = false;
+
+        title = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 26,
+            Padding = new Padding(2, 2, 0, 0),
+            ForeColor = Theme.TextLo,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold),
+            Text = "Single Core Boost / 电压对齐",
+        };
 
         status = new Label
         {
             Dock = DockStyle.Top,
-            Height = 30,
-            Padding = new Padding(10, 8, 10, 0),
-            ForeColor = Theme.Warn,
+            Height = 26,
+            Padding = new Padding(2, 4, 0, 0),
+            ForeColor = Theme.TextLo,
             BackColor = Theme.Surface,
-            Text = "准备中…",
+            Text = "点击左侧「Single Core Boost」或「电压对齐」后，这里显示每核结果",
         };
 
         grid = new DataGridView
@@ -49,7 +51,7 @@ internal sealed class ResultsWindow : Form
             GridColor = MonTheme.Grid,
             SelectionMode = DataGridViewSelectionMode.FullRowSelect,
             ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-            ColumnHeadersHeight = 28,
+            ColumnHeadersHeight = 40,   // two lines, so long headers wrap in the narrow column
             ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
             {
                 BackColor = MonTheme.Grid,
@@ -57,6 +59,7 @@ internal sealed class ResultsWindow : Form
                 SelectionBackColor = MonTheme.Grid,
                 SelectionForeColor = MonTheme.Fg,
                 Alignment = DataGridViewContentAlignment.MiddleCenter,
+                WrapMode = DataGridViewTriState.True,
                 Font = new Font(Theme.FontFamily, 9F, FontStyle.Bold),
             },
             DefaultCellStyle = new DataGridViewCellStyle
@@ -84,45 +87,23 @@ internal sealed class ResultsWindow : Form
             Font = new Font(Theme.FontFamily, 9F),
         };
 
-        actionBtn = new Button
-        {
-            Text = "取消",
-            Width = 96,
-            Height = 30,
-            Anchor = AnchorStyles.Right | AnchorStyles.Top,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Theme.SurfaceAlt,
-            ForeColor = Theme.TextHi,
-        };
-        actionBtn.FlatAppearance.BorderColor = Theme.Border;
-        actionBtn.Click += (_, _) =>
-        {
-            if (finished) Close();
-            else RequestCancel();
-        };
-
-        var bar = new Panel { Dock = DockStyle.Bottom, Height = 42, BackColor = Theme.Bg };
-        bar.Controls.Add(actionBtn);
-        bar.Resize += (_, _) => actionBtn.Location = new Point(bar.ClientSize.Width - actionBtn.Width - 10, 6);
-
+        // 添加顺序决定停靠优先级：标题、状态占顶，摘要占底，表格填中间
         Controls.Add(grid);
         Controls.Add(summary);
-        Controls.Add(bar);
         Controls.Add(status);
+        Controls.Add(title);
     }
 
-    private void RequestCancel()
+    /// <summary>Clears the previous result for a new run (UI thread).</summary>
+    public void Begin(string caption)
     {
-        if (finished) return;
-        actionBtn.Enabled = false;
-        status.Text = "正在取消…";
-        onCancel();
-    }
-
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        RequestCancel();
-        base.OnFormClosing(e);
+        if (!IsHandleCreated) CreateHandle();
+        title.Text = caption;
+        status.Text = "准备中…";
+        status.ForeColor = Theme.Warn;
+        grid.Rows.Clear();
+        grid.Columns.Clear();
+        summary.Clear();
     }
 
     private void Post(Action a)
@@ -137,13 +118,18 @@ internal sealed class ResultsWindow : Form
 
     public void SetStatus(string text) => Post(() => status.Text = text);
 
-    /// <summary>Replaces the columns and clears all rows.</summary>
+    /// <summary>Replaces the columns and clears all rows. The last column holds free text and gets double width.</summary>
     public void SetTable(IReadOnlyList<string> columns) => Post(() =>
     {
         grid.Rows.Clear();
         grid.Columns.Clear();
-        foreach (string c in columns)
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = c, SortMode = DataGridViewColumnSortMode.NotSortable });
+        for (int i = 0; i < columns.Count; i++)
+            grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                HeaderText = columns[i],
+                SortMode = DataGridViewColumnSortMode.NotSortable,
+                FillWeight = i == columns.Count - 1 ? 200 : 100,
+            });
     });
 
     public void AddRow(IReadOnlyList<string> cells, Color? fore = null) => Post(() =>
@@ -151,18 +137,14 @@ internal sealed class ResultsWindow : Form
         int i = grid.Rows.Add(cells.Cast<object>().ToArray());
         if (fore is { } c) grid.Rows[i].DefaultCellStyle.ForeColor = c;
         try { grid.FirstDisplayedScrollingRowIndex = i; }
-        catch (InvalidOperationException) { }   // no room to display rows, e.g. while minimised
+        catch (InvalidOperationException) { }   // no room to display rows
     });
 
     public void SetSummary(string text) => Post(() => summary.Text = text.Replace("\n", "\r\n"));
 
-    /// <summary>Marks the work as done: the cancel button becomes 关闭 and closing no longer cancels.</summary>
     public void Finish(string finalStatus, bool ok) => Post(() =>
     {
-        finished = true;
         status.Text = finalStatus;
         status.ForeColor = ok ? Theme.Success : Theme.Warn;
-        actionBtn.Text = "关闭";
-        actionBtn.Enabled = true;
     });
 }
