@@ -122,6 +122,25 @@ internal sealed class MonitorView : UserControl
 
     private Thread? worker;
     private volatile bool running;
+    private volatile bool paused, parked;
+
+    /// <summary>CPPC MaximumPerformancePercent per slot; all zero when CPPC cannot rank cores.</summary>
+    public uint[] CppcPerf { get; private set; } = Array.Empty<uint>();
+
+    /// <summary>Latest resolved CPU-domain BCLK (MHz); 0 when unknown.</summary>
+    public double CoreBclk => bclk;
+
+    /// <summary>Parks the poll loop so its per-core MSR reads stop waking idle cores (used by Single Core Boost).
+    /// Returns once the loop is parked or the timeout passes.</summary>
+    public void Pause(int timeoutMs = 3000)
+    {
+        parked = false;
+        paused = true;
+        var sw = Stopwatch.StartNew();
+        while (!parked && worker is { IsAlive: true } && sw.ElapsedMilliseconds < timeoutMs) Thread.Sleep(20);
+    }
+
+    public void Resume() => paused = false;
 
     // 身份条（CPU / 主板 / 内存 / 显卡）与限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
     private StatCellControl _cpuVal = null!, _moboVal = null!, _memVal = null!, _gpuVal = null!;
@@ -358,6 +377,7 @@ internal sealed class MonitorView : UserControl
             .Where(i => slotDisabled.Length <= i || !slotDisabled[i])
             .Select(i => perf[i]).ToArray();
         if (livePerf.Distinct().Count() <= 1) Array.Clear(perf);
+        CppcPerf = perf;
 
         // 金银核：CPPC 排名第一标银(✦)、第二标金(★)，同分按核号升序；按核索引定位，同分时不会标出多个
         int goldCore = -1, silverCore = -1;
@@ -500,6 +520,14 @@ internal sealed class MonitorView : UserControl
 
         while (running)
         {
+            if (paused)
+            {
+                parked = true;
+                Thread.Sleep(100);
+                continue;
+            }
+            parked = false;
+
             int lp = n * tpc;
             var startA = new ulong[lp]; var startM = new ulong[lp]; var startT = new ulong[lp];
             var lastA  = new ulong[lp]; var lastM  = new ulong[lp]; var lastT  = new ulong[lp];
