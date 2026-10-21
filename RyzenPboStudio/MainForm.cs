@@ -504,6 +504,7 @@ internal sealed class MainForm : Form
         _stopBtn.Click += StopTest;
         runRow.Controls.Add(_startBtn);
         runRow.Controls.Add(_stopBtn);
+        var measureRow = BuildMeasureRow(runBtnWidth, runGap);
 
         body.Controls.Add(modeTitle);
         body.Controls.Add(_modeCombo);
@@ -522,6 +523,7 @@ internal sealed class MainForm : Form
 
         // 添加顺序决定停靠优先级：标题占顶、按钮占底、body 填中间
         card.Controls.Add(body);
+        card.Controls.Add(measureRow);   // docks above runRow
         card.Controls.Add(runRow);
         card.Controls.Add(SectionTitle("测试设置"));
         return card;
@@ -1992,6 +1994,7 @@ internal sealed class MainForm : Form
     {
         _stopRequested = true;
         _cts?.Cancel();
+        _measureCts?.Cancel();
         SetStatus("正在停止...", Theme.Accent);
         _stopBtn.Enabled = false;
     }
@@ -2320,6 +2323,85 @@ internal sealed class MainForm : Form
             MessageBox.Show("测试已停止，进程已清理完成。", "已停止", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    // ── Single Core Boost / 电压对齐 ────────────────────────────────────────
+
+    private PillButton _scbBtn = null!;
+    private PillButton _alignBtn = null!;
+    private CancellationTokenSource? _measureCts;
+    private Task? _measureTask;
+
+    private FlowLayoutPanel BuildMeasureRow(int btnWidth, int gap)
+    {
+        var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Margin = new Padding(0) };
+        _scbBtn = Ghost("Single Core Boost");
+        _alignBtn = Ghost("电压对齐");
+        _scbBtn.Size = _alignBtn.Size = new Size(btnWidth, 34);
+        _scbBtn.Margin = new Padding(0, 0, gap, 8);
+        _alignBtn.Margin = new Padding(0, 0, 0, 8);
+        _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压\n只是测量，不是压力测试，不修改任何参数");
+        _tips.SetToolTip(_alignBtn, "CO 全部置 0 后逐核测量单核电压，各 CCD 以金核或银核为基准\n给电压偏高的核心自动加负压，使单核电压对齐");
+        _scbBtn.Click += (_, _) => StartMeasure("Single Core Boost", (win, ct) => SingleCoreBoost.Run(_monitorView, win, ct));
+        _alignBtn.Click += (_, _) => OnAlignClick();
+        row.Controls.Add(_scbBtn);
+        row.Controls.Add(_alignBtn);
+        return row;
+    }
+
+    private void OnAlignClick()
+    {
+        if (!VoltageAlign.Confirm(this, out var target)) return;
+        int editorMin = (int)_coCells[0].Minimum;
+        StartMeasure("电压对齐", (win, ct) =>
+        {
+            var final = VoltageAlign.Run(_monitorView, target, editorMin, win, ct);
+            if (final == null) return false;
+            Ui(() => { for (int i = 0; i < _coSlotCount && i < final.Count; i++) SetCell(i, final[i]); });
+            return true;
+        });
+    }
+
+    /// <summary>Runs a single-core measurement in the background. Mutually exclusive with stress tests; the stop
+    /// button or the results window cancels it. The offset poll timer is paused so it does not wake cores.</summary>
+    private void StartMeasure(string title, Func<ResultsWindow, CancellationToken, bool> work)
+    {
+        if (_testTask is { IsCompleted: false } || _measureTask is { IsCompleted: false }) return;
+        if (!SingleCoreBoost.IsSupported)
+        {
+            MessageBox.Show("CPU 不支持 AVX2 / FMA，无法运行单核负载。", title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _measureCts = cts;
+        var win = new ResultsWindow(title, cts.Cancel);
+        win.Show(this);
+
+        SetControlsEnabled(false);
+        _stopBtn.Enabled = true;
+        _offsetTimer.Stop();
+        SetStatus($"{title} 运行中", Theme.Warn);
+
+        _measureTask = Task.Run(() =>
+        {
+            bool ok = false;
+            try { ok = work(win, cts.Token); }
+            catch (Exception e) { Log.Write($"{title} 异常: {e.Message}", "ERROR"); }
+            finally
+            {
+                bool cancelled = cts.IsCancellationRequested;
+                if (cancelled) Log.Write($"{title} 已取消", "WARN");
+                win.Finish(cancelled ? "已取消" : ok ? "完成" : "失败，原因见运行日志", ok && !cancelled);
+                Ui(() =>
+                {
+                    SetControlsEnabled(true);
+                    _stopBtn.Enabled = false;
+                    _offsetTimer.Start();
+                    SetStatus("就绪", Theme.Success);
+                });
+            }
+        });
+    }
+
     // ── 辅助 ────────────────────────────────────────────────────────────────
 
     private void SetStatus(string text, Color color)
@@ -2424,6 +2506,8 @@ internal sealed class MainForm : Form
         if (_autoAdjBtn != null) _autoAdjBtn.Enabled = enabled;
         if (_manualAdjBtn != null) _manualAdjBtn.Enabled = enabled;
         foreach (var b in _scopeBtns) b.Enabled = enabled;
+        if (_scbBtn != null) _scbBtn.Enabled = enabled;
+        if (_alignBtn != null) _alignBtn.Enabled = enabled;
     }
 
     private void ClearLog()
@@ -2490,6 +2574,8 @@ internal sealed class MainForm : Form
             _stopRequested = true;
             _cts?.Cancel();
         }
+
+        _measureCts?.Cancel();
 
         // 只有用户主动关闭才清脏标记；其余情况保留，下次启动按「上次测试中断」续跑并回退负压。
         if (userClosing)
