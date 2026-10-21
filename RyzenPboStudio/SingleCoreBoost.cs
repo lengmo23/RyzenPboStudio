@@ -14,8 +14,8 @@ internal sealed record ScbRow(
 
 /// <summary>Single Core Boost: runs the synthetic load on one physical core at a time and records what that core
 /// reaches under the current CO. It is a measurement, not a stress test: it never writes CO and does not touch the
-/// crash-recovery flag. All SMU / MSR access is serialised through RyzenSmu.IoLock, and the monitor's poll loop is
-/// parked for the whole session because its per-core MSR reads wake idle cores.</summary>
+/// crash-recovery flag. All SMU / MSR access is serialised through RyzenSmu.IoLock, and the monitor runs in quiet
+/// mode for the whole session: it keeps updating from the PM table but skips the per-core MSR reads that wake idle cores.</summary>
 internal sealed class SingleCoreBoost : IDisposable
 {
     /// <summary>Brute-force share of the synthetic load; 25% matched R23's effective load on a 9950X (ratio 1.009).</summary>
@@ -109,7 +109,7 @@ internal sealed class SingleCoreBoost : IDisposable
         refMHz = tscMHzCache > 0 ? tscMHzCache.Value : SystemInfo.GetBaseFrequencyMHz();
     }
 
-    /// <summary>Parks the monitor and probes the PM table. Returns null (reason logged) when sampling is impossible.</summary>
+    /// <summary>Puts the monitor in quiet mode and probes the PM table. Returns null (reason logged) when sampling is impossible.</summary>
     public static SingleCoreBoost? Open(MonitorView? monitor)
     {
         if (!IsSupported)
@@ -118,7 +118,7 @@ internal sealed class SingleCoreBoost : IDisposable
             return null;
         }
 
-        monitor?.Pause();
+        monitor?.BeginQuiet();
         SingleCoreBoost? scb = null;
         try
         {
@@ -132,14 +132,14 @@ internal sealed class SingleCoreBoost : IDisposable
             }
             if (scb.powIdx < 0)
                 Log.Write("PM Table 每核功耗段未探到：无法确认负载是否落在目标核上，每核改为固定等待", "WARN");
-            Log.Write($"单核测量已就绪：BCLK {scb.bclk:F2} MHz，加重 {LoadHeavyPct}%，测量期间暂停顶部监控采样");
+            Log.Write($"单核测量已就绪：BCLK {scb.bclk:F2} MHz，加重 {LoadHeavyPct}%，测量期间顶部监控只读 PM Table，不读每核 MSR");
             return scb;
         }
         catch (Exception e)
         {
             Log.Write($"单核测量初始化失败: {e.Message}", "ERROR");
             if (scb != null) scb.Dispose();
-            else monitor?.Resume();
+            else monitor?.EndQuiet();
             return null;
         }
     }
@@ -465,6 +465,6 @@ internal sealed class SingleCoreBoost : IDisposable
     {
         load?.Dispose();
         load = null;
-        monitor?.Resume();
+        monitor?.EndQuiet();
     }
 }

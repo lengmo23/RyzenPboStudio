@@ -122,7 +122,7 @@ internal sealed class MonitorView : UserControl
 
     private Thread? worker;
     private volatile bool running;
-    private volatile bool paused, parked;
+    private volatile bool quiet, quietAck;
 
     /// <summary>CPPC MaximumPerformancePercent per slot; all zero when CPPC cannot rank cores.</summary>
     public uint[] CppcPerf { get; private set; } = Array.Empty<uint>();
@@ -130,17 +130,18 @@ internal sealed class MonitorView : UserControl
     /// <summary>Latest resolved CPU-domain BCLK (MHz); 0 when unknown.</summary>
     public double CoreBclk => bclk;
 
-    /// <summary>Parks the poll loop so its per-core MSR reads stop waking idle cores (used by Single Core Boost).
-    /// Returns once the loop is parked or the timeout passes.</summary>
-    public void Pause(int timeoutMs = 3000)
+    /// <summary>Quiet mode for Single Core Boost: the poll loop keeps updating but skips the core-bound APERF/MPERF
+    /// reads that wake idle cores; EFFREQ and occupancy come from the PM table instead. Returns once a poll round has
+    /// started in quiet mode (no core-bound read still in flight) or the timeout passes.</summary>
+    public void BeginQuiet(int timeoutMs = 3000)
     {
-        parked = false;
-        paused = true;
+        quietAck = false;
+        quiet = true;
         var sw = Stopwatch.StartNew();
-        while (!parked && worker is { IsAlive: true } && sw.ElapsedMilliseconds < timeoutMs) Thread.Sleep(20);
+        while (!quietAck && worker is { IsAlive: true } && sw.ElapsedMilliseconds < timeoutMs) Thread.Sleep(20);
     }
 
-    public void Resume() => paused = false;
+    public void EndQuiet() => quiet = false;
 
     // 身份条（CPU / 主板 / 内存 / 显卡）与限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
     private StatCellControl _cpuVal = null!, _moboVal = null!, _memVal = null!, _gpuVal = null!;
@@ -520,13 +521,9 @@ internal sealed class MonitorView : UserControl
 
         while (running)
         {
-            if (paused)
-            {
-                parked = true;
-                Thread.Sleep(100);
-                continue;
-            }
-            parked = false;
+            // Latched once per round so a round never mixes core-bound and PM-table-only readings
+            bool q = quiet;
+            if (q) quietAck = true;
 
             int lp = n * tpc;
             var startA = new ulong[lp]; var startM = new ulong[lp]; var startT = new ulong[lp];
@@ -537,7 +534,8 @@ internal sealed class MonitorView : UserControl
             float[]? ptSnap = null;
             double maxCpuVid = 0, maxCpuTel = 0;   // 全局 VDDCR_CPU：VID 窗口峰值 + 同帧配对的实测电压
 
-            // 窗口起点：各核每个 SMT 线程的 APERF / MPERF / TSC 累计计数
+            // 窗口起点：各核每个 SMT 线程的 APERF / MPERF / TSC 累计计数（静默模式不读，计数留 0）
+            if (!q)
             lock (RyzenSmu.IoLock)
             {
                 for (int i = 0; i < n; i++)
@@ -588,7 +586,8 @@ internal sealed class MonitorView : UserControl
 
             if (!running) break;
 
-            // 窗口终点：各核每个 SMT 线程的 APERF / MPERF / TSC
+            // 窗口终点：各核每个 SMT 线程的 APERF / MPERF / TSC（静默模式不读）
+            if (!q)
             lock (RyzenSmu.IoLock)
             {
                 // PM Table 能给出每核频率时就不读这个 MSR：读 per-core MSR 必须绑核，绑核会唤醒空闲核
@@ -694,11 +693,22 @@ internal sealed class MonitorView : UserControl
             // FREQ 首选 PM Table 的每核频率：读表不绑核，不会唤醒空闲核。
             // SMU 按 100MHz 外频报这份频率，需按 BCLK 换算。
             if (ptLayout is { PerCoreFreqIdx: >= 0 } ptl && ptSnap is { } pts && pts.Length > ptl.PerCoreFreqIdx + n)
+            {
                 for (int i = 0; i < n; i++)
                 {
                     double mhz = pts[ptl.PerCoreFreqIdx + i] * 1000.0 * bclkCorr;
                     if (mhz > 0) busyFreq[i] = mhz;
                 }
+
+                // 静默模式没有 APERF/MPERF：EFFREQ 取紧随其后的 CORE_FREQEFF 段，占用取再后一段 CORE_C0%
+                if (q && pts.Length > ptl.PerCoreFreqIdx + 3 * n)
+                    for (int i = 0; i < n; i++)
+                    {
+                        effFreq[i] = pts[ptl.PerCoreFreqIdx + n + i] * 1000.0 * bclkCorr;
+                        float c0 = pts[ptl.PerCoreFreqIdx + 2 * n + i];
+                        if (c0 is >= 0f and <= 100f) occ[i] = c0;
+                    }
+            }
 
             // 若 HWiNFO 在运行并开启共享内存，FREQ 直接采用其 Core Clock 原值，与 HWiNFO 完全一致；否则保留自算忙时频率
             var hwClocks = HwInfoReader.ReadCoreClocks();
