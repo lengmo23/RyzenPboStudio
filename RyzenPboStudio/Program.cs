@@ -3,9 +3,10 @@ namespace RyzenPboStudio;
 internal static class Program
 {
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        bool autostart = args.Any(a => string.Equals(a, AutoStart.Arg, StringComparison.OrdinalIgnoreCase));
 
         // 建立 logs\ / profiles\ 并迁移旧版遗留文件。必须早于任何状态读取，
         // 否则升级后读不到上次崩溃的恢复点。
@@ -28,6 +29,29 @@ internal static class Program
                 "请以管理员身份运行此程序！",
                 "错误",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        // Single instance: two processes driving the SMU would overwrite each other's CO writes.
+        // Wait a few seconds so an instance still exiting after a self-update can release it.
+        using var instanceMutex = new Mutex(false, @"Global\RyzenPboStudio.SingleInstance");
+        bool ownsInstance;
+        try
+        {
+            ownsInstance = instanceMutex.WaitOne(TimeSpan.FromSeconds(5));
+        }
+        catch (AbandonedMutexException)
+        {
+            ownsInstance = true;   // previous instance died without releasing
+        }
+        if (!ownsInstance)
+        {
+            // Autostart while the user already opened the app: exit silently
+            if (!autostart)
+                MessageBox.Show(
+                    "AMD Ryzen PBO Studio 已在运行。",
+                    "提示",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -56,6 +80,13 @@ internal static class Program
             return;
         }
 
-        Application.Run(new MainForm());
+        try
+        {
+            Application.Run(new MainForm(autostart));
+        }
+        finally
+        {
+            instanceMutex.ReleaseMutex();
+        }
     }
 }
