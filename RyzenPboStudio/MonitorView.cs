@@ -144,14 +144,15 @@ internal sealed class MonitorView : UserControl
 
     public void EndQuiet() => quiet = false;
 
-    // 顶部标题栏（硬件信息）与限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
-    private HeaderBar _header = null!;
+    // 限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
+    private readonly HeaderBar? _header;   // 窗口标题栏，由 MainForm 持有；这里只往里写硬件信息
     private string _cpuLine = "", _gpuOsLine = "";   // 标题栏第 1 / 3 行的静态部分，内存时钟与时间每轮追加
     private StatCellControl _bclkVal = null!, _telVidVal = null!, _vdroopVal = null!, _thmVal = null!, _tdcVal = null!, _edcVal = null!, _pptVal = null!, _fmaxVal = null!;
     private CcdView[] ccdViews = null!;
 
-    public MonitorView()
+    public MonitorView(HeaderBar? header = null)
     {
+        _header = header;
         cpu = RyzenSmu.SharedCpu;
 
         var topo = cpu.info.topology;
@@ -245,17 +246,14 @@ internal sealed class MonitorView : UserControl
             Dock = DockStyle.Fill,
             BackColor = MonTheme.Bg,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             Margin = new Padding(0),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));   // 标题栏：图标 + 程序名，右侧三行硬件信息
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // CCD 每核监控
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));   // 限制条
 
-        _header = new HeaderBar { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
-        root.Controls.Add(_header, 0, 0);
-        root.Controls.Add(BuildCcdRow(), 0, 1);
-        root.Controls.Add(BuildLimitStrip(), 0, 2);
+        root.Controls.Add(BuildCcdRow(), 0, 0);
+        root.Controls.Add(BuildLimitStrip(), 0, 1);
         Controls.Add(root);
     }
 
@@ -308,9 +306,9 @@ internal sealed class MonitorView : UserControl
         string driver = gpu == "—" ? "" : SystemInfo.GetGpuDriverVersion(gpu);
         _gpuOsLine = $"{gpu}{(driver.Length > 0 ? $" ({driver})" : "")}   {SystemInfo.GetOsVersion()}";
 
-        _header.SetLine(0, $"{_cpuLine}   {installedMemory}");
-        _header.SetLine(1, $"{SystemInfo.GetMotherboard()}   {biosPart}");
-        _header.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
+        _header?.SetLine(0, $"{_cpuLine}   {installedMemory}");
+        _header?.SetLine(1, $"{SystemInfo.GetMotherboard()}   {biosPart}");
+        _header?.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
         UpdateBclkCell();
     }
 
@@ -822,8 +820,8 @@ internal sealed class MonitorView : UserControl
                 if (!IsHandleCreated) continue;
                 BeginInvoke(() =>
                 {
-                    _header.SetLine(0, $"{_cpuLine}   {FormatMemory(fclk, uclk)}");
-                    _header.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
+                    _header?.SetLine(0, $"{_cpuLine}   {FormatMemory(fclk, uclk)}");
+                    _header?.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
                     UpdateBclkCell();
                     _telVidVal.Text = $"{(telVolt > 0 ? telVolt.ToString("F3") : "--")} / {(peakVid > 0 ? peakVid.ToString("F3") : "--")} V";
                     _vdroopVal.Text = vdroopValid ? $"{(peakVid - telVolt) / peakVid * 100.0:F1} %" : "--";
