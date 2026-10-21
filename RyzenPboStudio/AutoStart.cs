@@ -344,9 +344,9 @@ internal sealed class ResumeCountdownDialog : Form
             Margin = new Padding(2, 0, 2, 10),
         };
 
-        var startBtn = NewButton("立即开始", 96);
+        var startBtn = NewButton("立即开始", 96, primary: true);
         startBtn.DialogResult = DialogResult.OK;
-        var cancelBtn = NewButton("取消", 80);
+        var cancelBtn = NewButton("取消", 80, primary: false);
         cancelBtn.DialogResult = DialogResult.Cancel;
         var btnRow = new FlowLayoutPanel
         {
@@ -416,19 +416,22 @@ internal sealed class ResumeCountdownDialog : Form
         base.Dispose(disposing);
     }
 
-    private static Button NewButton(string text, int width)
+    protected override void OnHandleCreated(EventArgs e)
     {
-        var b = new Button
-        {
-            Text = text,
-            Width = width,
-            Height = 30,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Theme.SurfaceAlt,
-            ForeColor = Theme.TextHi,
-            Margin = new Padding(8, 0, 0, 0),
-        };
-        b.FlatAppearance.BorderColor = Theme.Border;
-        return b;
+        base.OnHandleCreated(e);
+        DarkTitleBar.Apply(Handle);
     }
+
+    /// <summary>Same pill buttons as the main window: primary = accent red, otherwise grey.</summary>
+    private static PillButton NewButton(string text, int width, bool primary) => new()
+    {
+        Text = text,
+        Size = new Size(width, 34),
+        Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
+        Hover = primary ? Theme.AccentHover : Theme.Border,
+        ForeColor = primary ? Theme.AccentText : Theme.TextHi,
+        BackColor = Theme.Surface,
+        Font = new Font(Theme.FontFamily, 10F, primary ? FontStyle.Bold : FontStyle.Regular),
+        Margin = new Padding(8, 0, 0, 0),
+    };
 }
