@@ -77,7 +77,7 @@ internal sealed class ResultsPanel : Panel
         summary = new TextBox
         {
             Dock = DockStyle.Bottom,
-            Height = 110,
+            Height = 64,
             Multiline = true,
             ReadOnly = true,
             ScrollBars = ScrollBars.Vertical,
