@@ -1,0 +1,434 @@
+using System.Security;
+using System.Security.Principal;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace RyzenPboStudio;
+
+/// <summary>profiles\autostart.json: boot-apply switch.</summary>
+internal sealed class AutoStartSettings
+{
+    [JsonPropertyName("boot_apply")] public bool BootApply { get; set; }
+}
+
+/// <summary>profiles\auto_resume.json: consecutive auto-resume count and whether the user cancelled auto-resume.</summary>
+internal sealed class AutoResumeState
+{
+    [JsonPropertyName("count")] public int Count { get; set; }
+    [JsonPropertyName("declined")] public bool Declined { get; set; }
+}
+
+/// <summary>
+/// Logon autostart via a scheduled task, plus its state files. The task exists iff boot-apply is on,
+/// or a test is in progress / interrupted and auto-resume was not cancelled.
+/// </summary>
+internal static class AutoStart
+{
+    public const string Arg = "--autostart";
+    public const string TaskName = "AMD Ryzen PBO Studio Autostart";
+    public const int MaxAutoResumes = 10;
+    public const int ResumeCountdownSeconds = 30;
+
+    /// <summary>Uptime after boot-apply before the boot-loop flag is cleared.</summary>
+    private static readonly TimeSpan BootApplyStableTime = TimeSpan.FromMinutes(3);
+
+    private static string SettingsFile => Path.Combine(Workspace.ProfilesDir, "autostart.json");
+    private static string ResumeFile => Path.Combine(Workspace.ProfilesDir, "auto_resume.json");
+    private static string BootApplyPendingFlag => Path.Combine(Workspace.ProfilesDir, "boot_apply_pending");
+
+    private static string Schtasks => Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+
+    private static readonly object SyncLock = new();
+    private static System.Threading.Timer? _stableTimer;
+
+    // ── Settings and resume count ───────────────────────────────────────────
+
+    public static bool BootApplyEnabled => Load<AutoStartSettings>(SettingsFile)?.BootApply == true;
+
+    public static bool SetBootApply(bool enabled) =>
+        Save(SettingsFile, new AutoStartSettings { BootApply = enabled });
+
+    public static AutoResumeState LoadResume() => Load<AutoResumeState>(ResumeFile) ?? new AutoResumeState();
+
+    public static void ResetResumeCount()
+    {
+        var s = LoadResume();
+        if (s.Count == 0) return;
+        s.Count = 0;
+        Save(ResumeFile, s);
+    }
+
+    /// <summary>Increments and persists the resume count; returns -1 if it could not be persisted (the loop cap would not hold).</summary>
+    public static int IncrementResumeCount()
+    {
+        var s = LoadResume();
+        s.Count++;
+        return Save(ResumeFile, s) ? s.Count : -1;
+    }
+
+    public static void DeclineResume()
+    {
+        var s = LoadResume();
+        if (s.Declined) return;
+        s.Declined = true;
+        Save(ResumeFile, s);
+    }
+
+    /// <summary>A test started: re-enable auto-resume for it and make sure the task exists before load begins.</summary>
+    public static string? OnTestStarted()
+    {
+        var s = LoadResume();
+        if (s.Declined)
+        {
+            s.Declined = false;
+            Save(ResumeFile, s);
+        }
+        return Sync();
+    }
+
+    // ── Boot-apply loop guard ───────────────────────────────────────────────
+
+    /// <summary>The last boot-apply was not followed by 3 minutes of uptime or a clean exit.</summary>
+    public static bool BootApplyPending => File.Exists(BootApplyPendingFlag);
+
+    /// <summary>Durably sets the flag before applying and clears it after 3 minutes. Returns false if it could not be written.</summary>
+    public static bool MarkBootApplyPending()
+    {
+        try
+        {
+            DurableIO.WriteAllText(BootApplyPendingFlag, DateTime.Now.ToString("O"));
+        }
+        catch (Exception e)
+        {
+            Log.Write($"写入开机应用保护标记失败: {e.Message}", "WARN");
+            return false;
+        }
+        _stableTimer?.Dispose();
+        _stableTimer = new System.Threading.Timer(_ => ClearBootApplyPending(), null,
+            BootApplyStableTime, Timeout.InfiniteTimeSpan);
+        return true;
+    }
+
+    public static void ClearBootApplyPending()
+    {
+        try { if (File.Exists(BootApplyPendingFlag)) File.Delete(BootApplyPendingFlag); } catch { }
+    }
+
+    // ── Scheduled task ──────────────────────────────────────────────────────
+
+    /// <summary>Creates or deletes the task to match current state. Returns null on success, else a short status text (details are logged).</summary>
+    public static string? Sync()
+    {
+        lock (SyncLock)
+        {
+            try
+            {
+                bool want = BootApplyEnabled || (Workspace.WasInterrupted() && !LoadResume().Declined);
+                bool exists = TaskExists();
+                if (want)
+                    return exists && TaskMatchesCurrentExe() ? null : Register(exists);
+                return exists ? Unregister() : null;
+            }
+            catch (Exception e)
+            {
+                Log.Write($"同步开机自启任务失败: {e.Message}", "WARN");
+                return "开机自启任务同步失败，详见日志";
+            }
+        }
+    }
+
+    private static bool TaskExists() =>
+        ProcUtil.Capture(Schtasks, new[] { "/Query", "/TN", TaskName }, null, 15000).code == 0;
+
+    /// <summary>
+    /// Whether the registered task points at this EXE. An unreadable task file counts as a match,
+    /// since this instance may have been started by that very task and should not re-register it.
+    /// </summary>
+    private static bool TaskMatchesCurrentExe()
+    {
+        try
+        {
+            string file = Path.Combine(Environment.SystemDirectory, "Tasks", TaskName);
+            string xml = File.ReadAllText(file);
+            string exe = Environment.ProcessPath ?? "";
+            return xml.Contains($"<Command>{SecurityElement.Escape(exe)}</Command>", StringComparison.OrdinalIgnoreCase)
+                && xml.Contains($"<Arguments>{Arg}</Arguments>", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private static string? Register(bool replacing)
+    {
+        string exe = Environment.ProcessPath
+            ?? throw new InvalidOperationException("无法获取程序路径");
+        string sid = WindowsIdentity.GetCurrent().User?.Value
+            ?? throw new InvalidOperationException("无法获取当前用户 SID");
+
+        // Admin-only directory, so a non-elevated process cannot swap the XML before schtasks reads it
+        string dir = Path.GetDirectoryName(ToolBundle.RootDirectory)!;
+        string xmlPath = Path.Combine(dir, $"autostart-{Guid.NewGuid():N}.xml");
+        int code;
+        string output;
+        try
+        {
+            File.WriteAllText(xmlPath, BuildTaskXml(exe, sid), Encoding.Unicode);
+            (code, output) = ProcUtil.Capture(Schtasks,
+                new[] { "/Create", "/XML", xmlPath, "/TN", TaskName, "/F" }, null, 15000);
+        }
+        finally
+        {
+            try { File.Delete(xmlPath); } catch { }
+        }
+
+        if (code != 0)
+        {
+            Log.Write($"注册开机自启任务失败（schtasks 返回 {code}）: {output.Trim()}", "WARN");
+            return "开机自启任务注册失败，详见日志";
+        }
+        Log.Write(replacing
+            ? "已更新开机自启任务（程序路径已变更）"
+            : "已注册开机自启任务：登录 Windows 约 30 秒后自动以管理员身份启动本程序");
+        return null;
+    }
+
+    private static string? Unregister()
+    {
+        var (code, output) = ProcUtil.Capture(Schtasks, new[] { "/Delete", "/TN", TaskName, "/F" }, null, 15000);
+        if (code != 0)
+        {
+            Log.Write($"移除开机自启任务失败（schtasks 返回 {code}）: {output.Trim()}", "WARN");
+            return "开机自启任务移除失败，详见日志";
+        }
+        Log.Write("已移除开机自启任务");
+        return null;
+    }
+
+    /// <summary>
+    /// Logon trigger delayed 30 s (PawnIO driver and desktop ready), elevated in the interactive session.
+    /// PT0S disables the default 72 h kill; Priority 4 is normal (the default 7 is below normal).
+    /// </summary>
+    private static string BuildTaskXml(string exe, string sid)
+    {
+        string user = SecurityElement.Escape(sid);
+        string cmd = SecurityElement.Escape(exe);
+        string workDir = SecurityElement.Escape(Path.GetDirectoryName(exe) ?? Workspace.BaseDir);
+        return $"""
+            <?xml version="1.0" encoding="UTF-16"?>
+            <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <RegistrationInfo>
+                <Author>AMD Ryzen PBO Studio</Author>
+                <Description>登录后自动启动 AMD Ryzen PBO Studio：应用已保存的 CO/CS，或恢复异常中断的测试。</Description>
+              </RegistrationInfo>
+              <Triggers>
+                <LogonTrigger>
+                  <Enabled>true</Enabled>
+                  <UserId>{user}</UserId>
+                  <Delay>PT30S</Delay>
+                </LogonTrigger>
+              </Triggers>
+              <Principals>
+                <Principal id="Author">
+                  <UserId>{user}</UserId>
+                  <LogonType>InteractiveToken</LogonType>
+                  <RunLevel>HighestAvailable</RunLevel>
+                </Principal>
+              </Principals>
+              <Settings>
+                <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+                <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+                <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+                <AllowHardTerminate>true</AllowHardTerminate>
+                <StartWhenAvailable>false</StartWhenAvailable>
+                <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+                <IdleSettings>
+                  <StopOnIdleEnd>false</StopOnIdleEnd>
+                  <RestartOnIdle>false</RestartOnIdle>
+                </IdleSettings>
+                <AllowStartOnDemand>true</AllowStartOnDemand>
+                <Enabled>true</Enabled>
+                <Hidden>false</Hidden>
+                <RunOnlyIfIdle>false</RunOnlyIfIdle>
+                <WakeToRun>false</WakeToRun>
+                <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+                <Priority>4</Priority>
+              </Settings>
+              <Actions Context="Author">
+                <Exec>
+                  <Command>{cmd}</Command>
+                  <Arguments>{Arg}</Arguments>
+                  <WorkingDirectory>{workDir}</WorkingDirectory>
+                </Exec>
+              </Actions>
+            </Task>
+            """;
+    }
+
+    // ── JSON I/O ────────────────────────────────────────────────────────────
+
+    private static T? Load<T>(string path) where T : class
+    {
+        try
+        {
+            if (File.Exists(path))
+                return JsonSerializer.Deserialize<T>(File.ReadAllText(path));
+        }
+        catch (Exception e)
+        {
+            Log.Write($"读取 {Path.GetFileName(path)} 失败，按默认值处理: {e.Message}", "WARN");
+        }
+        return null;
+    }
+
+    private static bool Save<T>(string path, T value)
+    {
+        try
+        {
+            DurableIO.WriteAllText(path, JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true }));
+            return true;
+        }
+        catch (Exception e)
+        {
+            Log.Write($"保存 {Path.GetFileName(path)} 失败: {e.Message}", "WARN");
+            return false;
+        }
+    }
+}
+
+/// <summary>Auto-resume countdown: OK on timeout or 立即开始, Cancel on 取消 or close.</summary>
+internal sealed class ResumeCountdownDialog : Form
+{
+    private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
+    private readonly Label _message;
+    private readonly string _offsetNote;
+    private int _remaining;
+
+    /// <param name="manualTakeover">Offsets were taken over manually; recovery keeps them without +StepOnError.</param>
+    /// <param name="attempt">1-based consecutive auto-resume number.</param>
+    public ResumeCountdownDialog(bool manualTakeover, int attempt)
+    {
+        _remaining = AutoStart.ResumeCountdownSeconds;
+        _offsetNote = manualTakeover ? "沿用手动接管的负压" : $"所有核心负压 +{Config.StepOnError}";
+
+        Text = "自动恢复测试";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        TopMost = true;   // at logon the main window often ends up behind other apps
+        BackColor = Theme.Surface;
+        ForeColor = Theme.TextHi;
+        Font = new Font(Theme.FontFamily, 9F);
+
+        _message = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(440, 0),
+            ForeColor = Theme.TextHi,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold),
+            Margin = new Padding(2, 0, 2, 8),
+        };
+        var note = new Label
+        {
+            Text = $"连续第 {attempt}/{AutoStart.MaxAutoResumes} 次自动恢复，达到上限后不再自动开始。\n" +
+                   "完全无人值守的恢复需要在 Windows 中开启自动登录（本程序不会修改系统设置）。",
+            AutoSize = true,
+            MaximumSize = new Size(440, 0),
+            ForeColor = Theme.TextLo,
+            BackColor = Theme.Surface,
+            Margin = new Padding(2, 0, 2, 10),
+        };
+
+        var startBtn = NewButton("立即开始", 96);
+        startBtn.DialogResult = DialogResult.OK;
+        var cancelBtn = NewButton("取消", 80);
+        cancelBtn.DialogResult = DialogResult.Cancel;
+        var btnRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Anchor = AnchorStyles.Right,
+            FlowDirection = FlowDirection.LeftToRight,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0, 4, 0, 0),
+        };
+        btnRow.Controls.Add(startBtn);
+        btnRow.Controls.Add(cancelBtn);
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Theme.Surface,
+            Padding = new Padding(16, 14, 16, 12),
+        };
+        for (int i = 0; i < 3; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(_message, 0, 0);
+        layout.Controls.Add(note, 0, 1);
+        layout.Controls.Add(btnRow, 0, 2);
+
+        Controls.Add(layout);
+        AcceptButton = startBtn;
+        CancelButton = cancelBtn;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+
+        UpdateMessage();
+        _timer.Tick += (_, _) =>
+        {
+            if (--_remaining <= 0)
+            {
+                _timer.Stop();
+                DialogResult = DialogResult.OK;
+                return;
+            }
+            UpdateMessage();
+        };
+    }
+
+    private void UpdateMessage() =>
+        _message.Text = $"检测到上次测试异常中断，将在 {_remaining} 秒后自动恢复测试（{_offsetNote}）";
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        Activate();
+        _timer.Start();
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        _timer.Stop();
+        base.OnFormClosed(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _timer.Dispose();
+        base.Dispose(disposing);
+    }
+
+    private static Button NewButton(string text, int width)
+    {
+        var b = new Button
+        {
+            Text = text,
+            Width = width,
+            Height = 30,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.SurfaceAlt,
+            ForeColor = Theme.TextHi,
+            Margin = new Padding(8, 0, 0, 0),
+        };
+        b.FlatAppearance.BorderColor = Theme.Border;
+        return b;
+    }
+}
