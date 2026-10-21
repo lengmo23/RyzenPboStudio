@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 namespace RyzenPboStudio;
 
 /// <summary>调用 y-cruncher 跑压力测试，解析报错核心并自动调压。</summary>
-internal static class YCruncher
+internal static partial class YCruncher
 {
     /// <summary>y-cruncher 不内嵌在程序里，随发布目录放在 tools\y-cruncher\。
     /// 开源仓库不分发它时，用户按同样结构自行放置即可；另接受几种常见的放法。</summary>
@@ -302,44 +302,8 @@ internal static class YCruncher
 
             if (failed.Count > 0)
             {
-                var crashedLogical = failed.ToList();
-                // 逻辑核 → OS 物理核 → 槽位。负压表按槽位索引，少了后一步会写到屏蔽槽上
-                var crashedSlots = crashedLogical
-                    .Select(CoreTopology.PhysicalOf)
-                    .Select(RyzenSmu.OsCoreToSlot)
-                    .Distinct().OrderBy(x => x).ToList();
-
-                Log.Write($"报错逻辑核心: [{string.Join(", ", crashedLogical)}]", "WARN");
-                Log.Write($"对应物理核心: [{string.Join(", ", crashedSlots)}]", "WARN");
-
-                if (!autoAdjust)
-                {
-                    // 手动模式：只提醒，不动负压，交由用户自行判断如何调整
-                    Log.Write("手动模式：检测到报错核心，未调整负压，测试停止", "WARN");
-                    onManualError?.Invoke(crashedSlots);
+                if (!BackoffFailedCores(failed, current, mode, algoLabel, autoAdjust, onManualError))
                     return (false, current);
-                }
-
-                RefreshBaselineFromCpu(current);
-
-                foreach (int slot in crashedSlots)
-                {
-                    if (slot >= 0 && slot < current.Count)
-                    {
-                        int old = current[slot];
-                        current[slot] = old + Config.StepOnError;
-                        Log.Write($"  物理核心 {slot}: {old} → {current[slot]} (+{Config.StepOnError})");
-                    }
-                }
-
-                Log.Write($"新负压: [{string.Join(", ", current)}]");
-
-                // 先落盘再下发：万一应用后立刻死机，这组负压已在磁盘上
-                if (!Tuning.Apply(current, mode, algoLabel, "backoff"))
-                {
-                    Log.Write("应用负压失败", "ERROR");
-                    return (false, current);
-                }
 
                 Log.Write($"负压已调整，3 秒后重新开始 {iterations} 轮测试...");
                 if (token.WaitHandle.WaitOne(3000))
@@ -347,47 +311,10 @@ internal static class YCruncher
                 continue;
             }
 
-            // y-cruncher 自身崩溃（未指明报错核心）：视为整机不稳定，把仍在负压的物理核心各回退一档后重试。
-            // 钳到 0（不过冲成正压）；若所有核心已回到 0 仍崩溃，说明大概率非负压问题，停止本阶段避免空转。
             if (crashed)
             {
-                if (!autoAdjust)
-                {
-                    // 手动模式：y-cruncher 崩溃同样只提醒，不动负压
-                    Log.Write("手动模式：y-cruncher 崩溃（视为负压不稳定），未调整负压，测试停止", "WARN");
-                    onManualError?.Invoke(new List<int>());
+                if (!BackoffAfterCrash(current, scopeCores, mode, algoLabel, autoAdjust, onManualError))
                     return (false, current);
-                }
-
-                RefreshBaselineFromCpu(current);
-                bool anyReduced = false;
-                for (int i = 0; i < current.Count; i++)
-                {
-                    // 限定了测试范围时只回退参与本次测试的核心，不动没测过的那些
-                    if (scopeCores is { Count: > 0 } && !scopeCores.Contains(i)) continue;
-                    if (current[i] < 0)
-                    {
-                        int old = current[i];
-                        current[i] = Math.Min(0, current[i] + Config.StepOnError);
-                        anyReduced = true;
-                        Log.Write($"  物理核心 {i}: {old} → {current[i]} (+{Config.StepOnError})");
-                    }
-                }
-
-                if (!anyReduced)
-                {
-                    Log.Write(scopeCores is { Count: > 0 }
-                        ? "y-cruncher 崩溃，但本次测试范围内的核心负压已全为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试"
-                        : "y-cruncher 崩溃，但所有核心负压已为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试", "ERROR");
-                    return (false, current);
-                }
-
-                Log.Write($"检测到 y-cruncher 崩溃，视为不稳定：相关物理核心负压各 +{Config.StepOnError} → [{string.Join(", ", current)}]", "WARN");
-                if (!Tuning.Apply(current, mode, algoLabel, "yc-crash-backoff"))
-                {
-                    Log.Write("应用负压失败", "ERROR");
-                    return (false, current);
-                }
 
                 Log.Write($"负压已调整，3 秒后重新开始 {iterations} 轮测试...");
                 if (token.WaitHandle.WaitOne(3000))
@@ -421,6 +348,102 @@ internal static class YCruncher
             Log.Write("测试未完成");
             return (false, current);
         }
+    }
+
+    /// <summary>Error on specific logical cores: in auto mode back off their physical cores by StepOnError and apply,
+    /// returning true so the caller reruns. Returns false (caller stops) in manual mode or if applying fails.</summary>
+    private static bool BackoffFailedCores(
+        SortedSet<int> failedLogical, List<int> current, string mode, string phase,
+        bool autoAdjust, Action<List<int>>? onManualError)
+    {
+        var crashedLogical = failedLogical.ToList();
+        // 逻辑核 → OS 物理核 → 槽位。负压表按槽位索引，少了后一步会写到屏蔽槽上
+        var crashedSlots = crashedLogical
+            .Select(CoreTopology.PhysicalOf)
+            .Select(RyzenSmu.OsCoreToSlot)
+            .Distinct().OrderBy(x => x).ToList();
+
+        Log.Write($"报错逻辑核心: [{string.Join(", ", crashedLogical)}]", "WARN");
+        Log.Write($"对应物理核心: [{string.Join(", ", crashedSlots)}]", "WARN");
+
+        if (!autoAdjust)
+        {
+            // 手动模式：只提醒，不动负压，交由用户自行判断如何调整
+            Log.Write("手动模式：检测到报错核心，未调整负压，测试停止", "WARN");
+            onManualError?.Invoke(crashedSlots);
+            return false;
+        }
+
+        RefreshBaselineFromCpu(current);
+
+        foreach (int slot in crashedSlots)
+        {
+            if (slot >= 0 && slot < current.Count)
+            {
+                int old = current[slot];
+                current[slot] = old + Config.StepOnError;
+                Log.Write($"  物理核心 {slot}: {old} → {current[slot]} (+{Config.StepOnError})");
+            }
+        }
+
+        Log.Write($"新负压: [{string.Join(", ", current)}]");
+
+        // 先落盘再下发：万一应用后立刻死机，这组负压已在磁盘上
+        if (!Tuning.Apply(current, mode, phase, "backoff"))
+        {
+            Log.Write("应用负压失败", "ERROR");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// y-cruncher 自身崩溃（未指明报错核心）：视为整机不稳定，把仍在负压的物理核心各回退一档后由调用方重试。
+    /// 钳到 0（不过冲成正压）；若所有核心已回到 0 仍崩溃，说明大概率非负压问题，返回 false 停止本阶段避免空转。
+    /// Manual mode only notifies and returns false.
+    /// </summary>
+    private static bool BackoffAfterCrash(
+        List<int> current, IReadOnlyList<int>? scopeCores, string mode, string phase,
+        bool autoAdjust, Action<List<int>>? onManualError)
+    {
+        if (!autoAdjust)
+        {
+            // 手动模式：y-cruncher 崩溃同样只提醒，不动负压
+            Log.Write("手动模式：y-cruncher 崩溃（视为负压不稳定），未调整负压，测试停止", "WARN");
+            onManualError?.Invoke(new List<int>());
+            return false;
+        }
+
+        RefreshBaselineFromCpu(current);
+        bool anyReduced = false;
+        for (int i = 0; i < current.Count; i++)
+        {
+            // 限定了测试范围时只回退参与本次测试的核心，不动没测过的那些
+            if (scopeCores is { Count: > 0 } && !scopeCores.Contains(i)) continue;
+            if (current[i] < 0)
+            {
+                int old = current[i];
+                current[i] = Math.Min(0, current[i] + Config.StepOnError);
+                anyReduced = true;
+                Log.Write($"  物理核心 {i}: {old} → {current[i]} (+{Config.StepOnError})");
+            }
+        }
+
+        if (!anyReduced)
+        {
+            Log.Write(scopeCores is { Count: > 0 }
+                ? "y-cruncher 崩溃，但本次测试范围内的核心负压已全为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试"
+                : "y-cruncher 崩溃，但所有核心负压已为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试", "ERROR");
+            return false;
+        }
+
+        Log.Write($"检测到 y-cruncher 崩溃，视为不稳定：相关物理核心负压各 +{Config.StepOnError} → [{string.Join(", ", current)}]", "WARN");
+        if (!Tuning.Apply(current, mode, phase, "yc-crash-backoff"))
+        {
+            Log.Write("应用负压失败", "ERROR");
+            return false;
+        }
+        return true;
     }
 
     /// <summary>报错回退前，用 CPU 当前实际负压刷新基准，使自动调整跟随用户测试中途的手动调压。
