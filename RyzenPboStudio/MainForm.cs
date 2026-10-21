@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace RyzenPboStudio;
@@ -110,8 +109,10 @@ internal sealed partial class MainForm : Form
         Text = "AMD Ryzen PBO Studio";
         // AMD PBO 页 = CO | CS + 下方参数条，右侧 LOG；高度让 CO 卡片底边刚好落在 Core 7 下方的「-」之下。
         // 屏幕放不下时由 FitToScreen 等比缩小
-        ClientSize = new Size(1280, 870);
-        FormBorderStyle = FormBorderStyle.FixedSingle;
+        ClientSize = new Size(1280, 854);
+        // 无系统标题栏：HeaderBar 充当标题栏（拖动 / 最小化 / 关闭），四周留 1px 画描边
+        FormBorderStyle = FormBorderStyle.None;
+        Padding = new Padding(1);
         MaximizeBox = false;
         BackColor = Theme.Bg;
         ForeColor = Theme.TextHi;
@@ -157,6 +158,7 @@ internal sealed partial class MainForm : Form
     // ── 界面构建 ────────────────────────────────────────────────────────────
 
     private MonitorView? _monitorView;     // 顶部常驻每核监控
+    private readonly HeaderBar _headerBar = new() { Dock = DockStyle.Top, Height = 64 };   // 窗口标题栏 + 硬件信息
     private Control _pboPanel = null!;      // AMD PBO 页：CO | CS + 参数条
     private Control _testingPanel = null!;  // TESTING 页：测试设置
     private Control _loggingPanel = null!;  // LOGGING 页：运行日志
@@ -202,10 +204,10 @@ internal sealed partial class MainForm : Form
             ColumnCount = 1,
             RowCount = 3,
             BackColor = Theme.Bg,
-            Padding = new Padding(18),
+            Padding = new Padding(18, 8, 18, 18),
         };
-        // 364 时 CCD 表每行约 26px（RowH 下限），再矮就会裁掉 VID 行
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 364));  // 顶部：常驻监控（身份条 + CCD0/CCD1 + 限制条）
+        // 292 时 CCD 表每行约 26px（RowH 下限），再矮就会裁掉 VID 行
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 292));  // 顶部：常驻监控（CCD0/CCD1 + 限制条）
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 中部：AMD PBO / TESTING / LOGGING 内容
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));   // 底部：AMD PBO / TESTING / LOGGING 沉浸式导航（按钮 42 + 上边距 6）
 
@@ -228,6 +230,7 @@ internal sealed partial class MainForm : Form
         root.Controls.Add(host, 0, 1);
         root.Controls.Add(BuildNavBar(), 0, 2);
         Controls.Add(root);
+        Controls.Add(_headerBar);   // 后加的 Dock=Top 先停靠，占住窗口顶部
 
         ShowPage(Page.Pbo);   // 默认进 AMD PBO 页
     }
@@ -414,7 +417,7 @@ internal sealed partial class MainForm : Form
 
         try
         {
-            _monitorView = new MonitorView { Dock = DockStyle.Fill };
+            _monitorView = new MonitorView(_headerBar) { Dock = DockStyle.Fill };
             card.Controls.Add(_monitorView);
         }
         catch (Exception ex)
@@ -1974,22 +1977,27 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    // ── 暗色标题栏 ──────────────────────────────────────────────────────────
+    // ── 无边框窗口 ──────────────────────────────────────────────────────────
 
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-
-    protected override void OnHandleCreated(EventArgs e)
+    /// <summary>无边框窗口补回系统行为：WS_MINIMIZEBOX | WS_SYSMENU 让任务栏单击可最小化 / 还原、Alt+Space 可用；
+    /// CS_DROPSHADOW 给窗口加阴影。</summary>
+    protected override CreateParams CreateParams
     {
-        base.OnHandleCreated(e);
-        try
+        get
         {
-            int on = 1;
-            // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 2004+)，旧版回退到 19
-            if (DwmSetWindowAttribute(Handle, 20, ref on, sizeof(int)) != 0)
-                DwmSetWindowAttribute(Handle, 19, ref on, sizeof(int));
+            var cp = base.CreateParams;
+            cp.Style |= 0x00020000 | 0x00080000;   // WS_MINIMIZEBOX | WS_SYSMENU
+            cp.ClassStyle |= 0x00020000;           // CS_DROPSHADOW
+            return cp;
         }
-        catch { /* 非关键，失败则标题栏保持系统色 */ }
+    }
+
+    /// <summary>四周 1px 描边（Padding 留出的那一圈）。</summary>
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        using var pen = new Pen(Theme.Border);
+        e.Graphics.DrawRectangle(pen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
     }
 
     // ── 定时器 ──────────────────────────────────────────────────────────────
