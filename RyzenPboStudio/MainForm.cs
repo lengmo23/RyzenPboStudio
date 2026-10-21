@@ -104,7 +104,7 @@ internal sealed partial class MainForm : Form
         _autostartLaunch = autostartLaunch;
         Text = "AMD Ryzen PBO Studio";
         // 宽度容纳 CO | CS | PBO 参数三张卡片，双 CCD 监控表随之收紧；屏幕放不下时由 FitToScreen 等比缩小
-        ClientSize = new Size(1180, 910);
+        ClientSize = new Size(1280, 828);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.Bg;
@@ -249,8 +249,8 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0, 0, 0, 8),
         };
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 456));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 396));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 480));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
         cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var coCard = BuildCoCard(); coCard.Margin = new Padding(0, 0, 6, 0);
         var csCard = BuildCsCard(); csCard.Margin = new Padding(6, 0, 6, 0);
@@ -281,6 +281,7 @@ internal sealed partial class MainForm : Form
         var cfg = BuildConfigCard();
         // 结果卡片底部放 Single Core Boost / 电压对齐，与左侧开始 / 停止底边对齐
         var results = NewCard();
+        results.Padding = new Padding(16, 8, 16, 8);   // 与左侧测试设置卡片一致，底部按钮才对齐
         results.Controls.Add(_resultsPanel);
         results.Controls.Add(BuildMeasureRow((TestRowWidth - 10) / 2, 10));
 
@@ -407,8 +408,10 @@ internal sealed partial class MainForm : Form
 
     private Control BuildConfigCard()
     {
+        // 上下内边距比普通卡片小，紧凑排版下各段在 340px 高内放得下
         var card = NewCard();
         card.Margin = new Padding(0);
+        card.Padding = new Padding(16, 8, 16, 8);
 
         // 单列纵向排布，各段统一 TestRowWidth；高 DPI 下放不下时出滚动条，不裁掉开始/停止按钮。
         var body = new FlowLayoutPanel
@@ -418,11 +421,11 @@ internal sealed partial class MainForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             AutoScroll = true,
-            Padding = new Padding(0, 2, 0, 0),
+            Padding = new Padding(0),
         };
 
-        // 单项测试：标题 + 其下方的下拉框
-        var modeTitle = new Label { Text = "单项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        // 单项测试：标题与每轮(秒) / 轮数同一行，下拉框在其下方
+        var modeTitle = new Label { Text = "单项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 6, 12, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
 
         _modeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         _modeCombo.FlatStyle = FlatStyle.Flat;
@@ -430,7 +433,7 @@ internal sealed partial class MainForm : Form
         _modeCombo.BackColor = Theme.SurfaceAlt;
         _modeCombo.ForeColor = Theme.TextHi;
         _modeCombo.Font = new Font(Theme.FontFamily, 10F);
-        _modeCombo.Margin = new Padding(0, 0, 0, 12);
+        _modeCombo.Margin = new Padding(0, 0, 0, 2);
         foreach (var opt in ModeOptions) _modeCombo.Items.Add(opt.display);
         _modeCombo.SelectedIndexChanged += (_, _) =>
         {
@@ -438,14 +441,15 @@ internal sealed partial class MainForm : Form
             _selectedMode = ModeOptions[_modeCombo.SelectedIndex].mode; // 选单项即清除组合测试高亮
             RestyleModeButtons();
         };
-        var fields = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
-        AddFieldPair(fields, "每轮(秒)", _durationBox, 66);
-        AddFieldPair(fields, "轮数", _roundsBox, 60);
+        var head = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
+        head.Controls.Add(modeTitle);
+        AddFieldPair(head, "每轮(秒)", _durationBox, 66);
+        AddFieldPair(head, "轮数", _roundsBox, 60);
         _durationBox.Text = _durationSeconds.ToString();
         _roundsBox.Text = _singleRounds.ToString();
 
         // 多项测试（顺序 / 组合）：两键横排，测试项与轮数放在悬停提示里
-        var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int modeGap = 10;
         int modeBtnWidth = (TestRowWidth - modeGap) / 2;
         _seqBtn = MakeModeButton("顺序测试", "SEQ", modeBtnWidth,
@@ -454,12 +458,12 @@ internal sealed partial class MainForm : Form
             $"VT3 + BKT + SVT 三项同时跑，共 {ComboRounds} 轮\n同时施加多种负载，比单项更容易暴露不稳定");
         _seqBtn.Margin = new Padding(0, 0, modeGap, 0);
         _comboBtn.Margin = new Padding(0);
-        var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 2) };
+        var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0) };
         modeRow.Controls.Add(_seqBtn);
         modeRow.Controls.Add(_comboBtn);
 
         // 负压调整方式：自动回退 / 手动（只提醒），两键横排等分一行
-        var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int adjGap = 10;
         int adjBtnWidth = (TestRowWidth - adjGap) / 2;
         _autoAdjBtn   = MakeAdjustButton("自动模式", true,
@@ -475,26 +479,26 @@ internal sealed partial class MainForm : Form
         adjRow.Controls.Add(_manualAdjBtn);
 
         // 测试范围：第一行「全部核心 | 自定义」所有机型都有；第二行「各 CCD | 逐 CCD」只有多 CCD 机型才出。
-        var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 8, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         var scopeRow1 = BuildScopeRow(new (string, string, string)[]
         {
             ("全部核心", "ALL", "所有核心一起压测，与旧版本行为一致"),
             ("自定义…", "CUSTOM", "自行勾选参与压测的物理核心"),
         });
         var scopeRow2 = BuildCcdScopeRow();
-        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 6);   // 与 CCD 行拉开间距
+        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 4);   // 与 CCD 行拉开间距
 
-        // 开始 / 停止：停靠卡片底部，两键等分 TestRowWidth（含中间 10px 间隔）
+        // 开始 / 停止：停靠卡片底部，两键等分 TestRowWidth（含中间 10px 间隔），上内边距与范围按钮隔开
         const int runGap = 10;
         int runBtnWidth = (TestRowWidth - runGap) / 2;
-        var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Margin = new Padding(0, 0, 0, 6) };
+        var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 6, 0, 0) };
         // 空心描边，与实心红的已选模式/范围按钮区分
         _startBtn.Normal = Theme.SurfaceAlt;
         _startBtn.Hover = Theme.Border;
         _startBtn.Outline = Theme.Accent;
         _startBtn.ForeColor = Color.FromArgb(0xF2, 0x73, 0x6C);
-        _startBtn.Size = new Size(runBtnWidth, 38);
-        _stopBtn.Size = new Size(runBtnWidth, 38);
+        _startBtn.Size = new Size(runBtnWidth, 32);
+        _stopBtn.Size = new Size(runBtnWidth, 32);
         _startBtn.Margin = new Padding(0, 0, runGap, 0);
         _stopBtn.Margin = new Padding(0);
         _stopBtn.Enabled = false;
@@ -503,9 +507,8 @@ internal sealed partial class MainForm : Form
         runRow.Controls.Add(_startBtn);
         runRow.Controls.Add(_stopBtn);
 
-        body.Controls.Add(modeTitle);
+        body.Controls.Add(head);
         body.Controls.Add(_modeCombo);
-        body.Controls.Add(fields);
         body.Controls.Add(comboTitle);
         body.Controls.Add(modeRow);
         body.Controls.Add(adjTitle);
@@ -1856,7 +1859,7 @@ internal sealed partial class MainForm : Form
             AutoSize = true,
             BackColor = Theme.Surface,
             WrapContents = false,
-            Margin = new Padding(0, 0, 10, 6),
+            Margin = new Padding(0, 0, 10, 0),
         };
         pair.Controls.Add(new Label
         {
@@ -1864,13 +1867,13 @@ internal sealed partial class MainForm : Form
             AutoSize = true,
             ForeColor = Theme.TextLo,
             BackColor = Theme.Surface,
-            Margin = new Padding(0, 8, 4, 0),
+            Margin = new Padding(0, 6, 4, 0),
         });
 
         box.BorderStyle = BorderStyle.None;
         box.BackColor = Theme.SurfaceAlt;
         box.ForeColor = Theme.TextHi;
-        box.Font = new Font(Theme.FontFamily, 10.5F);
+        box.Font = new Font(Theme.FontFamily, 10F);
         box.TextAlign = HorizontalAlignment.Center;
         box.Dock = DockStyle.Fill;
 
@@ -1880,10 +1883,10 @@ internal sealed partial class MainForm : Form
             Stroke = Theme.Border,
             Radius = 7,
             Width = width,
-            Height = 32,
+            Height = 28,
             BackColor = Theme.Surface,
-            Padding = new Padding(8, 5, 8, 5),
-            Margin = new Padding(0, 2, 0, 0),
+            Padding = new Padding(8, 3, 8, 2),
+            Margin = new Padding(0),
         };
         field.Controls.Add(box);
         pair.Controls.Add(field);
@@ -2351,10 +2354,10 @@ internal sealed partial class MainForm : Form
     private FlowLayoutPanel BuildMeasureRow(int btnWidth, int gap)
     {
         // 上内边距把按钮和结果摘要隔开；按钮与开始 / 停止同高
-        var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 8, 0, 0) };
+        var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 6, 0, 0) };
         _scbBtn = Ghost("Single Core Boost");
         _alignBtn = Ghost("电压对齐");
-        _scbBtn.Size = _alignBtn.Size = new Size(btnWidth, 38);
+        _scbBtn.Size = _alignBtn.Size = new Size(btnWidth, 32);
         _scbBtn.Margin = new Padding(0, 0, gap, 0);
         _alignBtn.Margin = new Padding(0);
         _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压\n只是测量，不是压力测试，不修改任何参数");
