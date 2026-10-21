@@ -85,13 +85,13 @@ internal static class VoltageAlign
         };
         body.Controls.Add(new Label { Text = text.ToString(), AutoSize = true, MaximumSize = new Size(560, 0), Margin = new Padding(0, 0, 0, 12) });
         body.Controls.Add(new Label { Text = "对齐目标（每个 CCD 各自选取）", AutoSize = true, ForeColor = Theme.TextLo });
-        var gold = new RadioButton { Text = "金核：CCD 内 CPPC 排名第 1", AutoSize = true, Checked = true };
-        var silver = new RadioButton { Text = "银核：CCD 内 CPPC 排名第 2", AutoSize = true };
+        var gold = new RadioButton { Text = "金核：CCD 内 CPPC 排名第 2", AutoSize = true, Checked = true };
+        var silver = new RadioButton { Text = "银核：CCD 内 CPPC 排名第 1", AutoSize = true };
         body.Controls.Add(gold);
         body.Controls.Add(silver);
         body.Controls.Add(new Label
         {
-            Text = "CPPC 不可用时（如 5000 系未开 CPPC），改用全 0 下 VID 最低 / 次低的核。",
+            Text = "CPPC 值相同时按核号排序，靠前的为银核；CPPC 不可用时（如 5000 系未开 CPPC），改用全 0 下 VID 最低（银核）/ 次低（金核）的核。",
             AutoSize = true,
             ForeColor = Theme.TextLo,
             MaximumSize = new Size(560, 0),
@@ -256,7 +256,7 @@ internal static class VoltageAlign
     /// <summary>Target by CPPC rank inside the CCD; without CPPC, the lowest / second-lowest VID measured at all-0.</summary>
     private static int PickTarget(SingleCoreBoost scb, List<int> cores, Dictionary<int, ScbRow> baseline, AlignTarget target, out string how)
     {
-        int want = target == AlignTarget.Gold ? 1 : 2;
+        int want = target == AlignTarget.Gold ? 2 : 1;   // 银核 = rank 1, 金核 = rank 2, as in the monitor
         int byRank = cores.FirstOrDefault(s => scb.CcdRank(s) == want, -1);
         if (byRank >= 0)
         {
