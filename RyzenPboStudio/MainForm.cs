@@ -104,7 +104,7 @@ internal sealed partial class MainForm : Form
         _autostartLaunch = autostartLaunch;
         Text = "AMD Ryzen PBO Studio";
         // 宽度容纳 CO | CS | PBO 参数三张卡片，双 CCD 监控表随之收紧；屏幕放不下时由 FitToScreen 等比缩小
-        ClientSize = new Size(1080, 950);
+        ClientSize = new Size(1180, 910);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.Bg;
@@ -198,9 +198,10 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Padding = new Padding(18),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 378));  // 顶部：常驻监控（身份条 + CCD0/CCD1 + 限制条）
+        // 364 时 CCD 表每行约 26px（RowH 下限），再矮就会裁掉 VID 行
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 364));  // 顶部：常驻监控（身份条 + CCD0/CCD1 + 限制条）
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 中部：AMD PBO / TESTING / LOGGING 内容
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));   // 底部：AMD PBO / TESTING / LOGGING 沉浸式导航
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));   // 底部：AMD PBO / TESTING / LOGGING 沉浸式导航（按钮 42 + 上边距 6）
 
         var monitorCard = BuildMonitorCard();
         monitorCard.Margin = new Padding(0, 0, 0, 10);
@@ -248,8 +249,8 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0, 0, 0, 8),
         };
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 368));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 456));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 396));
         cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var coCard = BuildCoCard(); coCard.Margin = new Padding(0, 0, 6, 0);
         var csCard = BuildCsCard(); csCard.Margin = new Padding(6, 0, 6, 0);
@@ -278,8 +279,10 @@ internal sealed partial class MainForm : Form
     private Control BuildTestingPanel()
     {
         var cfg = BuildConfigCard();
+        // 结果卡片底部放 Single Core Boost / 电压对齐，与左侧开始 / 停止底边对齐
         var results = NewCard();
         results.Controls.Add(_resultsPanel);
+        results.Controls.Add(BuildMeasureRow((TestRowWidth - 10) / 2, 10));
 
         // 左栏固定宽度，窗口变窄时不裁掉开始/停止按钮。
         // +60 = 卡片内边距 32 + 栏间距 6 + 纵向滚动条余量 22。
@@ -499,7 +502,6 @@ internal sealed partial class MainForm : Form
         _stopBtn.Click += StopTest;
         runRow.Controls.Add(_startBtn);
         runRow.Controls.Add(_stopBtn);
-        var measureRow = BuildMeasureRow(runBtnWidth, runGap);
 
         body.Controls.Add(modeTitle);
         body.Controls.Add(_modeCombo);
@@ -518,7 +520,6 @@ internal sealed partial class MainForm : Form
 
         // 添加顺序决定停靠优先级：标题占顶、按钮占底、body 填中间
         card.Controls.Add(body);
-        card.Controls.Add(measureRow);   // docks above runRow
         card.Controls.Add(runRow);
         card.Controls.Add(SectionTitle("测试设置"));
         return card;
@@ -2349,12 +2350,13 @@ internal sealed partial class MainForm : Form
 
     private FlowLayoutPanel BuildMeasureRow(int btnWidth, int gap)
     {
-        var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Margin = new Padding(0) };
+        // 上内边距把按钮和结果摘要隔开；按钮与开始 / 停止同高
+        var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 8, 0, 0) };
         _scbBtn = Ghost("Single Core Boost");
         _alignBtn = Ghost("电压对齐");
-        _scbBtn.Size = _alignBtn.Size = new Size(btnWidth, 34);
-        _scbBtn.Margin = new Padding(0, 0, gap, 8);
-        _alignBtn.Margin = new Padding(0, 0, 0, 8);
+        _scbBtn.Size = _alignBtn.Size = new Size(btnWidth, 38);
+        _scbBtn.Margin = new Padding(0, 0, gap, 0);
+        _alignBtn.Margin = new Padding(0);
         _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压\n只是测量，不是压力测试，不修改任何参数");
         _tips.SetToolTip(_alignBtn, "CO 全部置 0 后逐核测量单核电压，各 CCD 以金核或银核为基准\n给电压偏高的核心自动加负压，使单核电压对齐");
         _scbBtn.Click += (_, _) => StartMeasure("Single Core Boost", (win, ct) => SingleCoreBoost.Run(_monitorView, win, ct));

@@ -33,7 +33,7 @@ internal sealed class ResultsPanel : Panel
             Padding = new Padding(2, 4, 0, 0),
             ForeColor = Theme.TextLo,
             BackColor = Theme.Surface,
-            Text = "点击左侧「Single Core Boost」或「电压对齐」后，这里显示每核结果",
+            Text = "点击下方「Single Core Boost」或「电压对齐」后，这里显示每核结果",
         };
 
         grid = new DataGridView
