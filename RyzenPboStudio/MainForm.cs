@@ -47,9 +47,10 @@ internal sealed partial class MainForm : Form
     private readonly NumericUpDown _pptBox = new();
     private readonly NumericUpDown _edcBox = new();
     private readonly NumericUpDown _tdcBox = new();
-    private readonly ComboBox _scalarBox = new();
+    private readonly DomainUpDown _scalarBox = new();
     private bool _scalarWritable = true;
     private bool _scalarDirty;   // 用户改过 Scalar 选项；没改过时 Apply 不写它，避免 5000 系顺带打开 PBO
+    private bool _scalarLoading; // 程序回填 Scalar 时不算用户改动
 
     // ── 手动 Curve Shaper 编辑器（5 频率档 × 3 温度档）──────────────────────
     private readonly NumericUpDown[,] _csCells = new NumericUpDown[5, 3];
@@ -232,6 +233,8 @@ internal sealed partial class MainForm : Form
     }
 
     /// <summary>AMD PBO 页：CO | CS | PBO 参数三张卡片并排，下方开源声明。</summary>
+    private const int FooterH = 22;   // AMD PBO 页底部开源声明行高
+
     private Control BuildPboPanel()
     {
         // 左栏 = CO | CS（上）+ PBO 参数条 + 开源声明 / 开机自动应用；右栏 = LOG 拉满高度
@@ -243,7 +246,7 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0),
         };
-        page.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 782));   // CO 414 + CS 362 + 栏间距 6
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 800));   // 参数条带单位后需约 770px，CS 吃掉 CO 以外的宽度
         page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         var left = new TableLayoutPanel
@@ -256,7 +259,7 @@ internal sealed partial class MainForm : Form
         };
         left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // CO | CS
         left.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));      // PBO 参数条
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));      // 开源声明 + 开机自动应用
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, FooterH)); // 开源声明
 
         // CO、CS 按各自网格 + 按钮列的自然宽度定宽，不留空白；上下内边距收小，卡片底边贴近 Core 7 下方的「-」
         var coCs = new TableLayoutPanel
@@ -284,20 +287,13 @@ internal sealed partial class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(2, 0, 0, 0),
         };
-        var bootApply = BuildBootApplyCheck();
-        bootApply.Dock = DockStyle.Right;
-        bootApply.BackColor = Theme.Bg;
-        bootApply.Margin = new Padding(0);
-        var footer = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Margin = new Padding(0) };
-        footer.Controls.Add(credit);      // 先加 Fill 再加 Right，勾选框才占住右端
-        footer.Controls.Add(bootApply);
-
         left.Controls.Add(coCs, 0, 0);
         left.Controls.Add(BuildParamBar(), 0, 1);
-        left.Controls.Add(footer, 0, 2);
+        left.Controls.Add(credit, 0, 2);
 
+        // 下边距等于开源声明行高，LOG 底边与参数条底边齐平
         var logCard = BuildLogCard(_logBoxPbo);
-        logCard.Margin = new Padding(6, 0, 0, 0);
+        logCard.Margin = new Padding(6, 0, 0, FooterH);
 
         page.Controls.Add(left, 0, 0);
         page.Controls.Add(logCard, 1, 0);
@@ -1398,6 +1394,10 @@ internal sealed partial class MainForm : Form
         flow.Controls.Add(Btn("Refresh", OnCoRefresh));
         flow.Controls.Add(Btn("Save", OnCoSave));
         flow.Controls.Add(Btn("Load", OnCoLoad));
+        var boot = BuildBootApplyButton();
+        boot.Size = new Size(96, 32);
+        boot.Margin = new Padding(0, 16, 0, 0);   // 与 Apply~Load 拉开，表明是独立开关
+        flow.Controls.Add(boot);
         return flow;
     }
 
@@ -1409,26 +1409,22 @@ internal sealed partial class MainForm : Form
         card.Margin = new Padding(0);
         card.Padding = new Padding(14, 6, 14, 6);
 
-        ConfigNumBox(_fmaxBox, 0, 7000, 25, 80);
-        ConfigNumBox(_pptBox, 30, 400, 5, 64);
-        ConfigNumBox(_edcBox, 10, 400, 5, 64);
-        ConfigNumBox(_tdcBox, 10, 300, 5, 64);
+        ConfigNumBox(_fmaxBox, 0, 7000, 25, 74);
+        ConfigNumBox(_pptBox, 30, 400, 5, 62);
+        ConfigNumBox(_edcBox, 10, 400, 5, 62);
+        ConfigNumBox(_tdcBox, 10, 300, 5, 62);
         _pptBox.Value = 142;   // 启动后由 InitPboBoxes 用 CPU 实际值覆盖
         _edcBox.Value = 180;
         _tdcBox.Value = 160;
 
-        // PBO Scalar：索引 i 对应 (i+1)X，Auto 即 1X
-        _scalarBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _scalarBox.FlatStyle = FlatStyle.Flat;
-        _scalarBox.Width = 76;
-        _scalarBox.BackColor = Theme.SurfaceAlt;
-        _scalarBox.ForeColor = Theme.TextHi;
-        _scalarBox.Font = new Font(Theme.FontFamily, 9.5F);
-        _scalarBox.Margin = new Padding(0, 7, 14, 0);
-        _scalarBox.Items.Add("Auto");
-        for (int x = 2; x <= 10; x++) _scalarBox.Items.Add($"{x}X");
-        _scalarBox.SelectedIndex = 0;
-        _scalarBox.SelectionChangeCommitted += (_, _) => _scalarDirty = true;   // 只响应用户操作，程序回填不算
+        // PBO Scalar：与数字框同款上下箭头框。列表倒序排，箭头向上即倍数变大；Auto 即 1X
+        StyleUpDown(_scalarBox, 84);
+        _scalarBox.ReadOnly = true;
+        _scalarBox.Wrap = false;
+        for (int x = 10; x >= 2; x--) _scalarBox.Items.Add($"{x}X");
+        _scalarBox.Items.Add("Auto(1X)");
+        SelectScalar(1);
+        _scalarBox.SelectedItemChanged += (_, _) => { if (!_scalarLoading) _scalarDirty = true; };
         _tips.SetToolTip(_scalarBox,
             "PBO Scalar：Auto 即 1X。倍数越大，SMU 在 boost 时给的电压越高。\n" +
             "只在选项改动后点 Apply 才写入；5000 系写入时会同时打开 PBO。");
@@ -1441,15 +1437,15 @@ internal sealed partial class MainForm : Form
             FlowDirection = FlowDirection.LeftToRight,
             Margin = new Padding(0),
         };
-        AddParamPair(flow, "FMax", _fmaxBox);
-        AddParamPair(flow, "PPT", _pptBox);
-        AddParamPair(flow, "EDC", _edcBox);
-        AddParamPair(flow, "TDC", _tdcBox);
+        AddParamPair(flow, "FMax (MHz)", _fmaxBox);
+        AddParamPair(flow, "PPT (W)", _pptBox);
+        AddParamPair(flow, "EDC (A)", _edcBox);
+        AddParamPair(flow, "TDC (A)", _tdcBox);
         AddParamPair(flow, "Scalar", _scalarBox);
 
         var apply = Primary("Apply");
-        apply.Size = new Size(88, 30);
-        apply.Margin = new Padding(2, 4, 0, 0);
+        apply.Size = new Size(84, 30);
+        apply.Margin = new Padding(0, 4, 0, 0);
         apply.Click += (_, _) => OnPboApply();
         flow.Controls.Add(apply);
 
@@ -1462,14 +1458,30 @@ internal sealed partial class MainForm : Form
         box.Minimum = min;
         box.Maximum = max;
         box.Increment = inc;
+        StyleUpDown(box, width);
+    }
+
+    /// <summary>参数条里数字框与 Scalar 框共用的外观，保证同高同基线。</summary>
+    private static void StyleUpDown(UpDownBase box, int width)
+    {
         box.Width = width;
         box.BackColor = Theme.SurfaceAlt;
         box.ForeColor = Theme.TextHi;
         box.BorderStyle = BorderStyle.FixedSingle;
         box.TextAlign = HorizontalAlignment.Center;
         box.Font = new Font(Theme.MonoFamily, 10F);
-        box.Margin = new Padding(0, 7, 14, 0);
+        box.Margin = new Padding(0, 7, 10, 0);
     }
+
+    /// <summary>按倍数（1~10）选中 Scalar 项；列表倒序，10X 在索引 0、Auto(1X) 在末尾。</summary>
+    private void SelectScalar(int scalar)
+    {
+        _scalarLoading = true;
+        _scalarBox.SelectedIndex = 10 - Math.Clamp(scalar, 1, 10);
+        _scalarLoading = false;
+    }
+
+    private uint SelectedScalar() => (uint)(10 - _scalarBox.SelectedIndex);
 
     private static void AddParamPair(FlowLayoutPanel parent, string label, Control box)
     {
@@ -1705,7 +1717,7 @@ internal sealed partial class MainForm : Form
         bool okP = RyzenSmu.SetPptLimit(ppt);
         bool okE = RyzenSmu.SetEdcLimit(edc);
         bool okT = RyzenSmu.SetTdcLimit(tdc);
-        uint scalar = (uint)_scalarBox.SelectedIndex + 1;   // Auto = 1X
+        uint scalar = SelectedScalar();   // Auto = 1X
         bool writeScalar = _scalarWritable && _scalarDirty;
         bool okS = !writeScalar || RyzenSmu.SetPboScalar(scalar);
         if (writeScalar && okS) _scalarDirty = false;
@@ -1841,7 +1853,7 @@ internal sealed partial class MainForm : Form
 
         // Scalar 读数 0 是 OC 模式或读不到，按 Auto 显示；1~10 取整后回填
         float s = RyzenSmu.ReadPboScalar();
-        _scalarBox.SelectedIndex = s >= 1 ? Math.Clamp((int)Math.Round(s), 1, 10) - 1 : 0;
+        SelectScalar(s >= 1 ? (int)Math.Round(s) : 1);
         _scalarWritable = RyzenSmu.IsPboScalarWriteSupported();
         if (!_scalarWritable)
         {

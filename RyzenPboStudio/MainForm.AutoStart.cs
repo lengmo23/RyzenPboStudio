@@ -4,48 +4,46 @@ namespace RyzenPboStudio;
 internal sealed partial class MainForm
 {
     private readonly bool _autostartLaunch;   // launched by the scheduled task with --autostart
-    private CheckBox _bootApplyCheck = null!;
-    private bool _bootApplyReverting;
+    private PillButton _bootApplyBtn = null!;
+    private bool _bootApplyOn;
 
-    /// <summary>Boot-apply checkbox at the right end of the param bar.</summary>
-    private Control BuildBootApplyCheck()
+    /// <summary>Boot-apply toggle under the CO buttons: grey when off, accent red when on, like the mode buttons.</summary>
+    private PillButton BuildBootApplyButton()
     {
-        _bootApplyCheck = new CheckBox
-        {
-            Text = "开机自动应用 CO/CS",
-            AutoSize = true,
-            Checked = AutoStart.BootApplyEnabled,
-            ForeColor = Theme.TextHi,
-            BackColor = Theme.Surface,
-            Cursor = Cursors.Hand,
-            Margin = new Padding(20, 14, 0, 0),
-        };
-        _tips.SetToolTip(_bootApplyCheck,
-            "勾选后每次登录 Windows，本程序会自动以管理员身份启动，\n" +
+        _bootApplyBtn = Ghost("开机自动应用");
+        _bootApplyOn = AutoStart.BootApplyEnabled;
+        RestyleBootApplyButton();
+        _tips.SetToolTip(_bootApplyBtn,
+            "开启后每次登录 Windows，本程序会自动以管理员身份启动，\n" +
             "并写入已保存的 CO（Curve Optimizer 的 Save）与 CS（Curve Shaper 的 Save / 最后一次 Apply）。\n" +
-            "只写每核负压与 Curve Shaper，不改 FMax / PPT / EDC / TDC。取消勾选即不再生效。\n" +
+            "只写每核负压与 Curve Shaper，不改 FMax / PPT / EDC / TDC / Scalar。再点一次即关闭。\n" +
             "测试中途死机重启后也会借此自动启动并恢复测试；完全无人值守需在 Windows 中开启自动登录。");
-        _bootApplyCheck.CheckedChanged += (_, _) => OnBootApplyToggled();
-        return _bootApplyCheck;
+        _bootApplyBtn.Click += (_, _) => OnBootApplyToggled(!_bootApplyOn);
+        return _bootApplyBtn;
     }
 
-    private void OnBootApplyToggled()
+    private void RestyleBootApplyButton()
     {
-        if (_bootApplyReverting) return;
-        bool on = _bootApplyCheck.Checked;
+        _bootApplyBtn.Normal = _bootApplyOn ? Theme.Accent : Theme.SurfaceAlt;
+        _bootApplyBtn.Hover = _bootApplyOn ? Theme.AccentHover : Theme.Border;
+        _bootApplyBtn.ForeColor = _bootApplyOn ? Theme.AccentText : Theme.TextHi;
+        _bootApplyBtn.Invalidate();
+    }
+
+    private void OnBootApplyToggled(bool on)
+    {
         if (on)
         {
             var profile = CoProfile.Load();
             int slots = RyzenSmu.SlotCount;
             string? problem = profile.Offsets.Count == 0
-                ? "还没有已保存的 CO 配置。\n\n请先在 Curve Optimizer 中调好负压并点「Save」保存，再勾选此项。"
+                ? "还没有已保存的 CO 配置。\n\n请先在 Curve Optimizer 中调好负压并点「Save」保存，再开启此项。"
                 : profile.Offsets.Count != slots
-                    ? $"已保存的 CO 配置有 {profile.Offsets.Count} 个核心，与当前 CPU 的 {slots} 个不符。\n\n请在 Curve Optimizer 中重新点「Save」保存后再勾选此项。"
+                    ? $"已保存的 CO 配置有 {profile.Offsets.Count} 个核心，与当前 CPU 的 {slots} 个不符。\n\n请在 Curve Optimizer 中重新点「Save」保存后再开启此项。"
                     : null;
             if (problem != null)
             {
-                MessageBox.Show(this, problem, "开机自动应用 CO/CS", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                RevertBootApplyCheck(false);
+                ThemedDialog.Show(this, problem, "开机自动应用 CO/CS");
                 return;
             }
         }
@@ -53,21 +51,15 @@ internal sealed partial class MainForm
         if (!AutoStart.SetBootApply(on))
         {
             SetStatus("保存开机自动应用设置失败", Theme.Accent);
-            RevertBootApplyCheck(!on);
             return;
         }
+        _bootApplyOn = on;
+        RestyleBootApplyButton();
         Log.Write(on
             ? "已开启开机自动应用 CO/CS：每次登录 Windows 后自动启动并写入已保存的 CO/CS"
             : "已关闭开机自动应用 CO/CS");
         SetStatus(on ? "已开启开机自动应用 CO/CS" : "已关闭开机自动应用 CO/CS", Theme.Success);
         SyncAutoStartInBackground();
-    }
-
-    private void RevertBootApplyCheck(bool value)
-    {
-        _bootApplyReverting = true;
-        _bootApplyCheck.Checked = value;
-        _bootApplyReverting = false;
     }
 
     /// <summary>Runs once the form is shown and editors are initialised: handles --autostart and syncs the task.</summary>
@@ -95,11 +87,11 @@ internal sealed partial class MainForm
             AutoStart.ClearBootApplyPending();
             Log.Write("上次开机自动应用 CO/CS 后不久系统异常重启，本次未应用已保存的 CO/CS", "WARN");
             SetStatus("已跳过开机自动应用（上次应用后系统异常重启）", Theme.Accent);
-            MessageBox.Show(this,
+            ThemedDialog.Show(this,
                 "上次开机自动应用 CO/CS 后不久系统异常重启，为避免反复死机，本次没有应用已保存的 CO/CS。\n\n" +
-                "「开机自动应用 CO/CS」仍保持勾选，下次开机会照常应用。\n" +
-                "如果这组设置不稳定，请调整后重新保存，或取消勾选。",
-                "未自动应用 CO/CS", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "「开机自动应用」仍保持开启，下次开机会照常应用。\n" +
+                "如果这组设置不稳定，请调整后重新保存，或关闭「开机自动应用」。",
+                "未自动应用 CO/CS", warning: true);
             return;
         }
 
@@ -163,11 +155,11 @@ internal sealed partial class MainForm
             AutoStart.DeclineResume();
             Log.Write($"测试已连续 {resume.Count} 次在自动恢复后死机/重启，停止自动恢复，需手动处理", "WARN");
             SetStatus($"已连续 {resume.Count} 次自动恢复后死机，停止自动恢复，需手动处理", Theme.Accent);
-            MessageBox.Show(this,
+            ThemedDialog.Show(this,
                 $"测试已连续 {resume.Count} 次在自动恢复后死机/重启，已停止自动恢复。\n\n" +
                 "请检查负压设置与硬件状态后手动处理。\n" +
                 "确认后点「开始测试」仍会按中断恢复。",
-                "已停止自动恢复", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "已停止自动恢复", warning: true);
             return;
         }
 
