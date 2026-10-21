@@ -103,8 +103,8 @@ internal sealed partial class MainForm : Form
     {
         _autostartLaunch = autostartLaunch;
         Text = "AMD Ryzen PBO Studio";
-        // 宽度容纳双 CCD 并排；屏幕放不下时由 FitToScreen 等比缩小
-        ClientSize = new Size(1370, 950);
+        // 宽度容纳 CO | CS | PBO 参数三张卡片，双 CCD 监控表随之收紧；屏幕放不下时由 FitToScreen 等比缩小
+        ClientSize = new Size(1080, 950);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.Bg;
@@ -225,36 +225,38 @@ internal sealed partial class MainForm : Form
         ShowPage(Page.Pbo);   // 默认进 AMD PBO 页
     }
 
-    /// <summary>AMD PBO 页：左列 = CO | CS（上）+ 参数条（下），右列留空。</summary>
+    /// <summary>AMD PBO 页：CO | CS | PBO 参数三张卡片并排，下方开源声明。</summary>
     private Control BuildPboPanel()
     {
-        // 左列：CO | CS 在上，参数条在下
-        var left = new TableLayoutPanel
+        var page = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             BackColor = Theme.Bg,
             Margin = new Padding(0),
         };
-        left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // CO | CS
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));      // 开源声明
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));      // 参数条
+        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // CO | CS | PBO 参数
+        page.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));      // 开源声明
 
-        var coCs = new TableLayoutPanel
+        // CO、CS 按各自网格 + 按钮列的自然宽度定宽（含 6px 栏间距），PBO 参数吃掉剩余宽度
+        var cards = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             BackColor = Theme.Bg,
             Margin = new Padding(0, 0, 0, 8),
         };
-        coCs.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 54));
-        coCs.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 368));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var coCard = BuildCoCard(); coCard.Margin = new Padding(0, 0, 6, 0);
-        var csCard = BuildCsCard(); csCard.Margin = new Padding(6, 0, 0, 0);
-        coCs.Controls.Add(coCard, 0, 0);
-        coCs.Controls.Add(csCard, 1, 0);
+        var csCard = BuildCsCard(); csCard.Margin = new Padding(6, 0, 6, 0);
+        var paramCard = BuildParamCard(); paramCard.Margin = new Padding(6, 0, 0, 0);
+        cards.Controls.Add(coCard, 0, 0);
+        cards.Controls.Add(csCard, 1, 0);
+        cards.Controls.Add(paramCard, 2, 0);
 
         var credit = new Label
         {
@@ -267,19 +269,17 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(2, 0, 0, 2),
         };
 
-        left.Controls.Add(coCs, 0, 0);
-        left.Controls.Add(credit, 0, 1);
-        left.Controls.Add(BuildParamBar(), 0, 2);
-
-        // 右列：日志已移到 LOGGING 页，留空待用
-        return TwoColRow(60, left, new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg });
+        page.Controls.Add(cards, 0, 0);
+        page.Controls.Add(credit, 0, 1);
+        return page;
     }
 
-    /// <summary>TESTING 页：测试设置 | 右侧留空，底部状态条（右端显示版本）。</summary>
+    /// <summary>TESTING 页：测试设置 | Single Core Boost / 电压对齐结果，底部状态条（右端显示版本）。</summary>
     private Control BuildTestingPanel()
     {
         var cfg = BuildConfigCard();
-        var spare = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };   // 日志已移到 LOGGING 页
+        var results = NewCard();
+        results.Controls.Add(_resultsPanel);
 
         // 左栏固定宽度，窗口变窄时不裁掉开始/停止按钮。
         // +60 = 卡片内边距 32 + 栏间距 6 + 纵向滚动条余量 22。
@@ -292,11 +292,11 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(0),
         };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TestRowWidth + 60));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 留空区吃掉剩余宽度
+        top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 结果表吃掉剩余宽度
         cfg.Margin = new Padding(0, 0, 6, 0);
-        spare.Margin = new Padding(6, 0, 0, 0);
+        results.Margin = new Padding(6, 0, 0, 0);
         top.Controls.Add(cfg, 0, 0);
-        top.Controls.Add(spare, 1, 0);
+        top.Controls.Add(results, 1, 0);
 
         _statusLabel.AutoSize = false;
         _statusLabel.Dock = DockStyle.Fill;
@@ -374,26 +374,6 @@ internal sealed partial class MainForm : Form
         if (b == null) return;
         b.Active = active;
         b.Invalidate();
-    }
-
-    /// <summary>两栏行：左列占 leftPercent%，上下两行用同一比例保证竖向对齐。</summary>
-    private static TableLayoutPanel TwoColRow(int leftPercent, Control left, Control right)
-    {
-        var split = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            BackColor = Theme.Bg,
-            Margin = new Padding(0),
-        };
-        split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, leftPercent));
-        split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100 - leftPercent));
-        left.Margin = new Padding(0, 0, 6, 0);
-        right.Margin = new Padding(6, 0, 0, 0);
-        split.Controls.Add(left, 0, 0);
-        split.Controls.Add(right, 1, 0);
-        return split;
     }
 
     /// <summary>顶部常驻监控卡片：嵌入 MonitorView（每核 CPPC/AMD CO/EFFREQ/FREQ/VID）。</summary>
@@ -1387,43 +1367,51 @@ internal sealed partial class MainForm : Form
         return flow;
     }
 
-    /// <summary>底部参数条：FMax / PPT / EDC / TDC + 一键 Apply（写 SMU 限制）。</summary>
-    private Control BuildParamBar()
+    /// <summary>PBO 参数卡片（CS 右侧）：FMax / PPT / EDC / TDC 竖排 + 一键 Apply（写 SMU 限制），底部为开机自动应用 CO/CS。</summary>
+    private Control BuildParamCard()
     {
         var card = NewCard();
         card.Margin = new Padding(0);
-        card.Padding = new Padding(14, 6, 14, 6);
 
         ConfigNumBox(_fmaxBox, 0, 7000, 25, 92);
-        ConfigNumBox(_pptBox, 30, 400, 5, 72);
-        ConfigNumBox(_edcBox, 10, 400, 5, 72);
-        ConfigNumBox(_tdcBox, 10, 300, 5, 72);
+        ConfigNumBox(_pptBox, 30, 400, 5, 92);
+        ConfigNumBox(_edcBox, 10, 400, 5, 92);
+        ConfigNumBox(_tdcBox, 10, 300, 5, 92);
         _pptBox.Value = 142;   // 启动后由 InitPboBoxes 用 CPU 实际值覆盖
         _edcBox.Value = 180;
         _tdcBox.Value = 160;
 
-        var flow = new FlowLayoutPanel
+        // 左列标签吃掉剩余宽度，右列数字框与 Apply 同宽右对齐
+        var table = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             BackColor = Theme.Surface,
-            WrapContents = false,
-            FlowDirection = FlowDirection.LeftToRight,
-            Margin = new Padding(0),
+            ColumnCount = 2,
+            Padding = new Padding(0, 4, 0, 0),
         };
-        AddParamPair(flow, "FMax", _fmaxBox);
-        AddParamPair(flow, "PPT", _pptBox);
-        AddParamPair(flow, "EDC", _edcBox);
-        AddParamPair(flow, "TDC", _tdcBox);
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        AddParamRow(table, "FMax (MHz)", _fmaxBox);
+        AddParamRow(table, "PPT (W)", _pptBox);
+        AddParamRow(table, "EDC (A)", _edcBox);
+        AddParamRow(table, "TDC (A)", _tdcBox);
 
         var apply = Primary("Apply");
-        apply.Size = new Size(96, 34);
-        apply.Margin = new Padding(16, 7, 0, 0);
+        apply.Size = new Size(92, 32);
+        apply.Margin = new Padding(0, 10, 0, 0);
         apply.Click += (_, _) => OnPboApply();
-        flow.Controls.Add(apply);
-        flow.Controls.Add(BuildBootApplyCheck());
+        table.Controls.Add(apply, 1, table.RowCount);
 
-        card.Controls.Add(flow);
+        var bootApply = BuildBootApplyCheck();
+        bootApply.Dock = DockStyle.Bottom;
+        bootApply.Margin = new Padding(0);
+
+        // 添加顺序决定停靠优先级：标题占顶、勾选框占底、参数表紧随标题
+        card.Controls.Add(table);
+        card.Controls.Add(bootApply);
+        card.Controls.Add(SectionTitle("PBO Parameters"));
         return card;
     }
 
@@ -1438,20 +1426,23 @@ internal sealed partial class MainForm : Form
         box.BorderStyle = BorderStyle.FixedSingle;
         box.TextAlign = HorizontalAlignment.Center;
         box.Font = new Font(Theme.MonoFamily, 10F);
-        box.Margin = new Padding(0, 10, 12, 0);
+        box.Margin = new Padding(0, 5, 0, 5);
     }
 
-    private static void AddParamPair(FlowLayoutPanel parent, string label, NumericUpDown box)
+    private static void AddParamRow(TableLayoutPanel table, string label, NumericUpDown box)
     {
-        parent.Controls.Add(new Label
+        int row = table.RowCount;
+        table.Controls.Add(new Label
         {
             Text = label,
-            AutoSize = true,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Theme.TextLo,
             BackColor = Theme.Surface,
-            Margin = new Padding(0, 15, 6, 0),
-        });
-        parent.Controls.Add(box);
+            Margin = new Padding(0, 0, 8, 0),
+        }, 0, row);
+        table.Controls.Add(box, 1, row);
+        table.RowCount = row + 1;
     }
 
     // ── 手动 Curve Shaper 编辑器 ────────────────────────────────────────────
@@ -2354,6 +2345,7 @@ internal sealed partial class MainForm : Form
     private PillButton _alignBtn = null!;
     private CancellationTokenSource? _measureCts;
     private Task? _measureTask;
+    private readonly ResultsPanel _resultsPanel = new() { Dock = DockStyle.Fill };   // TESTING 页右栏
 
     private FlowLayoutPanel BuildMeasureRow(int btnWidth, int gap)
     {
@@ -2385,9 +2377,9 @@ internal sealed partial class MainForm : Form
         });
     }
 
-    /// <summary>Runs a single-core measurement in the background. Mutually exclusive with stress tests; the stop
-    /// button or the results window cancels it. The offset poll timer is paused so it does not wake cores.</summary>
-    private void StartMeasure(string title, Func<ResultsWindow, CancellationToken, bool> work)
+    /// <summary>Runs a single-core measurement in the background, results shown on the TESTING page. Mutually exclusive
+    /// with stress tests; the stop button cancels it. The offset poll timer is paused so it does not wake cores.</summary>
+    private void StartMeasure(string title, Func<ResultsPanel, CancellationToken, bool> work)
     {
         if (_testTask is { IsCompleted: false } || _measureTask is { IsCompleted: false }) return;
         if (!SingleCoreBoost.IsSupported)
@@ -2398,8 +2390,8 @@ internal sealed partial class MainForm : Form
 
         var cts = new CancellationTokenSource();
         _measureCts = cts;
-        var win = new ResultsWindow(title, cts.Cancel);
-        win.Show(this);
+        var win = _resultsPanel;
+        win.Begin(title);
 
         SetControlsEnabled(false);
         _stopBtn.Enabled = true;

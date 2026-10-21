@@ -413,7 +413,7 @@ internal sealed class SingleCoreBoost : IDisposable
     }
 
     /// <summary>Button flow: measure every usable core once, fill the window and log a summary.</summary>
-    public static bool Run(MonitorView? monitor, ResultsWindow win, CancellationToken ct)
+    public static bool Run(MonitorView? monitor, ResultsPanel win, CancellationToken ct)
     {
         Log.Write("Single Core Boost 开始：逐核运行单核负载，测量当前 CO 下的频率 / 有效频率 / 电压（不修改任何参数）");
         using var scb = Open(monitor);
