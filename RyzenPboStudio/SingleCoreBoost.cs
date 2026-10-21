@@ -21,9 +21,12 @@ internal sealed class SingleCoreBoost : IDisposable
     /// <summary>Brute-force share of the synthetic load; 25% matched R23's effective load on a 9950X (ratio 1.009).</summary>
     public const int LoadHeavyPct = 25;
 
+    // About 3.3 s per core, so 16 cores finish within a minute. Every core gets the same timing, so the
+    // short settle biases all cores alike and the per-core comparison used for alignment still holds.
     private const int ReadyTimeoutMs = 40_000;
-    private const int SettleMs = 4_000;   // after readiness, let the clock settle before sampling
-    private const int SampleMs = 3_000;
+    private const int ReadyPollMs = 100;
+    private const int SettleMs = 1_000;   // after readiness, let the clock settle before sampling
+    private const int SampleMs = 2_000;   // ~20 frames for the medians
     private const int FrameMs = 100;
 
     /// <summary>Below this occupancy the load did not land on the target core.</summary>
@@ -34,7 +37,7 @@ internal sealed class SingleCoreBoost : IDisposable
     private const double MinLoadW = 5.0;
 
     /// <summary>Rough per-core duration (ready + settle + sample), for time estimates in the UI.</summary>
-    public const int SecondsPerCore = 9;
+    public const int SecondsPerCore = 4;
 
     public static readonly string[] Columns =
         { "CCD", "Core", "CPPC", "排名", "Freq", "EffFreq", "VID", "TEL", "Temp", "Power", "Errors", "状态" };
@@ -239,7 +242,7 @@ internal sealed class SingleCoreBoost : IDisposable
         while (sw.ElapsedMilliseconds < ReadyTimeoutMs && !ct.IsCancellationRequested)
         {
             if (ReadTable() is { } t && IsLoaded(t, slot)) return true;
-            if (ct.WaitHandle.WaitOne(300)) return false;
+            if (ct.WaitHandle.WaitOne(ReadyPollMs)) return false;
         }
         return false;
     }
