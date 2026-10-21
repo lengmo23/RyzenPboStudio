@@ -118,8 +118,8 @@ internal sealed class ResultsPanel : Panel
 
     public void SetStatus(string text) => Post(() => status.Text = text);
 
-    /// <summary>Replaces the columns and clears all rows. The last column holds free text and gets double width.</summary>
-    public void SetTable(IReadOnlyList<string> columns) => Post(() =>
+    /// <summary>Replaces the columns and clears all rows. wideLast doubles the last column for free text.</summary>
+    public void SetTable(IReadOnlyList<string> columns, bool wideLast = false) => Post(() =>
     {
         grid.Rows.Clear();
         grid.Columns.Clear();
@@ -128,7 +128,7 @@ internal sealed class ResultsPanel : Panel
             {
                 HeaderText = columns[i],
                 SortMode = DataGridViewColumnSortMode.NotSortable,
-                FillWeight = i == columns.Count - 1 ? 200 : 100,
+                FillWeight = wideLast && i == columns.Count - 1 ? 200 : 100,
             });
     });
 

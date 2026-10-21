@@ -273,7 +273,7 @@ internal static class VoltageAlign
                                     Dictionary<int, ScbRow> latest, Dictionary<int, int> targets, double slope, int coMin,
                                     HashSet<int> clamped, ResultsPanel win, bool cancelled, int iterations = 0)
     {
-        win.SetTable(ResultColumns);
+        win.SetTable(ResultColumns, wideLast: true);   // 备注 holds free text
         var sb = new StringBuilder();
         sb.Append(cancelled
             ? "电压对齐已取消：CPU 上保留最后一次写入的 CO"

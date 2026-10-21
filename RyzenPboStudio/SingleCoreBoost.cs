@@ -40,7 +40,7 @@ internal sealed class SingleCoreBoost : IDisposable
     public const int SecondsPerCore = 4;
 
     public static readonly string[] Columns =
-        { "CCD", "Core", "CPPC", "排名", "Freq", "EffFreq", "VID", "TEL", "Temp", "Power", "Errors", "状态" };
+        { "Core", "Freq", "EffFreq", "VID", "TEL", "Temp", "Power" };
 
     private static double? tscMHzCache;
 
@@ -387,20 +387,16 @@ internal sealed class SingleCoreBoost : IDisposable
 
     public static string RankLabel(int rank) => rank switch { 1 => "#1 银", 2 => "#2 金", > 0 => $"#{rank}", _ => "-" };
 
+    /// <summary>Table row; invalid rows and computation errors show only through RowColor, details go to the log.</summary>
     public string[] Cells(ScbRow r) => new[]
     {
-        r.Ccd.ToString(),
         r.Slot.ToString(),
-        Cppc[r.Slot] > 0 ? Cppc[r.Slot].ToString() : "-",
-        RankLabel(CcdRank(r.Slot)),
         $"{r.Freq:F0}",
         $"{r.EffFreq:F0}",
         $"{r.Vid:F3}",
         $"{r.Tel:F3}",
         $"{r.Temp:F1}",
         $"{r.Power:F1}",
-        r.Errors.ToString(),
-        !r.Valid ? $"无效（{InvalidReason(r)}）" : r.Errors > 0 ? "计算错误（仅提示）" : "OK",
     };
 
     public static Color? RowColor(ScbRow r) => !r.Valid ? Theme.TextLo : r.Errors > 0 ? Theme.Warn : null;
