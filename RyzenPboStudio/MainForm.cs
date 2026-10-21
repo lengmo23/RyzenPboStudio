@@ -97,6 +97,7 @@ internal sealed class MainForm : Form
         ("FFTv4 — Fast Fourier Transform v4 (AVX512 Float)", "FFTv4", "FFTv4"),
         ("N63 — Classic NTT v2 (AVX512 Integer)", "N63", "N63"),
         ("VT3 — Vector Transform v3 (AVX512 Integer)", "VT3", "VSTv3"),
+        ("YC018 — Pi Benchmark 5b / 10b（内存密集，按内存容量自动选择）", YCruncher.BenchMode, "bench"),
     };
 
     public MainForm()
@@ -2113,6 +2114,14 @@ internal sealed class MainForm : Form
             Journal.Record(offsets, _testMode, null, "baseline");
         }
 
+        // The Pi benchmark always runs on all cores
+        if (_testMode == YCruncher.BenchMode && _testScope != "ALL")
+        {
+            Log.Write($"YC018 基准测试固定使用全部核心，已忽略所选测试范围（{ScopeLabel(_testScope, _scopeCcd)}）", "WARN");
+            _testScope = "ALL";
+            Ui(RestyleScopeButtons);
+        }
+
         _initialOffsets = new List<int>(offsets);
         var initSnapshot = new List<int>(offsets);
         Ui(() =>
@@ -2247,7 +2256,9 @@ internal sealed class MainForm : Form
                 });
 
                 bool ok;
-                (ok, offsets) = YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
+                (ok, offsets) = _testMode == YCruncher.BenchMode
+                    ? YCruncher.RunPiBench(iters, offsets, _testMode, token, _autoAdjust, NotifyManualError)
+                    : YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
                 if (ok) Log.Write("测试全部完成！");
                 else passOk = false;
             }
