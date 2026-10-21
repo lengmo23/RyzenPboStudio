@@ -171,7 +171,7 @@ internal sealed partial class MainForm
             return;
         }
 
-        ShowPage(pbo: false);   // TESTING page shows status and progress
+        ShowPage(Page.Testing);   // TESTING page shows status and progress
         bool takeover = Journal.ReadLastEntry()?.Reason == Journal.ManualTakeover;
         using (var dlg = new ResumeCountdownDialog(takeover, resume.Count + 1))
         {
