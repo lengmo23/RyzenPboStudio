@@ -23,8 +23,7 @@ internal sealed partial class MainForm : Form
     private readonly Label _statusLabel = new() { Text = "就绪", AutoSize = true };
     private readonly Label _initialOffsetsLabel = new() { Text = "初始负压: 未读取", AutoSize = true };
     private readonly Label _offsetsLabel = new() { Text = "当前负压: 未读取", AutoSize = true };
-    private readonly TextBox _logBox = new();          // AMD PBO 页日志
-    private readonly TextBox _logBoxTesting = new();   // TESTING 页日志（与 _logBox 内容镜像）
+    private readonly TextBox _logBox = new();          // LOGGING 页运行日志
     private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer _offsetTimer = new() { Interval = 1000 };
     private LinkLabel _updateLink = null!;   // 状态条「检查更新」
@@ -152,10 +151,14 @@ internal sealed partial class MainForm : Form
     // ── 界面构建 ────────────────────────────────────────────────────────────
 
     private MonitorView? _monitorView;     // 顶部常驻每核监控
-    private Control _pboPanel = null!;      // AMD PBO 页：CO | CS + 参数条 + LOG
-    private Control _testingPanel = null!;  // TESTING 页：测试设置 | 运行日志
+    private Control _pboPanel = null!;      // AMD PBO 页：CO | CS + 参数条
+    private Control _testingPanel = null!;  // TESTING 页：测试设置
+    private Control _loggingPanel = null!;  // LOGGING 页：运行日志
     private NavTabButton _navPboBtn = null!;
     private NavTabButton _navTestingBtn = null!;
+    private NavTabButton _navLoggingBtn = null!;
+
+    private enum Page { Pbo, Testing, Logging }
 
     /// <summary>按屏幕 DPI 与工作区自适应窗口：先随系统缩放放大布局（字体已由 GDI 自动放大），
     /// 放大后若超出工作区再整体等比回缩（含字体），最后居中。100% 缩放且屏幕足够时不做任何改动。</summary>
@@ -196,30 +199,33 @@ internal sealed partial class MainForm : Form
             Padding = new Padding(18),
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 378));  // 顶部：常驻监控（身份条 + CCD0/CCD1 + 限制条）
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 中部：AMD PBO / TESTING 内容
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));   // 底部：AMD PBO / TESTING 沉浸式导航
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 中部：AMD PBO / TESTING / LOGGING 内容
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));   // 底部：AMD PBO / TESTING / LOGGING 沉浸式导航
 
         var monitorCard = BuildMonitorCard();
         monitorCard.Margin = new Padding(0, 0, 0, 10);
 
-        // 中部内容宿主：两页叠放，按底部按钮切换可见
+        // 中部内容宿主：三页叠放，按底部按钮切换可见
         var host = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
         _pboPanel = BuildPboPanel();
         _pboPanel.Dock = DockStyle.Fill;
         _testingPanel = BuildTestingPanel();
         _testingPanel.Dock = DockStyle.Fill;
+        _loggingPanel = BuildLogCard(_logBox);
+        _loggingPanel.Dock = DockStyle.Fill;
         host.Controls.Add(_pboPanel);
         host.Controls.Add(_testingPanel);
+        host.Controls.Add(_loggingPanel);
 
         root.Controls.Add(monitorCard, 0, 0);
         root.Controls.Add(host, 0, 1);
         root.Controls.Add(BuildNavBar(), 0, 2);
         Controls.Add(root);
 
-        ShowPage(pbo: true);   // 默认进 AMD PBO 页
+        ShowPage(Page.Pbo);   // 默认进 AMD PBO 页
     }
 
-    /// <summary>AMD PBO 页：左列 = CO | CS（上）+ 参数条（下），右列 = LOG 拉满高度齐平。</summary>
+    /// <summary>AMD PBO 页：左列 = CO | CS（上）+ 参数条（下），右列留空。</summary>
     private Control BuildPboPanel()
     {
         // 左列：CO | CS 在上，参数条在下
@@ -265,15 +271,15 @@ internal sealed partial class MainForm : Form
         left.Controls.Add(credit, 0, 1);
         left.Controls.Add(BuildParamBar(), 0, 2);
 
-        // 右列：LOG（拉满左列总高，底边与参数条齐平）
-        return TwoColRow(60, left, BuildLogCard(_logBox));
+        // 右列：日志已移到 LOGGING 页，留空待用
+        return TwoColRow(60, left, new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg });
     }
 
-    /// <summary>TESTING 页：测试设置 | 运行日志 并排，底部状态条（右端显示版本）。</summary>
+    /// <summary>TESTING 页：测试设置 | 右侧留空，底部状态条（右端显示版本）。</summary>
     private Control BuildTestingPanel()
     {
         var cfg = BuildConfigCard();
-        var logCard = BuildLogCard(_logBoxTesting);
+        var spare = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };   // 日志已移到 LOGGING 页
 
         // 左栏固定宽度，窗口变窄时不裁掉开始/停止按钮。
         // +60 = 卡片内边距 32 + 栏间距 6 + 纵向滚动条余量 22。
@@ -286,11 +292,11 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(0),
         };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TestRowWidth + 60));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 日志吃掉剩余宽度
+        top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 留空区吃掉剩余宽度
         cfg.Margin = new Padding(0, 0, 6, 0);
-        logCard.Margin = new Padding(6, 0, 0, 0);
+        spare.Margin = new Padding(6, 0, 0, 0);
         top.Controls.Add(cfg, 0, 0);
-        top.Controls.Add(logCard, 1, 0);
+        top.Controls.Add(spare, 1, 0);
 
         _statusLabel.AutoSize = false;
         _statusLabel.Dock = DockStyle.Fill;
@@ -309,27 +315,30 @@ internal sealed partial class MainForm : Form
         return holder;
     }
 
-    /// <summary>底部导航：沉浸式标签 AMD PBO / TESTING（仿 HYDRA 底栏）。</summary>
+    /// <summary>底部导航：沉浸式标签 AMD PBO / TESTING / LOGGING（仿 HYDRA 底栏）。</summary>
     private Control BuildNavBar()
     {
         var bar = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             BackColor = Theme.Bg,
             Padding = new Padding(0, 6, 0, 0),
         };
-        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        for (int i = 0; i < 3; i++)
+            bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
 
-        _navPboBtn = NewNavButton("AMD PBO", () => ShowPage(pbo: true));
+        _navPboBtn = NewNavButton("AMD PBO", () => ShowPage(Page.Pbo));
         _navPboBtn.Margin = new Padding(0);
-        _navTestingBtn = NewNavButton("TESTING", () => ShowPage(pbo: false));
+        _navTestingBtn = NewNavButton("TESTING", () => ShowPage(Page.Testing));
         _navTestingBtn.Margin = new Padding(0);
+        _navLoggingBtn = NewNavButton("LOGGING", () => ShowPage(Page.Logging));
+        _navLoggingBtn.Margin = new Padding(0);
 
         bar.Controls.Add(_navPboBtn, 0, 0);
         bar.Controls.Add(_navTestingBtn, 1, 0);
+        bar.Controls.Add(_navLoggingBtn, 2, 0);
         return bar;
     }
 
@@ -339,23 +348,25 @@ internal sealed partial class MainForm : Form
         {
             Text = text,
             Size = new Size(170, 42),
-            Anchor = AnchorStyles.None,   // 在各自 50% 单元格内居中
+            Anchor = AnchorStyles.None,   // 在各自单元格内居中
             Font = new Font(Theme.FontFamily, 11.5F, FontStyle.Bold),
         };
         b.Click += (_, _) => onClick();
         return b;
     }
 
-    /// <summary>切换中部内容页：监控常驻顶部不动，仅 AMD PBO / TESTING 区互换。</summary>
-    private void ShowPage(bool pbo)
+    /// <summary>切换中部内容页：监控常驻顶部不动，仅 AMD PBO / TESTING / LOGGING 区互换。</summary>
+    private void ShowPage(Page page)
     {
-        _pboPanel.Visible = pbo;
-        _testingPanel.Visible = !pbo;
-        if (pbo) _pboPanel.BringToFront();
-        else _testingPanel.BringToFront();
+        var panel = page switch { Page.Testing => _testingPanel, Page.Logging => _loggingPanel, _ => _pboPanel };
+        _pboPanel.Visible = page == Page.Pbo;
+        _testingPanel.Visible = page == Page.Testing;
+        _loggingPanel.Visible = page == Page.Logging;
+        panel.BringToFront();
 
-        StyleNav(_navPboBtn, pbo);
-        StyleNav(_navTestingBtn, !pbo);
+        StyleNav(_navPboBtn, page == Page.Pbo);
+        StyleNav(_navTestingBtn, page == Page.Testing);
+        StyleNav(_navLoggingBtn, page == Page.Logging);
     }
 
     private static void StyleNav(NavTabButton? b, bool active)
@@ -1190,8 +1201,7 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>运行日志卡片。AMD PBO 页与 TESTING 页各建一个实例（一个 TextBox 无法同时挂在两页），
-    /// 两个日志框由 OnLogTimer 镜像写入，内容始终一致。</summary>
+    /// <summary>运行日志卡片（LOGGING 页）。</summary>
     private Control BuildLogCard(TextBox box)
     {
         var card = NewCard();
@@ -1931,15 +1941,12 @@ internal sealed partial class MainForm : Form
         bool any = false;
         while (_logQueue.TryDequeue(out var line))
         {
-            // 两页各有一个日志框，同步追加保证切页后内容一致
             _logBox.AppendText(line + "\r\n");
-            _logBoxTesting.AppendText(line + "\r\n");
             any = true;
         }
         if (any)
         {
             _logBox.SelectionStart = _logBox.TextLength;
-            _logBoxTesting.SelectionStart = _logBoxTesting.TextLength;
         }
     }
 
@@ -2532,7 +2539,6 @@ internal sealed partial class MainForm : Form
     {
         while (_logQueue.TryDequeue(out _)) { }
         _logBox.Clear();
-        _logBoxTesting.Clear();
     }
 
     /// <summary>手动导出当前日志到文件；日志不自动落盘，仅点此按钮时写出。</summary>
