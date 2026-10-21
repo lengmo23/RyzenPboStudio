@@ -24,6 +24,7 @@ internal sealed partial class MainForm : Form
     private readonly Label _initialOffsetsLabel = new() { Text = "初始负压: 未读取", AutoSize = true };
     private readonly Label _offsetsLabel = new() { Text = "当前负压: 未读取", AutoSize = true };
     private readonly TextBox _logBox = new();          // LOGGING 页运行日志
+    private readonly TextBox _logBoxPbo = new();       // AMD PBO 页运行日志（与 _logBox 内容镜像）
     private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer _offsetTimer = new() { Interval = 1000 };
     private LinkLabel _updateLink = null!;   // 状态条「检查更新」
@@ -46,6 +47,9 @@ internal sealed partial class MainForm : Form
     private readonly NumericUpDown _pptBox = new();
     private readonly NumericUpDown _edcBox = new();
     private readonly NumericUpDown _tdcBox = new();
+    private readonly ComboBox _scalarBox = new();
+    private bool _scalarWritable = true;
+    private bool _scalarDirty;   // 用户改过 Scalar 选项；没改过时 Apply 不写它，避免 5000 系顺带打开 PBO
 
     // ── 手动 Curve Shaper 编辑器（5 频率档 × 3 温度档）──────────────────────
     private readonly NumericUpDown[,] _csCells = new NumericUpDown[5, 3];
@@ -103,8 +107,9 @@ internal sealed partial class MainForm : Form
     {
         _autostartLaunch = autostartLaunch;
         Text = "AMD Ryzen PBO Studio";
-        // 宽度容纳 CO | CS | PBO 参数三张卡片，双 CCD 监控表随之收紧；屏幕放不下时由 FitToScreen 等比缩小
-        ClientSize = new Size(1280, 828);
+        // AMD PBO 页 = CO | CS + 下方参数条，右侧 LOG；高度让 CO 卡片底边刚好落在 Core 7 下方的「-」之下。
+        // 屏幕放不下时由 FitToScreen 等比缩小
+        ClientSize = new Size(1280, 870);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.Bg;
@@ -229,35 +234,45 @@ internal sealed partial class MainForm : Form
     /// <summary>AMD PBO 页：CO | CS | PBO 参数三张卡片并排，下方开源声明。</summary>
     private Control BuildPboPanel()
     {
+        // 左栏 = CO | CS（上）+ PBO 参数条 + 开源声明 / 开机自动应用；右栏 = LOG 拉满高度
         var page = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
+            ColumnCount = 2,
+            RowCount = 1,
             BackColor = Theme.Bg,
             Margin = new Padding(0),
         };
-        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // CO | CS | PBO 参数
-        page.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));      // 开源声明
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 782));   // CO 414 + CS 362 + 栏间距 6
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        // CO、CS 按各自网格 + 按钮列的自然宽度定宽（含 6px 栏间距），PBO 参数吃掉剩余宽度
-        var cards = new TableLayoutPanel
+        var left = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Theme.Bg,
+            Margin = new Padding(0, 0, 6, 0),
+        };
+        left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // CO | CS
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));      // PBO 参数条
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));      // 开源声明 + 开机自动应用
+
+        // CO、CS 按各自网格 + 按钮列的自然宽度定宽，不留空白；上下内边距收小，卡片底边贴近 Core 7 下方的「-」
+        var coCs = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
             RowCount = 1,
             BackColor = Theme.Bg,
             Margin = new Padding(0, 0, 0, 8),
         };
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 480));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        var coCard = BuildCoCard(); coCard.Margin = new Padding(0, 0, 6, 0);
-        var csCard = BuildCsCard(); csCard.Margin = new Padding(6, 0, 6, 0);
-        var paramCard = BuildParamCard(); paramCard.Margin = new Padding(6, 0, 0, 0);
-        cards.Controls.Add(coCard, 0, 0);
-        cards.Controls.Add(csCard, 1, 0);
-        cards.Controls.Add(paramCard, 2, 0);
+        coCs.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 414));
+        coCs.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var coCard = BuildCoCard(); coCard.Margin = new Padding(0, 0, 6, 0); coCard.Padding = new Padding(16, 8, 16, 8);
+        var csCard = BuildCsCard(); csCard.Margin = new Padding(6, 0, 0, 0); csCard.Padding = new Padding(16, 8, 16, 8);
+        coCs.Controls.Add(coCard, 0, 0);
+        coCs.Controls.Add(csCard, 1, 0);
 
         var credit = new Label
         {
@@ -267,11 +282,25 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Font = new Font(Theme.FontFamily, 8.5F),
             TextAlign = ContentAlignment.MiddleLeft,
-            Margin = new Padding(2, 0, 0, 2),
+            Padding = new Padding(2, 0, 0, 0),
         };
+        var bootApply = BuildBootApplyCheck();
+        bootApply.Dock = DockStyle.Right;
+        bootApply.BackColor = Theme.Bg;
+        bootApply.Margin = new Padding(0);
+        var footer = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Margin = new Padding(0) };
+        footer.Controls.Add(credit);      // 先加 Fill 再加 Right，勾选框才占住右端
+        footer.Controls.Add(bootApply);
 
-        page.Controls.Add(cards, 0, 0);
-        page.Controls.Add(credit, 0, 1);
+        left.Controls.Add(coCs, 0, 0);
+        left.Controls.Add(BuildParamBar(), 0, 1);
+        left.Controls.Add(footer, 0, 2);
+
+        var logCard = BuildLogCard(_logBoxPbo);
+        logCard.Margin = new Padding(6, 0, 0, 0);
+
+        page.Controls.Add(left, 0, 0);
+        page.Controls.Add(logCard, 1, 0);
         return page;
     }
 
@@ -1185,7 +1214,8 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>运行日志卡片（LOGGING 页）。</summary>
+    /// <summary>运行日志卡片。LOGGING 页与 AMD PBO 页各建一个实例（一个 TextBox 无法同时挂在两页），
+    /// 两个日志框由 OnLogTimer 镜像写入，内容始终一致。</summary>
     private Control BuildLogCard(TextBox box)
     {
         var card = NewCard();
@@ -1372,50 +1402,58 @@ internal sealed partial class MainForm : Form
     }
 
     /// <summary>PBO 参数卡片（CS 右侧）：FMax / PPT / EDC / TDC 竖排 + 一键 Apply（写 SMU 限制），底部为开机自动应用 CO/CS。</summary>
-    private Control BuildParamCard()
+    /// <summary>CO | CS 下方的参数条：FMax / PPT / EDC / TDC / Scalar + 一键 Apply（写 SMU 限制）。</summary>
+    private Control BuildParamBar()
     {
         var card = NewCard();
         card.Margin = new Padding(0);
+        card.Padding = new Padding(14, 6, 14, 6);
 
-        ConfigNumBox(_fmaxBox, 0, 7000, 25, 92);
-        ConfigNumBox(_pptBox, 30, 400, 5, 92);
-        ConfigNumBox(_edcBox, 10, 400, 5, 92);
-        ConfigNumBox(_tdcBox, 10, 300, 5, 92);
+        ConfigNumBox(_fmaxBox, 0, 7000, 25, 80);
+        ConfigNumBox(_pptBox, 30, 400, 5, 64);
+        ConfigNumBox(_edcBox, 10, 400, 5, 64);
+        ConfigNumBox(_tdcBox, 10, 300, 5, 64);
         _pptBox.Value = 142;   // 启动后由 InitPboBoxes 用 CPU 实际值覆盖
         _edcBox.Value = 180;
         _tdcBox.Value = 160;
 
-        // 左列标签吃掉剩余宽度，右列数字框与 Apply 同宽右对齐
-        var table = new TableLayoutPanel
+        // PBO Scalar：索引 i 对应 (i+1)X，Auto 即 1X
+        _scalarBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        _scalarBox.FlatStyle = FlatStyle.Flat;
+        _scalarBox.Width = 76;
+        _scalarBox.BackColor = Theme.SurfaceAlt;
+        _scalarBox.ForeColor = Theme.TextHi;
+        _scalarBox.Font = new Font(Theme.FontFamily, 9.5F);
+        _scalarBox.Margin = new Padding(0, 7, 14, 0);
+        _scalarBox.Items.Add("Auto");
+        for (int x = 2; x <= 10; x++) _scalarBox.Items.Add($"{x}X");
+        _scalarBox.SelectedIndex = 0;
+        _scalarBox.SelectionChangeCommitted += (_, _) => _scalarDirty = true;   // 只响应用户操作，程序回填不算
+        _tips.SetToolTip(_scalarBox,
+            "PBO Scalar：Auto 即 1X。倍数越大，SMU 在 boost 时给的电压越高。\n" +
+            "只在选项改动后点 Apply 才写入；5000 系写入时会同时打开 PBO。");
+
+        var flow = new FlowLayoutPanel
         {
-            Dock = DockStyle.Top,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill,
             BackColor = Theme.Surface,
-            ColumnCount = 2,
-            Padding = new Padding(0, 4, 0, 0),
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(0),
         };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        AddParamRow(table, "FMax (MHz)", _fmaxBox);
-        AddParamRow(table, "PPT (W)", _pptBox);
-        AddParamRow(table, "EDC (A)", _edcBox);
-        AddParamRow(table, "TDC (A)", _tdcBox);
+        AddParamPair(flow, "FMax", _fmaxBox);
+        AddParamPair(flow, "PPT", _pptBox);
+        AddParamPair(flow, "EDC", _edcBox);
+        AddParamPair(flow, "TDC", _tdcBox);
+        AddParamPair(flow, "Scalar", _scalarBox);
 
         var apply = Primary("Apply");
-        apply.Size = new Size(92, 32);
-        apply.Margin = new Padding(0, 10, 0, 0);
+        apply.Size = new Size(88, 30);
+        apply.Margin = new Padding(2, 4, 0, 0);
         apply.Click += (_, _) => OnPboApply();
-        table.Controls.Add(apply, 1, table.RowCount);
+        flow.Controls.Add(apply);
 
-        var bootApply = BuildBootApplyCheck();
-        bootApply.Dock = DockStyle.Bottom;
-        bootApply.Margin = new Padding(0);
-
-        // 添加顺序决定停靠优先级：标题占顶、勾选框占底、参数表紧随标题
-        card.Controls.Add(table);
-        card.Controls.Add(bootApply);
-        card.Controls.Add(SectionTitle("PBO Parameters"));
+        card.Controls.Add(flow);
         return card;
     }
 
@@ -1430,23 +1468,20 @@ internal sealed partial class MainForm : Form
         box.BorderStyle = BorderStyle.FixedSingle;
         box.TextAlign = HorizontalAlignment.Center;
         box.Font = new Font(Theme.MonoFamily, 10F);
-        box.Margin = new Padding(0, 5, 0, 5);
+        box.Margin = new Padding(0, 7, 14, 0);
     }
 
-    private static void AddParamRow(TableLayoutPanel table, string label, NumericUpDown box)
+    private static void AddParamPair(FlowLayoutPanel parent, string label, Control box)
     {
-        int row = table.RowCount;
-        table.Controls.Add(new Label
+        parent.Controls.Add(new Label
         {
             Text = label,
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleLeft,
+            AutoSize = true,
             ForeColor = Theme.TextLo,
             BackColor = Theme.Surface,
-            Margin = new Padding(0, 0, 8, 0),
-        }, 0, row);
-        table.Controls.Add(box, 1, row);
-        table.RowCount = row + 1;
+            Margin = new Padding(0, 11, 6, 0),
+        });
+        parent.Controls.Add(box);
     }
 
     // ── 手动 Curve Shaper 编辑器 ────────────────────────────────────────────
@@ -1670,10 +1705,16 @@ internal sealed partial class MainForm : Form
         bool okP = RyzenSmu.SetPptLimit(ppt);
         bool okE = RyzenSmu.SetEdcLimit(edc);
         bool okT = RyzenSmu.SetTdcLimit(tdc);
-        bool ok = okF && okP && okE && okT;
+        uint scalar = (uint)_scalarBox.SelectedIndex + 1;   // Auto = 1X
+        bool writeScalar = _scalarWritable && _scalarDirty;
+        bool okS = !writeScalar || RyzenSmu.SetPboScalar(scalar);
+        if (writeScalar && okS) _scalarDirty = false;
+        bool ok = okF && okP && okE && okT && okS;
         string fmaxPart = _fmaxWritable ? $"FMax {fmax} MHz / " : "FMax 跳过（不支持）/ ";
-        Log.Write($"应用 PBO 限制: {fmaxPart}PPT {ppt} W / EDC {edc} A / TDC {tdc} A" + (ok ? "" : "（部分写入失败，详见上方）"));
-        SetStatus(ok ? "已应用 PBO 限制（FMax/PPT/EDC/TDC）" : "PBO 限制应用部分失败", ok ? Theme.Success : Theme.Accent);
+        string scalarPart = !_scalarWritable ? " / Scalar 跳过（不支持）"
+                          : writeScalar ? $" / Scalar {_scalarBox.Text}" : " / Scalar 未改动";
+        Log.Write($"应用 PBO 限制: {fmaxPart}PPT {ppt} W / EDC {edc} A / TDC {tdc} A{scalarPart}" + (ok ? "" : "（部分写入失败，详见上方）"));
+        SetStatus(ok ? "已应用 PBO 限制（FMax/PPT/EDC/TDC/Scalar）" : "PBO 限制应用部分失败", ok ? Theme.Success : Theme.Accent);
     }
 
     // ── Curve Shaper 行为 ───────────────────────────────────────────────────
@@ -1796,6 +1837,16 @@ internal sealed partial class MainForm : Form
         {
             _fmaxBox.Enabled = false;
             Log.Write("当前 CPU 的 SMU 无 FMax 写入命令，已禁用该项；PPT / TDC / EDC 不受影响");
+        }
+
+        // Scalar 读数 0 是 OC 模式或读不到，按 Auto 显示；1~10 取整后回填
+        float s = RyzenSmu.ReadPboScalar();
+        _scalarBox.SelectedIndex = s >= 1 ? Math.Clamp((int)Math.Round(s), 1, 10) - 1 : 0;
+        _scalarWritable = RyzenSmu.IsPboScalarWriteSupported();
+        if (!_scalarWritable)
+        {
+            _scalarBox.Enabled = false;
+            Log.Write("当前 CPU 的 SMU 无 PBO Scalar 写入命令，已禁用该项");
         }
     }
 
@@ -1936,12 +1987,15 @@ internal sealed partial class MainForm : Form
         bool any = false;
         while (_logQueue.TryDequeue(out var line))
         {
+            // AMD PBO 页与 LOGGING 页各有一个日志框，同步追加保证切页后内容一致
             _logBox.AppendText(line + "\r\n");
+            _logBoxPbo.AppendText(line + "\r\n");
             any = true;
         }
         if (any)
         {
             _logBox.SelectionStart = _logBox.TextLength;
+            _logBoxPbo.SelectionStart = _logBoxPbo.TextLength;
         }
     }
 
@@ -2536,6 +2590,7 @@ internal sealed partial class MainForm : Form
     {
         while (_logQueue.TryDequeue(out _)) { }
         _logBox.Clear();
+        _logBoxPbo.Clear();
     }
 
     /// <summary>手动导出当前日志到文件；日志不自动落盘，仅点此按钮时写出。</summary>

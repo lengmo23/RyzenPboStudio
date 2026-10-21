@@ -200,6 +200,54 @@ internal static class RyzenSmu
         }
     }
 
+    /// <summary>读取当前 PBO Scalar（1~10）；读不到返回 0。读数 0 表示 OC 模式，不是有效倍数。</summary>
+    public static float ReadPboScalar()
+    {
+        try { lock (IoLock) return GetCpu().GetPBOScalar(); }
+        catch (Exception e)
+        {
+            Log.Write($"读取 PBO Scalar 失败: {e.Message}", "WARN");
+            return 0;
+        }
+    }
+
+    /// <summary>设置 PBO Scalar（1~10，即 1X~10X）。Zen2/Zen3 上 ZenStates-Core 会先发 MP1 SetPBO_EN 打开 PBO。</summary>
+    public static bool SetPboScalar(uint scalar)
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var status = GetCpu().SetPBOScalar(scalar);
+                if (status != SMU.Status.OK) Log.Write($"设置 PBO Scalar 返回 {status}", "WARN");
+                return status == SMU.Status.OK;
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Write($"设置 PBO Scalar 异常: {e.Message}", "ERROR");
+            return false;
+        }
+    }
+
+    /// <summary>当前 SMU 是否有 PBO Scalar 写入消息（RSMU 或 MP1 任一非 0）；没有时界面置灰该项。</summary>
+    public static bool IsPboScalarWriteSupported()
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var smu = GetCpu().smu;
+                return smu.Rsmu.SMU_MSG_SetPBOScalar != 0 || smu.Mp1Smu.SMU_MSG_SetPBOScalar != 0;
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Write($"检测 PBO Scalar 写入支持失败: {e.Message}", "WARN");
+            return false;
+        }
+    }
+
     // 上次手动应用的 TDC/EDC 限制（A）：SMU 无对应读取接口，缓存供监控显示「上限」。
     public static int? LastTdcLimit { get; private set; }
     public static int? LastEdcLimit { get; private set; }
