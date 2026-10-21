@@ -149,7 +149,8 @@ internal sealed class SingleCoreBoost : IDisposable
 
     public int CcdOf(int slot) => slot / CoresPerCcd;
 
-    /// <summary>CPPC rank inside the slot's CCD (1 = 金核, 2 = 银核); 0 when CPPC cannot rank this CCD.</summary>
+    /// <summary>CPPC rank inside the slot's CCD (1 = 银核, 2 = 金核, same as the monitor); 0 when CPPC cannot rank this CCD.
+    /// The two top cores usually share one CPPC value, so ties go by core index.</summary>
     public int CcdRank(int slot) => slot >= 0 && slot < SlotCount ? ccdRank[slot] : 0;
 
     private ulong Mask(int slot) => 1UL << slotLogical[slot];
@@ -381,7 +382,7 @@ internal sealed class SingleCoreBoost : IDisposable
         : r.Occ < MinOcc ? $"占用率仅 {r.Occ:F0}%"
         : $"核心功耗仅 {r.Power:F1} W，负载未压上";
 
-    public static string RankLabel(int rank) => rank switch { 1 => "#1 金", 2 => "#2 银", > 0 => $"#{rank}", _ => "-" };
+    public static string RankLabel(int rank) => rank switch { 1 => "#1 银", 2 => "#2 金", > 0 => $"#{rank}", _ => "-" };
 
     public string[] Cells(ScbRow r) => new[]
     {
