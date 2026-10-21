@@ -4,7 +4,7 @@ using System.Text;
 
 namespace RyzenPboStudio;
 
-internal sealed class MainForm : Form
+internal sealed partial class MainForm : Form
 {
     // ── 控件 ────────────────────────────────────────────────────────────────
     private readonly ComboBox _modeCombo = new();          // 单项测试下拉
@@ -99,8 +99,9 @@ internal sealed class MainForm : Form
         ("VT3 — Vector Transform v3 (AVX512 Integer)", "VT3", "VSTv3"),
     };
 
-    public MainForm()
+    public MainForm(bool autostartLaunch = false)
     {
+        _autostartLaunch = autostartLaunch;
         Text = "AMD Ryzen PBO Studio";
         // 宽度容纳双 CCD 并排；屏幕放不下时由 FitToScreen 等比缩小
         ClientSize = new Size(1370, 950);
@@ -114,6 +115,8 @@ internal sealed class MainForm : Form
         BuildUi();
         SetStatus("就绪", Theme.Success);
         Shown += (_, _) => InitCoEditor();
+        // After editor init, before the silent update check (which skips itself once a resumed test runs)
+        Shown += (_, _) => OnAutostartShown();
         // 启动后静默查一次更新：有新版才弹窗，无更新或网络不通都不打扰
         Shown += async (_, _) => await RunUpdateFlowAsync(manual: false);
         Load += (_, _) => FitToScreen();
@@ -1405,6 +1408,7 @@ internal sealed class MainForm : Form
         apply.Margin = new Padding(16, 7, 0, 0);
         apply.Click += (_, _) => OnPboApply();
         flow.Controls.Add(apply);
+        flow.Controls.Add(BuildBootApplyCheck());
 
         card.Controls.Add(flow);
         return card;
@@ -1985,6 +1989,7 @@ internal sealed class MainForm : Form
         _stopBtn.Enabled = true;
         SetStatus($"运行中 · 模式 {_testMode} · 范围 {ScopeLabel(_testScope, _scopeCcd)} · 每轮 {duration} 秒", Theme.Warn);
 
+        if (sender == _startBtn) AutoStart.ResetResumeCount();   // manual start resets the auto-resume streak
         _testTask = Task.Run(RunTestThread);
     }
 
@@ -2024,6 +2029,7 @@ internal sealed class MainForm : Form
         // 中断后用户手动改过负压：以这组值起跑，不再叠加 +StepOnError
         bool manualTakeover = lastEntry?.Reason == Journal.ManualTakeover;
         Workspace.MarkInProgress($"start {DateTime.Now:O}");
+        OnTestStartedForAutostart();
 
         int numCores = RyzenSmu.SlotCount;
 
@@ -2311,6 +2317,7 @@ internal sealed class MainForm : Form
         SetControlsEnabled(true);
         _stopBtn.Enabled = false;
         SetStatus("就绪", Theme.Success);
+        OnTestFinishedForAutostart();
 
         if (_testCompletedNormally && !_stopRequested)
             MessageBox.Show("测试已完成！", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -2494,6 +2501,7 @@ internal sealed class MainForm : Form
         // 只有用户主动关闭才清脏标记；其余情况保留，下次启动按「上次测试中断」续跑并回退负压。
         if (userClosing)
             Workspace.ClearInProgress();
+        OnClosingForAutostart(userClosing);
         YCruncher.Kill();
         base.OnFormClosing(e);
     }
