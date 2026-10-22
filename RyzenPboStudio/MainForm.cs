@@ -22,19 +22,19 @@ internal sealed partial class MainForm : Form
     private readonly Label _statusLabel = new() { Text = "就绪", AutoSize = true };
     private readonly Label _initialOffsetsLabel = new() { Text = "初始负压: 未读取", AutoSize = true };
     private readonly Label _offsetsLabel = new() { Text = "当前负压: 未读取", AutoSize = true };
-    private readonly TextBox _logBox = new();          // LOGGING 页运行日志
-    private readonly TextBox _logBoxPbo = new();       // AMD PBO 页运行日志（与 _logBox 内容镜像）
+    private readonly TextBox _logBox = new(); // Log textbox on the LOGGING page.
+    private readonly TextBox _logBoxPbo = new(); // Mirrors log content on the AMD PBO page.
     private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer _offsetTimer = new() { Interval = 1000 };
-    private LinkLabel _updateLink = null!;   // 状态条「检查更新」
-    private bool _updateBusy;                // 更新流程进行中，避免重入
-    private Version? _knownNewVersion;       // 已检测到的新版本：状态条常驻显示，即使用户点过「否」
+    private LinkLabel _updateLink = null!;
+    private Form _infoDialog = null!;
+    private bool _updateBusy; // Prevent concurrent update attempts.
+    private Version? _knownNewVersion; // Keep a declined update visible in the info dialog.
 
-    // TESTING 页测试设置卡内各段的统一宽度：下拉框、模式按钮、调整方式按钮，
-    // 以及底部开始/停止两键之和都对齐到这个值。
+    // Align test controls and the combined Start/Stop buttons to one width.
     private const int TestRowWidth = 370;
 
-    // ── 手动 Curve Optimizer 编辑器 ─────────────────────────────────────────
+    // Curve Optimizer editor
     private const int CoDisplaySlotCount = 16;
     private const int CoSlotsPerColumn = 8;
     private readonly List<NumericUpDown> _coCells = new();
@@ -120,11 +120,12 @@ internal sealed partial class MainForm : Form
 
         TrySetIcon();
         BuildUi();
+        FormClosed += (_, _) => _infoDialog.Dispose();
         SetStatus("就绪", Theme.Success);
         Shown += (_, _) => InitCoEditor();
         // After editor init, before the silent update check (which skips itself once a resumed test runs)
         Shown += (_, _) => OnAutostartShown();
-        // 启动后静默查一次更新：有新版才弹窗，无更新或网络不通都不打扰
+        // Check silently at startup; prompt only when an update is available.
         Shown += async (_, _) => await RunUpdateFlowAsync(manual: false);
         Load += (_, _) => FitToScreen();
 
@@ -230,17 +231,18 @@ internal sealed partial class MainForm : Form
         root.Controls.Add(host, 0, 1);
         root.Controls.Add(BuildNavBar(), 0, 2);
         Controls.Add(root);
-        Controls.Add(_headerBar);   // 后加的 Dock=Top 先停靠，占住窗口顶部
+        Controls.Add(_headerBar); // Later Dock=Top controls claim the top edge first.
+        _infoDialog = BuildInfoDialog();
+        _headerBar.InfoClicked += (_, _) => _infoDialog.ShowDialog(this);
 
-        ShowPage(Page.Pbo);   // 默认进 AMD PBO 页
+        ShowPage(Page.Pbo);
     }
 
-    /// <summary>AMD PBO 页：CO | CS | PBO 参数三张卡片并排，下方开源声明。</summary>
-    private const int FooterH = 22;   // AMD PBO 页底部开源声明行高
+    /// <summary>Builds the AMD PBO page with CO, CS, PBO limits, and source credit.</summary>
+    private const int FooterH = 28;
 
     private Control BuildPboPanel()
     {
-        // 左栏 = CO | CS（上）+ PBO 参数条 + 开源声明 / 开机自动应用；右栏 = LOG 拉满高度
         var page = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -335,11 +337,8 @@ internal sealed partial class MainForm : Form
         _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
         _statusLabel.Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold);
         _statusLabel.BackColor = Theme.Bg;
-        // 高度 40 以容纳右端版本 + 作者两行文字
-        var statusBar = new Panel { Dock = DockStyle.Bottom, Height = 40, BackColor = Theme.Bg, Padding = new Padding(4, 4, 0, 0) };
-        // 先加 Dock=Fill 再加 Dock=Right，后者才能占住右端
+        var statusBar = new Panel { Dock = DockStyle.Bottom, Height = 28, BackColor = Theme.Bg, Padding = new Padding(4, 4, 0, 0) };
         statusBar.Controls.Add(_statusLabel);
-        statusBar.Controls.Add(BuildVersionPanel());
 
         var holder = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
         holder.Controls.Add(top);
@@ -826,86 +825,90 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>停靠在 TESTING 页底部状态条右端：第一行版本 + 构建日期 + 检查更新，
-    /// 第二行作者署名 + 抖音主页链接。</summary>
-    private Control BuildVersionPanel()
+    /// <summary>Builds the version and author dialog opened from the title bar.</summary>
+    private Form BuildInfoDialog()
     {
         string buildDate = typeof(MainForm).Assembly
             .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
             .Cast<System.Reflection.AssemblyMetadataAttribute>()
             .FirstOrDefault(a => a.Key == "BuildDate")?.Value ?? "?";
-        string version = typeof(MainForm).Assembly.GetName().Version?.ToString(3) ?? "?";
+        string version = HeaderBar.DisplayVersion;
 
-        var grid = new TableLayoutPanel
+        var dialog = new Form
         {
-            Dock = DockStyle.Right,
-            Width = 430,
-            ColumnCount = 2,
-            RowCount = 2,
-            BackColor = Theme.Bg,
-            Margin = new Padding(0),
-            Padding = new Padding(0, 0, 6, 0),
+            Text = "关于 AMD Ryzen PBO Studio",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(480, 160),
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            BackColor = Theme.Surface,
+            ForeColor = Theme.TextHi,
+            Font = new Font(Theme.FontFamily, 10F),
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 文本右对齐
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));       // 链接贴最右
-        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        dialog.HandleCreated += (_, _) => DarkTitleBar.Apply(dialog.Handle);
 
-        _updateLink = FootLink("检查更新", () => _ = RunUpdateFlowAsync(manual: true));
-        grid.Controls.Add(DimText($"版本 v{version} · 构建 {buildDate}"), 0, 0);
-        grid.Controls.Add(LinkRow(
-            FootLink("项目主页", () => OpenUrl(Updater.HomePage)),
-            _updateLink), 1, 0);
-
-        grid.Controls.Add(DimText("制作：DY冷漠_OC调试"), 0, 1);
-        grid.Controls.Add(LinkRow(
-            FootLink("抖音 冷漠OC", () => OpenUrl(DouyinUrl))), 1, 1);
-        return grid;
-    }
-
-    /// <summary>把若干链接横向排在状态条同一行右端。</summary>
-    private static FlowLayoutPanel LinkRow(params Control[] links)
-    {
-        var row = new FlowLayoutPanel
+        var content = new TableLayoutPanel
         {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 4,
+            BackColor = Theme.Surface,
+            Padding = new Padding(22, 18, 22, 14),
+        };
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+
+        Label InfoLine(string text, bool title = false) => new()
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            ForeColor = title ? Theme.TextHi : Theme.TextLo,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, title ? 13F : 9.5F,
+                title ? FontStyle.Bold : FontStyle.Regular),
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        content.Controls.Add(InfoLine("AMD Ryzen PBO Studio", title: true), 0, 0);
+        content.Controls.Add(InfoLine($"版本 {version} · 构建 {buildDate}"), 0, 1);
+        content.Controls.Add(InfoLine("制作：DY冷漠_OC调试"), 0, 2);
+
+        var links = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Surface,
             WrapContents = false,
-            BackColor = Theme.Bg,
-            Margin = new Padding(0),
-            Anchor = AnchorStyles.Right,
+            Margin = new Padding(0, 8, 0, 0),
         };
-        foreach (Control l in links) row.Controls.Add(l);
-        return row;
+        links.Controls.Add(FootLink("项目主页", () => OpenUrl(Updater.HomePage)));
+        links.Controls.Add(FootLink("抖音 冷漠OC", () => OpenUrl(DouyinUrl)));
+        _updateLink = FootLink("检查更新", () => _ = RunUpdateFlowAsync(manual: true));
+        links.Controls.Add(_updateLink);
+        content.Controls.Add(links, 0, 3);
+
+        dialog.Controls.Add(content);
+        return dialog;
     }
 
     private const string DouyinUrl = "https://v.douyin.com/6VGnQBTxwIQ/";
 
-    private static Label DimText(string text) => new()
-    {
-        Text = text,
-        Dock = DockStyle.Fill,
-        ForeColor = Theme.TextLo,
-        BackColor = Theme.Bg,
-        Font = new Font(Theme.FontFamily, 8.5F),
-        TextAlign = ContentAlignment.MiddleRight,
-    };
-
-    /// <summary>状态条上的小号超链接。</summary>
+    /// <summary>Creates a small link for the version dialog.</summary>
     private static LinkLabel FootLink(string text, Action onClick)
     {
         var link = new LinkLabel
         {
             Text = text,
             AutoSize = true,
-            BackColor = Theme.Bg,
-            Font = new Font(Theme.FontFamily, 8.5F),
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, 9.5F),
             LinkColor = Theme.Accent,
             ActiveLinkColor = Theme.AccentHover,
             VisitedLinkColor = Theme.Accent,
             LinkBehavior = LinkBehavior.HoverUnderline,
-            Margin = new Padding(8, 0, 0, 0),
-            Anchor = AnchorStyles.Right,
+            Margin = new Padding(0, 0, 18, 0),
         };
         link.LinkClicked += (_, _) => onClick();
         return link;
