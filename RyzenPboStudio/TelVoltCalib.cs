@@ -3,16 +3,16 @@ using System.Text.Json.Serialization;
 
 namespace RyzenPboStudio;
 
-/// <summary>TEL（SVI3 实测电压）的 PM Table 偏移自动校准。
-/// HWiNFO 可用时把其 SVI3 读数与 PM Table 全表逐项对照，交集收敛到唯一吻合项后锁定偏移并持久化
-/// （带 PM Table 版本校验，BIOS 换表后自动重新校准）；此后 TEL 直接本地读 PM Table，不依赖 HWiNFO。</summary>
+/// <summary>Calibrates the PM Table index for measured SVI3 TEL voltage.
+/// Matches HWiNFO SVI3 samples against table values until one stable index remains.
+/// Recalibrates after a PM Table version change; normal reads then need no HWiNFO.</summary>
 internal sealed class TelVoltCalib
 {
-    private const double Tol = 0.0035;      // SVI3 5mV 量化半步 + 裕量
-    private const int LockAfterStable = 8;  // 交集稳定为单项的连续窗数
-    private const int ForceAfter = 15;      // 多候选僵持时按累计误差最小强制锁定的窗数
+    private const double Tol = 0.0035; // Half of SVI3’s 5 mV quantization step plus margin.
+    private const int LockAfterStable = 8; // Consecutive windows with one stable candidate.
+    private const int ForceAfter = 15; // Force the lowest-error candidate after a prolonged tie.
 
-    /// <summary>锁定的 PM Table float 索引；-1 = 未校准。</summary>
+    /// <summary>Locked PM Table float index, or -1 before calibration.</summary>
     public int Index { get; private set; } = -1;
 
     private readonly uint tableVersion;
@@ -51,7 +51,7 @@ internal sealed class TelVoltCalib
         }
     }
 
-    /// <summary>喂入一窗数据：pt = PM Table 快照，telHw = HWiNFO 的 SVI3 电压。仅未锁定时调用。</summary>
+    /// <summary>Feeds a PM Table snapshot and HWiNFO SVI3 voltage while unlocked.</summary>
     public void Feed(float[] pt, double telHw)
     {
         var cur = new List<int>();
@@ -60,7 +60,7 @@ internal sealed class TelVoltCalib
             double v = pt[j];
             if (v > 0.3 && v < 2.0 && Math.Abs(v - telHw) <= Tol) cur.Add(j);
         }
-        if (cur.Count == 0) return;   // 本窗无候选（瞬时波动/采样错拍），跳过不重置
+        if (cur.Count == 0) return; // Skip one unmatched window without resetting candidates.
 
         totalWins++;
         foreach (int j in cur)
@@ -71,7 +71,7 @@ internal sealed class TelVoltCalib
 
         if (candidates.Count == 0)
         {
-            // 交集清空：此前候选全被否定，重新从本窗开始
+            // Restart candidate search if the intersection becomes empty.
             candidates = new HashSet<int>(cur);
             stableWins = 0; totalWins = 1;
             errSum.Clear();

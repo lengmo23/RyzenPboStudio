@@ -1,15 +1,15 @@
 ﻿<#
 .SYNOPSIS
-    把 bin\ 打包成两个发布用的 zip。
+    Package bin\ into full and update release archives.
 
 .DESCRIPTION
-    full   —— 含 y-cruncher，供新用户首次下载，解压即用。
-    update —— 仅主程序及其依赖，供程序内自动更新使用；y-cruncher 极少变动，
-              没必要每次更新都重下 46MB。Updater 会优先选取名字含 "update" 的资产。
+    full   includes y-cruncher for first-time installation.
+    update contains only the application and dependencies for in-app updates.
+    Updater prefers assets whose names contain "update".
 
-    两个包顶层都是同一个版本命名的文件夹，Updater.ExtractAndVerify 靠找到主程序
-    exe 来定位它。包内的 README 与第三方声明取自仓库根目录，而不是构建输出里
-    ZenStates-Core 自带的那份（那是库说明，用户看了会困惑）。
+    Both archives use the same fixed top-level folder. Updater.ExtractAndVerify
+    locates it by the main executable. README and notices come from the repository
+    root rather than the ZenStates-Core build output.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File Scripts\pack-release.ps1
@@ -31,16 +31,14 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     throw "找不到 $exePath，请先执行 dotnet publish 输出到 $BinDir。"
 }
 
-# ProductVersion 形如 "2.1+<commit>"。csproj 里版本写两段时这里也只有两段，
-# 补成三段以对上程序内 Updater.CurrentVersion 的显示和 GitHub tag；
-# 解析不出来就直接报错，别让哈希混进 zip 文件名。
+# Normalize ProductVersion to three numeric parts without commit metadata.
 $version = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
 if ($version -match '^([0-9]+\.[0-9]+\.[0-9]+)') { $version = $Matches[1] }
 elseif ($version -match '^([0-9]+\.[0-9]+)') { $version = "$($Matches[1]).0" }
 else { throw "无法从 ProductVersion 解析版本号: $version" }
 Write-Host "版本: $version"
 
-# 运行时产物不属于交付内容
+# Runtime data is not part of the release.
 foreach ($junk in @('logs', 'profiles')) {
     $p = Join-Path $bin $junk
     if (Test-Path -LiteralPath $p) {
@@ -49,9 +47,7 @@ foreach ($junk in @('logs', 'profiles')) {
 }
 
 $stageRoot = Join-Path ([IO.Path]::GetTempPath()) "rps-pack-$(Get-Random)"
-# 包内顶层目录固定不带版本号：手动下载新包解压时能直接盖在既有安装目录上，
-# 而不是留下两个版本各一份的文件夹。自动更新不依赖该名字
-# （Updater.ExtractAndVerify 是靠找到主程序 exe 来定位根目录的）。
+# A fixed folder name lets a manual install replace the existing directory.
 $folderName = 'AMDRyzenPBOStudio'
 
 function New-Package {
@@ -60,7 +56,7 @@ function New-Package {
     $stage = Join-Path $stageRoot "$Kind\$folderName"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-    # 主程序及依赖：排除运行时目录与 tools（tools 单独按需复制）
+    # Copy application files; tools are included only in the full archive.
     Get-ChildItem -LiteralPath $bin -File | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $stage -Force
     }
@@ -74,13 +70,12 @@ function New-Package {
         }
     }
 
-    # 用仓库根目录的 README / 第三方声明覆盖构建输出里 ZenStates-Core 自带的那份
+    # Use repository documentation instead of the dependency's build output.
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $stage 'README.md') -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README_zh_cn.md') -Destination (Join-Path $stage 'README_zh_cn.md') -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Force
 
-    # 注意 Updater.CheckAsync 是靠名字里的 "update" / "full" 关键字挑包的，
-    # 改名时这两个词必须保留，否则自动更新会选错包。
+    # Keep "update" and "full" in asset names for Updater.CheckAsync selection.
     $zip = Join-Path $out "AMD-Ryzen-PBO-Studio-v$version-$Kind.zip"
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
