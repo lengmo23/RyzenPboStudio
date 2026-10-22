@@ -140,10 +140,9 @@ internal static partial class YCruncher
         IntPtr job = Job.Value;
         if (job == IntPtr.Zero) return;
 
-        Log.Write("正在强制结束 y-cruncher 进程...");
         TerminateJobObject(job, 1);
 
-        // 终止是异步的，等进程真正退出（释放内存）后再开下一阶段
+        // Wait for asynchronous termination and memory release before the next stage.
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < 3000
                && QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out var info,
@@ -151,15 +150,14 @@ internal static partial class YCruncher
                && info.ActiveProcesses > 0)
             Thread.Sleep(50);
 
-        Log.Write("y-cruncher 进程清理完成");
     }
 
     /// <summary>
-    /// 跑 iterations 轮压测（algorithms 可为一个或多个 y-cruncher 组件，多个即「和项」一起测）：
-    /// 自动模式下报错则对应物理核心 +StepOnError 后重跑整轮，直到通过或被取消；
-    /// 手动模式(autoAdjust=false)下报错只提醒并停止，不改动任何负压。返回 (是否通过, 最终负压)。
-    /// logicalCores 非空时只压这些逻辑核（走 config 文件，命令行的 stress 不支持指定核心），
-    /// scopeCores（槽位口径）则限定 y-cruncher 整体崩溃时的负压回退范围，避免误伤未参与本次测试的核心。
+    /// Runs the requested algorithms for the requested iterations.
+    /// Automatic errors back off the mapped physical core and restart the round;
+    /// manual mode reports and stops without changing CO. Returns pass status and offsets.
+    /// logicalCores restricts the stress config; scopeCores restricts crash backoff
+    /// to participating SMU slots.
     /// </summary>
     public static (bool ok, List<int> offsets) RunStressTest(
         IReadOnlyList<string> algorithms, int iterations, List<int> offsets,
@@ -376,19 +374,12 @@ internal static partial class YCruncher
 
         RefreshBaselineFromCpu(current);
 
+        var before = new List<int>(current);
         foreach (int slot in crashedSlots)
-        {
-            if (slot >= 0 && slot < current.Count)
-            {
-                int old = current[slot];
-                current[slot] = old + Config.StepOnError;
-                Log.Write($"  物理核心 {slot}: {old} → {current[slot]} (+{Config.StepOnError})");
-            }
-        }
+            if (slot >= 0 && slot < current.Count) current[slot] += Config.StepOnError;
+        Log.WriteCo($"报错核心负压 +{Config.StepOnError}：", current, before);
 
-        Log.Write($"新负压: [{string.Join(", ", current)}]");
-
-        // 先落盘再下发：万一应用后立刻死机，这组负压已在磁盘上
+        // Persist offsets before applying them so crash recovery can recover the write.
         if (!Tuning.Apply(current, mode, phase, "backoff"))
         {
             Log.Write("应用负压失败", "ERROR");
@@ -415,17 +406,16 @@ internal static partial class YCruncher
         }
 
         RefreshBaselineFromCpu(current);
+        var before = new List<int>(current);
         bool anyReduced = false;
         for (int i = 0; i < current.Count; i++)
         {
-            // 限定了测试范围时只回退参与本次测试的核心，不动没测过的那些
+            // Back off only cores included in the selected test scope.
             if (scopeCores is { Count: > 0 } && !scopeCores.Contains(i)) continue;
             if (current[i] < 0)
             {
-                int old = current[i];
                 current[i] = Math.Min(0, current[i] + Config.StepOnError);
                 anyReduced = true;
-                Log.Write($"  物理核心 {i}: {old} → {current[i]} (+{Config.StepOnError})");
             }
         }
 
@@ -437,7 +427,7 @@ internal static partial class YCruncher
             return false;
         }
 
-        Log.Write($"检测到 y-cruncher 崩溃，视为不稳定：相关物理核心负压各 +{Config.StepOnError} → [{string.Join(", ", current)}]", "WARN");
+        Log.WriteCo($"y-cruncher 崩溃，相关核心负压 +{Config.StepOnError}：", current, before, "WARN");
         if (!Tuning.Apply(current, mode, phase, "yc-crash-backoff"))
         {
             Log.Write("应用负压失败", "ERROR");
@@ -461,7 +451,7 @@ internal static partial class YCruncher
             if (current[i] != live[i]) { current[i] = live[i]; changed = true; }
         }
         if (changed)
-            Log.Write($"CPU 当前负压: [{string.Join(", ", current)}]", "WARN");
+            Log.WriteCo("CPU 当前负压：", current, level: "WARN");
     }
 
     private static void TryKill(Process proc)

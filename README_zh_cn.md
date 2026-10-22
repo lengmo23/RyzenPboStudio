@@ -101,7 +101,7 @@ AMD Ryzen 5000 / 7000 / 9000 系处理器的 PBO 调节与 Curve Optimizer 负�
 
 程序目录下会生成两个文件夹：
 
-- `logs\`：y-cruncher 每次运行的日志，以及手动导出的运行日志
+- `logs\`：每次启动实时保存的运行日志，以及 y-cruncher 每次运行的日志
 - `profiles\`：负压历史、恢复状态、CO / Curve Shaper 配置和校准数据
 
 ## 风险提示

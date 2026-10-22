@@ -108,7 +108,7 @@ Feature support by generation:
 
 The program creates two folders next to the EXE:
 
-- `logs\`: y-cruncher logs for each run, and run logs you export manually
+- `logs\`: a live log for each app launch and y-cruncher logs for each run
 - `profiles\`: offset history, recovery state, CO / Curve Shaper profiles and calibration data
 
 ## Warning
