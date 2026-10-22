@@ -134,7 +134,7 @@ internal sealed partial class MainForm : Form
         _logTimer.Start();
         _offsetTimer.Start();
 
-        Log.Write("程序已启动，请选择测试模式");
+        Log.Write("程序已启动");
         if (Workspace.WasInterrupted())
         {
             var st = Workspace.LoadState();
@@ -1240,16 +1240,9 @@ internal sealed partial class MainForm : Form
         clearBtn.Anchor = AnchorStyles.Left | AnchorStyles.Top;
         clearBtn.Click += (_, _) => ClearLog();
 
-        var saveBtn = Primary("保存日志");
-        saveBtn.Size = new Size(118, 36);
-        saveBtn.Top = 8;
-        saveBtn.Click += (_, _) => SaveLog();
-        btnBar.Resize += (_, _) => saveBtn.Left = btnBar.ClientSize.Width - saveBtn.Width;
-
         btnBar.Controls.Add(clearBtn);
-        btnBar.Controls.Add(saveBtn);
 
-        // 添加顺序决定停靠优先级：标题占顶、按钮占底、日志框填中间
+        // Dock order keeps the title and buttons outside the filling log box.
         card.Controls.Add(box);
         card.Controls.Add(btnBar);
         card.Controls.Add(SectionTitle("运行日志"));
@@ -1660,11 +1653,11 @@ internal sealed partial class MainForm : Form
     private void OnCoApply()
     {
         var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
-        // 测试中手动调整不算接管，之后若死机仍按正常规则回退一档
+        // Manual changes during a test do not take ownership; crash recovery still backs off one step.
         bool testRunning = _testTask is { IsCompleted: false };
         string reason = testRunning ? Journal.ManualInTest : Journal.ManualTakeover;
         bool ok = Tuning.Apply(vals, "MANUAL", null, reason);
-        Log.Write($"手动应用 CO: [{string.Join(", ", vals)}]" + (ok ? "" : "（写入异常，详见上方）"));
+        Log.WriteCo(ok ? "手动应用 CO：" : "手动应用 CO 写入失败：", vals, level: ok ? "INFO" : "ERROR");
         if (ok && Workspace.WasInterrupted())
         {
             if (testRunning)
@@ -1686,7 +1679,6 @@ internal sealed partial class MainForm : Form
         for (int i = 0; i < _coSlotCount && i < off.Count; i++) SetCell(i, off[i]);
         uint fmax = RyzenSmu.ReadFMax();
         if (fmax > 0) _fmaxBox.Value = Math.Clamp(fmax, (uint)_fmaxBox.Minimum, (uint)_fmaxBox.Maximum);
-        Log.Write("已从 CPU 刷新 Curve Optimizer / FMax");
     }
 
     private void OnCoSave()
@@ -1774,7 +1766,6 @@ internal sealed partial class MainForm : Form
         {
             if (_csState.ReadBroken) { _csState.ReadBroken = false; _csState.Save(); }
             _csTitleLabel.Text = "Curve Shaper";
-            Log.Write("已从 CPU 刷新 Curve Shaper");
         }
 
         for (int t = 0; t < 5; t++)
@@ -2156,14 +2147,13 @@ internal sealed partial class MainForm : Form
             var preRecovery = new List<int>(offsets);
             if (manualTakeover)
             {
-                Log.Write($"手动应用负压: [{string.Join(", ", offsets)}]", "WARN");
+                Log.WriteCo("沿用手动应用的负压：", offsets, level: "WARN");
             }
             else
             {
                 for (int i = 0; i < offsets.Count; i++)
                     if (!RyzenSmu.IsSlotDisabled(i)) offsets[i] += Config.StepOnError;
-                Log.Write($"崩溃前负压: [{string.Join(", ", preRecovery)}]", "WARN");
-                Log.Write($"恢复：所有物理核心负压 +{Config.StepOnError} → [{string.Join(", ", offsets)}]");
+                Log.WriteCo($"死机恢复，所有核心负压 +{Config.StepOnError}：", offsets, preRecovery, "WARN");
             }
 
             if (!Tuning.Apply(offsets, _testMode, seqResumePhase, "crash-recovery"))
@@ -2350,12 +2340,12 @@ internal sealed partial class MainForm : Form
             return passOk;
         }
 
-        // 非用户停止却没跑完：不能当作测试完成输出最终结果
+        // An incomplete run must not produce final results unless the user stopped it.
         if (!allPassed && !_stopRequested)
         {
-            Log.Write($"测试未完成，未生成最终结果。当前负压: [{string.Join(", ", offsets)}]", "WARN");
+            Log.WriteCo("测试未完成，未生成最终结果。当前负压：", offsets, level: "WARN");
             Workspace.ClearState();
-            Workspace.ClearInProgress();   // 未发生死机，保留脏标记会让下次开测再叠加一次回退
+            Workspace.ClearInProgress(); // Clear the marker to avoid a false backoff next run.
             var partialSnapshot = new List<int>(offsets);
             Ui(() => _offsetsLabel.Text = $"当前负压: [{string.Join(", ", partialSnapshot)}]");
             return false;
@@ -2613,29 +2603,7 @@ internal sealed partial class MainForm : Form
         _logBoxPbo.Clear();
     }
 
-    /// <summary>手动导出当前日志到文件；日志不自动落盘，仅点此按钮时写出。</summary>
-    private void SaveLog()
-    {
-        using var dlg = new SaveFileDialog
-        {
-            Title = "保存日志",
-            Filter = "文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*",
-            FileName = $"undervolt_log_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
-            InitialDirectory = Workspace.LogsDir,
-        };
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        try
-        {
-            File.WriteAllText(dlg.FileName, _logBox.Text, Encoding.UTF8);
-            SetStatus("日志已保存：" + dlg.FileName, Theme.Success);
-        }
-        catch (Exception ex)
-        {
-            SetStatus("保存日志失败：" + ex.Message, Theme.Warn);
-        }
-    }
-
-    /// <summary>安全地把动作切回 UI 线程执行。</summary>
+    /// <summary>Dispatches an action to the UI thread when the window is available.</summary>
     private void Ui(Action action)
     {
         try

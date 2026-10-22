@@ -5,29 +5,76 @@ using System.Text.Json.Serialization;
 
 namespace RyzenPboStudio;
 
-/// <summary>用户可调参数。</summary>
+/// <summary>User-adjustable tuning settings.</summary>
 internal static class Config
 {
-    public const int DefaultDuration = 120; // 每轮测试时间（秒）
-    public const int DefaultVt3 = 20;       // VT3 测试轮数
-    public const int DefaultBkt = 10;       // BKT 测试轮数
-    public const int DefaultSvt = 10;       // SVT 测试轮数
-    public const int StepOnError = 2;       // 每次报错后负压增加的步长
+    public const int DefaultDuration = 120;
+    public const int DefaultVt3 = 20;
+    public const int DefaultBkt = 10;
+    public const int DefaultSvt = 10;
+    public const int StepOnError = 2; // CO backoff per reported error.
 }
 
-/// <summary>日志：仅输出到界面（事件）；落盘需用户在界面点「保存日志」手动导出。</summary>
+/// <summary>Writes each session's log to a separate file and streams lines to the UI.</summary>
 internal static class Log
 {
+    private static readonly object FileLock = new();
+    private static readonly string RunFile = Path.Combine(Workspace.LogsDir,
+        $"run_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{Environment.ProcessId}.log");
+    private static StreamWriter? _writer;
+    private static bool _writeFailureReported;
+
     public static event Action<string>? OnLine;
 
     public static void Write(string msg, string level = "INFO")
     {
         string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {msg}";
-        OnLine?.Invoke(line);
+        lock (FileLock)
+        {
+            try
+            {
+                if (_writer == null)
+                {
+                    Directory.CreateDirectory(Workspace.LogsDir);
+                    _writer = new StreamWriter(
+                        new FileStream(RunFile, FileMode.CreateNew, FileAccess.Write, FileShare.Read),
+                        new UTF8Encoding(false)) { AutoFlush = true };
+                }
+                _writer.WriteLine(line);
+            }
+            catch (Exception e)
+            {
+                if (!_writeFailureReported)
+                {
+                    _writeFailureReported = true;
+                    OnLine?.Invoke($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [WARN] 保存运行日志失败: {e.Message}");
+                }
+            }
+            OnLine?.Invoke(line);
+        }
+    }
+
+    /// <summary>
+    /// Per-core CO as a title line plus one aligned line per core; fused-off slots are skipped. With
+    /// <paramref name="before"/> only the changed cores are listed as "Core n  a → b".
+    /// </summary>
+    public static void WriteCo(string title, IReadOnlyList<int> co, IReadOnlyList<int>? before = null, string level = "INFO")
+    {
+        var slots = Enumerable.Range(0, co.Count)
+            .Where(i => !RyzenSmu.IsSlotDisabled(i) && (before == null || i >= before.Count || before[i] != co[i]))
+            .ToList();
+        if (before != null && slots.Count == 0)
+        {
+            Write($"{title}无变化", level);
+            return;
+        }
+        Write(title, level);
+        foreach (int i in slots)
+            Write(before != null && i < before.Count ? $"Core {i,-3} {before[i],3} → {co[i],3}" : $"Core {i,-3} {co[i],3}", level);
     }
 }
 
-/// <summary>持久化的测试状态。JSON 字段名是跨版本互读的契约，改名会让旧状态文件失效。</summary>
+/// <summary>Persisted test state; JSON property names must remain compatible across versions.</summary>
 internal sealed class TestState
 {
     [JsonPropertyName("offsets")] public List<int> Offsets { get; set; } = new();

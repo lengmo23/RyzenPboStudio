@@ -121,7 +121,7 @@ internal sealed partial class MainForm
         }
 
         bool okCo = Tuning.Apply(profile.Offsets, "BOOT", null, "boot-apply");
-        Log.Write($"开机自动应用 CO: [{string.Join(", ", profile.Offsets)}]" + (okCo ? "" : "（写入异常，详见上方）"));
+        Log.WriteCo(okCo ? "开机自动应用 CO：" : "开机自动应用 CO 写入失败：", profile.Offsets, level: okCo ? "INFO" : "ERROR");
         bool okCs = true;
         if (csGrid != null)
         {
