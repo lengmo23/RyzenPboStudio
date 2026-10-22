@@ -282,6 +282,16 @@ internal sealed partial class MainForm : Form
         coCs.Controls.Add(coCard, 0, 0);
         coCs.Controls.Add(csCard, 1, 0);
 
+        var footer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = Theme.Bg,
+            Margin = new Padding(0),
+        };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var credit = new Label
         {
             Text = "Curve Optimizer / Curve Shaper 功能实现源码来自开源项目 ZenStates-Core / SMUDebugTool",
@@ -292,13 +302,17 @@ internal sealed partial class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(2, 0, 0, 0),
         };
+        var boot = BuildBootApplyCheckBox();
+        boot.Margin = new Padding(6, 2, 0, 2);
+        footer.Controls.Add(credit, 0, 0);
+        footer.Controls.Add(boot, 1, 0);
         left.Controls.Add(coCs, 0, 0);
         left.Controls.Add(BuildParamBar(), 0, 1);
-        left.Controls.Add(credit, 0, 2);
+        left.Controls.Add(footer, 0, 2);
 
-        // 下边距等于开源声明行高，LOG 底边与参数条底边齐平
         var logCard = BuildLogCard(_logBoxPbo);
         logCard.Margin = new Padding(6, 0, 0, FooterH);
+        logCard.Padding = new Padding(16, 8, 14, 12);
 
         page.Controls.Add(left, 0, 0);
         page.Controls.Add(logCard, 1, 0);
@@ -1389,15 +1403,10 @@ internal sealed partial class MainForm : Form
         flow.Controls.Add(Btn("Refresh", OnCoRefresh));
         flow.Controls.Add(Btn("Save", OnCoSave));
         flow.Controls.Add(Btn("Load", OnCoLoad));
-        var boot = BuildBootApplyButton();
-        boot.Size = new Size(96, 32);
-        boot.Margin = new Padding(0, 16, 0, 0);   // 与 Apply~Load 拉开，表明是独立开关
-        flow.Controls.Add(boot);
         return flow;
     }
 
-    /// <summary>PBO 参数卡片（CS 右侧）：FMax / PPT / EDC / TDC 竖排 + 一键 Apply（写 SMU 限制），底部为开机自动应用 CO/CS。</summary>
-    /// <summary>CO | CS 下方的参数条：FMax / PPT / EDC / TDC / Scalar + 一键 Apply（写 SMU 限制）。</summary>
+    /// <summary>Builds the PBO limit controls and their shared Apply action.</summary>
     private Control BuildParamBar()
     {
         var card = NewCard();
