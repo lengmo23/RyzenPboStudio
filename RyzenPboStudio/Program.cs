@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace RyzenPboStudio;
 
 internal static class Program
@@ -49,6 +51,16 @@ internal static class Program
                     "AMD Ryzen PBO Studio 已在运行。",
                     "提示");
             return;
+        }
+
+        try
+        {
+            using var current = Process.GetCurrentProcess();
+            current.PriorityClass = ProcessPriorityClass.AboveNormal;
+        }
+        catch (Exception e)
+        {
+            Log.Write($"设置进程优先级失败: {e.Message}", "WARN");
         }
 
         try
