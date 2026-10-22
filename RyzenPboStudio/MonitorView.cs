@@ -525,6 +525,8 @@ internal sealed class MonitorView : UserControl
             // Latched once per round so a round never mixes core-bound and PM-table-only readings
             bool q = quiet;
             if (q) quietAck = true;
+            // Avoid pinned counter reads during Single Core Boost or when PM Table frequency is available.
+            bool readCounters = !q && ptLayout is not { PerCoreFreqIdx: >= 0 };
 
             int lp = n * tpc;
             var startA = new ulong[lp]; var startM = new ulong[lp]; var startT = new ulong[lp];
@@ -533,10 +535,10 @@ internal sealed class MonitorView : UserControl
             var maxVolt = new double[n];
             var psSnap = new ulong[n];
             float[]? ptSnap = null;
-            double maxCpuVid = 0, maxCpuTel = 0;   // 全局 VDDCR_CPU：VID 窗口峰值 + 同帧配对的实测电压
+            double maxCpuVid = 0, maxCpuTel = 0; // Peak VID paired with TEL from the same frame.
 
-            // 窗口起点：各核每个 SMT 线程的 APERF / MPERF / TSC 累计计数（静默模式不读，计数留 0）
-            if (!q)
+            // Capture each SMT thread's counters at the start of the window.
+            if (readCounters)
             lock (RyzenSmu.IoLock)
             {
                 for (int i = 0; i < n; i++)
@@ -579,19 +581,19 @@ internal sealed class MonitorView : UserControl
                                 maxCpuTel = tbl[lay.CpuTelIdx];
                             }
                         }
-                        ptSnap = (float[])tbl.Clone();   // 供 TEL 校准/本地读取（lock 外使用）
+                        ptSnap = (float[])tbl.Clone(); // Snapshot for TEL calibration outside the lock.
                     }
                 }
                 Thread.Sleep(40);
-            } while (swWin.ElapsedMilliseconds < 500 && running);   // 贴近 HWiNFO ~500ms 刷新节奏
+            } while (swWin.ElapsedMilliseconds < 500 && running);
 
             if (!running) break;
 
-            // 窗口终点：各核每个 SMT 线程的 APERF / MPERF / TSC（静默模式不读）
-            if (!q)
+            // Capture the matching counters at the end of the window.
+            if (readCounters)
             lock (RyzenSmu.IoLock)
             {
-                // PM Table 能给出每核频率时就不读这个 MSR：读 per-core MSR 必须绑核，绑核会唤醒空闲核
+                // Skip pinned per-core MSR reads when PM Table provides frequency; pinning wakes idle cores.
                 bool needMsrFreq = ptLayout is not { PerCoreFreqIdx: >= 0 };
                 for (int i = 0; i < n; i++)
                 {
@@ -665,16 +667,17 @@ internal sealed class MonitorView : UserControl
                     if (dM > bestM) { bestM = dM; bestA = dA; }
                 }
 
-                effFreq[i] = bestEff;
+                // Unknown counter values display as "-"; a PM Table zero is a valid idle reading.
+                effFreq[i] = bestEff > 0 ? bestEff : double.NaN;
                 occ[i] = bestOcc;
 
-                // FREQ 忙时频率(≈ HWiNFO Core Clock)：ΔAPERF/ΔMPERF × TSC频率（活动时平均实频）。
-                // MPERF 或频率基准不可用时回退有效频率，避免显示为空。
-                busyFreq[i] = (bestM > 0 && tscFreqMHz > 0) ? (double)bestA / bestM * tscFreqMHz : effFreq[i];
+                // FREQ = delta APERF / delta MPERF * TSC frequency while active.
+                // Fall back to EFFREQ if MPERF or the reference frequency is unavailable.
+                busyFreq[i] = (bestM > 0 && tscFreqMHz > 0) ? (double)bestA / bestM * tscFreqMHz : bestEff;
             }
 
-            // PM Table 不可用时的回退：HW P-state 档位快照。Zen5(家族1Ah+) 频率 = fid[11:0]×5MHz，
-            // 更早代际用 fid/dfs 算倍频×100。读它要绑核、会唤醒空闲核把频率拉到满档，只能当兜底。
+            // HW P-state is the last fallback: Zen5 uses fid * 5 MHz, earlier CPUs use fid/dfs * 100 MHz.
+            // Its pinned read wakes idle cores, so it must not be the primary source.
             double bclkCorr = bclk > 0 ? bclk / 100.0 : 1.0;
             for (int i = 0; i < n; i++)
             {
@@ -701,8 +704,8 @@ internal sealed class MonitorView : UserControl
                     if (mhz > 0) busyFreq[i] = mhz;
                 }
 
-                // 静默模式没有 APERF/MPERF：EFFREQ 取紧随其后的 CORE_FREQEFF 段，占用取再后一段 CORE_C0%
-                if (q && pts.Length > ptl.PerCoreFreqIdx + 3 * n)
+                // Without counters, read EFFREQ and C0 activity from the adjacent PM Table segments.
+                if (!readCounters && pts.Length > ptl.PerCoreFreqIdx + 3 * n)
                     for (int i = 0; i < n; i++)
                     {
                         effFreq[i] = pts[ptl.PerCoreFreqIdx + n + i] * 1000.0 * bclkCorr;
@@ -1032,11 +1035,10 @@ internal sealed class CcdView
                 continue;
             }
             dgv.Rows[RowCo].Cells[col].Value   = co[gc].ToString();
-            dgv.Rows[RowEff].Cells[col].Value  = eff[gc]  > 0 ? eff[gc].ToString("F0")  : "-";
+            dgv.Rows[RowEff].Cells[col].Value  = double.IsNaN(eff[gc]) ? "-" : eff[gc].ToString("F0"); // NaN means unavailable; zero means asleep.
             dgv.Rows[RowFreq].Cells[col].Value = freq[gc] > 0 ? freq[gc].ToString("F0") : "-";
             dgv.Rows[RowVid].Cells[col].Value  = volt[gc] > 0 ? volt[gc].ToString("F3") : "-";
 
-            // 该核有负载即把列头染红，占用越高越红（全核满载=整片红，单核负载=只有那一列红）
             var hc = dgv.Columns[col].HeaderCell;
             Color lc = LoadHeaderColor(gc < occ.Length ? occ[gc] : 0);
             if (hc.Style.BackColor != lc) hc.Style.BackColor = lc;
