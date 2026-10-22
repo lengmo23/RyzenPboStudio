@@ -23,10 +23,10 @@ internal static class FvAnalysis
         {
             var g2 = g.ToList();
             if (g2.Count < 2) continue;
-            double mf = g2.Average(r => r.Freq), mv = g2.Average(r => r.Vid);
+            double mf = g2.Average(r => r.Freq), mv = g2.Average(r => r.AlignV);
             foreach (var r in g2)
             {
-                double df = r.Freq - mf, dv = r.Vid - mv;
+                double df = r.Freq - mf, dv = r.AlignV - mv;
                 sxy += df * dv;
                 sxx += df * df;
             }
@@ -38,7 +38,7 @@ internal static class FvAnalysis
     }
 
     /// <summary>Voltage of <paramref name="r"/> above <paramref name="target"/> at the target's frequency (V).
-    /// Equals the residual difference of the two cores; with equal frequencies it is just ΔVID.</summary>
+    /// Equals the residual difference of the two cores; with equal frequencies it is just the voltage difference.</summary>
     public static double DeltaV(ScbRow r, ScbRow target, double slope) =>
-        (r.Vid - target.Vid) - slope * (r.Freq - target.Freq);
+        (r.AlignV - target.AlignV) - slope * (r.Freq - target.Freq);
 }

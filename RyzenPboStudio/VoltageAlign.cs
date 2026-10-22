@@ -3,19 +3,30 @@ using ZenStates.Core;
 
 namespace RyzenPboStudio;
 
-internal enum AlignTarget { Gold, Silver }
-
-/// <summary>Automatic voltage alignment: with all CO at 0 the 金核 / 银核 of each CCD should need the least voltage,
-/// so every other core of that CCD gets negative CO until its Single Core Boost voltage, normalised to the target's
-/// frequency, is within the noise floor of the target. Each CCD is aligned on its own. CO only moves negative, the
-/// target stays 0, and every write goes through Tuning.Apply.</summary>
+/// <summary>Aligns each CCD's cores to its highest-ranked, lowest-voltage core at a common frequency.
+/// The target stays at CO 0 during voltage alignment; frequency probing then shifts the CCD together.
+/// All CO writes go through Tuning.Apply.</summary>
 internal static class VoltageAlign
 {
-    private const int MaxIterations = 4;
-    private const int MaxStepPerIteration = 10;   // CO counts per core per iteration
+    private const int MaxIterations = 8;
+    private const int MaxStepPerIteration = 10;   // negative CO counts per core per iteration
+    private const int OvershootBackoff = 1;       // a core overshot below the target gets this many counts back per iteration
+    private const int CoarseFrequencyStep = 4;
+    private const int FineFrequencyStep = 2;
+    private const int MaxCoarseRounds = 12;
+    private const int PlateauRounds = 2;
+    private const double PlateauGainMHz = 10;
+    private const double NearPeakMHz = 5;
+    private const int FrequencyBackoff = 2;   // final CCD-wide shift = deepest valid shift minus this
 
-    // Initial CO-to-voltage estimate. 3–5 mV per count is the usual figure for Zen3/4/5; taking the upper end makes the
-    // first step undershoot, which matters because moves are negative-only and an overshoot is never undone.
+    // Per-core frequency alignment after the plateau search
+    private const double FreqAlignTolMHz = 15;      // within this of the CCD's best core counts as aligned
+    private const int FreqAlignStep = 2;             // extra CO counts per lagging core per round
+    private const int MaxFreqAlignRounds = 4;        // so at most 8 counts beyond the CCD-wide shift
+    private const double FreqAlignMinGainMHz = 5;    // one step gaining less is kept on probation for one more step
+    private const double FreqAlignMinGain2StepMHz = 10;   // two steps gaining less: not voltage-limited, undo both
+
+    // Start at 5 mV per CO count to avoid a large voltage overshoot on the first step.
     private const double InitialK = 0.005;   // V per CO count
     private const double KMin = 0.002, KMax = 0.010;
     private const int MinSecantSpan = 2;     // a 1-count move is buried in measurement noise, keep the old k
@@ -25,9 +36,7 @@ internal static class VoltageAlign
     private const string Mode = "ALIGN", Reason = "voltage-align";
 
     private static readonly string[] ResultColumns =
-        { "CCD", "Core", "排名", "角色", "VID 全0", "ΔV 全0 (mV)", "VID 最终", "ΔV 最终 (mV)", "最终 CO", "备注" };
-
-    private static string Name(AlignTarget t) => t == AlignTarget.Gold ? "金核" : "银核";
+        { "CCD", "Core", "排名", "角色", "CoreV 全0", "ΔV 全0 (mV)", "CoreV 最终", "ΔV 最终 (mV)", "最终 CO", "备注" };
 
     /// <summary>Zen3 accepts CO down to -30, Zen4 / Zen5 down to -50.</summary>
     private static int GenerationCoMin()
@@ -41,25 +50,33 @@ internal static class VoltageAlign
         }
     }
 
-    /// <summary>Confirmation dialog with the target choice (default 金核).</summary>
-    public static bool Confirm(IWin32Window owner, out AlignTarget target)
+    /// <summary>Confirmation dialog; the target core is chosen from the all-0 measurement, not by the user.</summary>
+    public static bool Confirm(IWin32Window owner)
     {
-        target = AlignTarget.Gold;
         int cores = Enumerable.Range(0, RyzenSmu.SlotCount).Count(s => !RyzenSmu.IsSlotDisabled(s));
-        int minutes = (int)Math.Ceiling(cores * SingleCoreBoost.SecondsPerCore * (1 + MaxIterations) / 60.0);
+        int ccdCount = Math.Max(1, (int)RyzenSmu.SharedCpu.info.topology.ccds);
+        int minutes = (int)Math.Ceiling((cores * (2 + MaxIterations + MaxFreqAlignRounds) + ccdCount * 3 * (1 + MaxCoarseRounds + 3))
+                                             * SingleCoreBoost.SecondsPerCore / 60.0);
 
         var text = new StringBuilder();
-        text.Append("电压对齐将依次执行：\n\n");
-        text.Append("1. 把所有核心的 Curve Optimizer 设为 0（Curve Shaper 保持不变）；\n");
-        text.Append("2. 逐核运行单核负载（Single Core Boost），测量各核的单核电压；\n");
-        text.Append($"3. 每个 CCD 分别以所选目标核为基准，给电压偏高的核心逐步加负压并重新测量，最多 {MaxIterations} 轮。\n\n");
-        text.Append($"只会加负压，不会加正压；目标核保持 0；每轮每核最多 {MaxStepPerIteration} 档。\n");
-        text.Append($"预计最长约 {minutes} 分钟，期间请不要运行其他程序。\n\n");
-        text.Append("对齐结果会保留在 CPU 上并填入 CO 编辑器，但不会自动保存。\n");
-        text.Append("对齐出的负压没有经过稳定性验证，必须再通过压力测试；单核负载下也可能死机重启（重启后 CO 写入失效）。");
+        text.Append("电压对齐将依次执行：\n");
+        text.Append("1. 将所有核心 CO 置 0（Curve Shaper 不变）；\n");
+        text.Append("2. 运行 Single Core Boost 逐核测量频率与电压，每个 CCD 选出目标核；\n");
+        text.Append($"3. 电压对齐：电压偏高的核心逐步加负压，向目标核看齐（最多 {MaxIterations} 轮）；\n");
+        text.Append("4. 频率对齐：每个 CCD 整体加负压寻找频率上限，再单独微调频率偏低的核心。\n");
+        text.Append($"预计最长约 {minutes} 分钟。\n\n");
+
+        text.Append("【测试环境】\n");
+        text.Append("请先关闭浏览器、游戏、监控软件及其他后台程序，测试期间不要操作电脑。" +
+                    "后台负载会干扰单核测量，导致结果偏差。\n\n");
+
+        text.Append("【风险声明】\n");
+        text.Append("· 电压对齐会向 CPU 写入负压（CO），负压过深可能导致系统不稳定、蓝屏或死机重启，重启后写入的 CO 自动失效；\n");
+        text.Append("· 对齐结果仅基于单核负载测量，未经稳定性验证，保存使用前必须通过压力测试；\n");
+        text.Append("· 结果会填入 CO 编辑器，不会自动保存；\n");
+        text.Append("· 降压与超频存在硬件风险，由此造成的数据丢失或硬件损坏由用户自行承担。");
         if (Workspace.WasInterrupted())
-            text.Append("\n\n注意：存在上次压测异常中断的恢复点。对齐写入的负压会成为恢复基准，之后开始测试时将在对齐结果上 +" +
-                        $"{Config.StepOnError} 续跑。");
+            text.Append($"\n\n注意：存在上次压测中断的恢复点，之后开始测试将在对齐结果上 +{Config.StepOnError} 续跑。");
 
         using var dlg = new Form
         {
@@ -76,6 +93,7 @@ internal static class VoltageAlign
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Padding = new Padding(16),
         };
+        dlg.HandleCreated += (_, _) => DarkTitleBar.Apply(dlg.Handle);
         var body = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.TopDown,
@@ -84,19 +102,6 @@ internal static class VoltageAlign
             BackColor = Theme.Bg,
         };
         body.Controls.Add(new Label { Text = text.ToString(), AutoSize = true, MaximumSize = new Size(560, 0), Margin = new Padding(0, 0, 0, 12) });
-        body.Controls.Add(new Label { Text = "对齐目标（每个 CCD 各自选取）", AutoSize = true, ForeColor = Theme.TextLo });
-        var gold = new RadioButton { Text = "金核：CCD 内 CPPC 排名第 2", AutoSize = true, Checked = true };
-        var silver = new RadioButton { Text = "银核：CCD 内 CPPC 排名第 1", AutoSize = true };
-        body.Controls.Add(gold);
-        body.Controls.Add(silver);
-        body.Controls.Add(new Label
-        {
-            Text = "CPPC 值相同时按核号排序，靠前的为银核；CPPC 不可用时（如 5000 系未开 CPPC），改用全 0 下 VID 最低（银核）/ 次低（金核）的核。",
-            AutoSize = true,
-            ForeColor = Theme.TextLo,
-            MaximumSize = new Size(560, 0),
-            Margin = new Padding(0, 4, 0, 12),
-        });
 
         var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Anchor = AnchorStyles.Right, BackColor = Theme.Bg };
         Button Btn(string t, DialogResult r) => new()
@@ -118,16 +123,14 @@ internal static class VoltageAlign
         dlg.AcceptButton = ok;
         dlg.CancelButton = cancel;
 
-        if (dlg.ShowDialog(owner) != DialogResult.OK) return false;
-        target = silver.Checked ? AlignTarget.Silver : AlignTarget.Gold;
-        return true;
+        return dlg.ShowDialog(owner) == DialogResult.OK;
     }
 
     /// <summary>Runs the alignment. Returns the offsets last applied to the CPU (also after cancel), or null when
     /// nothing was applied.</summary>
-    public static List<int>? Run(MonitorView? monitor, AlignTarget target, int editorMin, ResultsPanel win, CancellationToken ct)
+    public static List<int>? Run(MonitorView? monitor, int editorMin, ResultsPanel win, CancellationToken ct)
     {
-        Log.Write($"电压对齐开始：目标 {Name(target)}，各 CCD 独立对齐");
+        Log.Write("电压对齐开始");
         using var scb = SingleCoreBoost.Open(monitor);
         if (scb == null) return null;
 
@@ -136,36 +139,34 @@ internal static class VoltageAlign
         var slots = Enumerable.Range(0, n).Where(scb.IsUsable).ToList();
         var ccds = slots.GroupBy(scb.CcdOf).OrderBy(g => g.Key).ToDictionary(g => g.Key, g => g.ToList());
 
+        // Zeroing is not logged; later writes log only the cores they change relative to it
         var offsets = Enumerable.Repeat(0, n).ToList();
-        if (!Apply(offsets, "全部核心 CO 置 0（基线）"))
+        if (!Tuning.Apply(offsets, Mode, null, Reason))
+        {
+            Log.Write("CO 置 0 失败", "ERROR");
             return null;
+        }
+        lastApplied = new List<int>(offsets);
 
-        var baseline = MeasurePass(scb, slots, "全0基线", win, ct);
+        var baseline = MeasurePass(scb, slots, "基准测量（CO 全 0）", win, ct);
         if (ct.IsCancellationRequested)
             return Finish(scb, offsets, baseline, baseline, new Dictionary<int, int>(), 0, coMin, new HashSet<int>(), win, true);
 
         // Slope from the all-0 pass only: once CO differs per core the cross-core fit no longer measures the F/V curve
-        double slope = FvAnalysis.Slope(baseline.Values.ToList(), out bool fallback);
-        Log.Write($"F/V 斜率 {slope * 1000:F2} mV/MHz（{(fallback ? "自算值不可信，使用默认值" : "全 0 基线组内回归")}），" +
-                  $"噪声底 {FvAnalysis.NoiseFloor * 1000:F0} mV，CO 下限 {coMin}");
+        double slope = FvAnalysis.Slope(baseline.Values.ToList(), out _);
+        if (baseline.Values.Any(r => r.Valid && r.CoreVid <= 0)) Log.Write("部分核心无每核电压，改用 VID", "WARN");
 
         var targets = new Dictionary<int, int>();
         foreach (var (ccd, cores) in ccds)
         {
-            int t = PickTarget(scb, cores, baseline, target, out string how);
+            int t = PickTarget(scb, cores, baseline, slope);
             if (t < 0 || !baseline.TryGetValue(t, out var tr) || !tr.Valid)
             {
-                Log.Write($"CCD{ccd}：找不到可用的对齐目标（{how}，或目标核测量无效），本 CCD 不调整", "WARN");
+                Log.Write($"CCD{ccd}：无可用目标核，跳过", "WARN");
                 continue;
             }
             targets[ccd] = t;
-            Log.Write($"CCD{ccd}：对齐目标 Core {t}（{how}），VID {tr.Vid:F3} V @ {tr.Freq:F0} MHz");
-
-            var lower = cores.Where(s => s != t && baseline.TryGetValue(s, out var r) && r.Valid
-                                         && FvAnalysis.DeltaV(r, tr, slope) < -FvAnalysis.NoiseFloor).ToList();
-            if (lower.Count > 0)
-                Log.Write($"CCD{ccd}：全 0 下 Core {string.Join("、", lower)} 的同频电压比目标核低 {FvAnalysis.NoiseFloor * 1000:F0} mV 以上，" +
-                          "目标核并非本 CCD 电压最低的核；这些核保持 0 不动", "WARN");
+            Log.Write($"CCD{ccd} 目标核：Core {t}，{tr.AlignV:F3} V @ {tr.Freq:F0} MHz");
         }
 
         var k = slots.ToDictionary(s => s, _ => InitialK);
@@ -181,13 +182,21 @@ internal static class VoltageAlign
             {
                 if (!latest.TryGetValue(t, out var tr) || !tr.Valid)
                 {
-                    Log.Write($"CCD{ccd}：目标核 Core {t} 本轮测量无效，本 CCD 本轮不调整", "WARN");
+                    Log.Write($"CCD{ccd}：目标核 Core {t} 测量无效，本轮跳过", "WARN");
                     continue;
                 }
                 foreach (int s in ccds[ccd])
                 {
                     if (s == t || !latest.TryGetValue(s, out var r) || !r.Valid) continue;
                     double dv = FvAnalysis.DeltaV(r, tr, slope);
+                    // Overshot below the target: back off one count per round, never above 0
+                    if (dv < -FvAnalysis.NoiseFloor && offsets[s] < 0)
+                    {
+                        next[s] = offsets[s] + OvershootBackoff;
+                        clamped.Remove(s);
+                        usedDv[s] = dv;
+                        continue;
+                    }
                     if (dv <= FvAnalysis.NoiseFloor) continue;
                     if (offsets[s] <= coMin) { clamped.Add(s); continue; }
 
@@ -200,17 +209,14 @@ internal static class VoltageAlign
             if (usedDv.Count == 0) break;
 
             iterations = iter;
-            Log.Write($"对齐第 {iter} 轮：" + string.Join("，", usedDv.Keys.OrderBy(s => s).Select(s =>
-                $"Core {s} {offsets[s]}→{next[s]}（ΔV {usedDv[s] * 1000:F1} mV，k {k[s] * 1000:F1} mV/档）")));
-
             var before = offsets;
+            if (!Apply(next, $"对齐第 {iter} 轮"))
+                return null;
             offsets = next;
-            if (!Apply(offsets, $"第 {iter} 轮"))
-                break;
 
             // Re-measure every core of the touched CCDs, target included, so drift between passes cancels out
             var touched = usedDv.Keys.Select(scb.CcdOf).Distinct().OrderBy(c => c).SelectMany(c => ccds[c]).ToList();
-            var pass = MeasurePass(scb, touched, $"对齐{iter}", win, ct);
+            var pass = MeasurePass(scb, touched, $"电压对齐 第 {iter} 轮", win, ct);
             foreach (var (s, r) in pass) latest[s] = r;
             if (ct.IsCancellationRequested) break;
 
@@ -227,57 +233,338 @@ internal static class VoltageAlign
             }
         }
 
-        return Finish(scb, offsets, baseline, latest, targets, slope, coMin, clamped, win, ct.IsCancellationRequested, iterations);
+        var frequencyNotes = new List<string>();
+        if (!ct.IsCancellationRequested && !ProbeFrequencyPlatforms(scb, ccds, offsets, latest, coMin, win, ct, frequencyNotes))
+            return null;
+
+        return Finish(scb, offsets, baseline, latest, targets, slope, coMin, clamped, win,
+                      ct.IsCancellationRequested, iterations, frequencyNotes);
     }
+
+    /// <summary>Finds each CCD's frequency plateau with a short representative-core probe, then checks every core.</summary>
+    private static bool ProbeFrequencyPlatforms(SingleCoreBoost scb, Dictionary<int, List<int>> ccds,
+                                                 List<int> offsets, Dictionary<int, ScbRow> latest, int coMin,
+                                                 ResultsPanel win, CancellationToken ct, List<string> notes)
+    {
+        uint fmax = RyzenSmu.ReadFMax();
+        Log.Write("频率搜索开始");
+
+        foreach (var (ccd, cores) in ccds)
+        {
+            if (ct.IsCancellationRequested) break;
+            var probeCores = cores.Where(s => scb.CcdRank(s) is 1 or 2).OrderBy(s => scb.CcdRank(s)).ToList();
+            foreach (int s in cores.OrderByDescending(s => latest.TryGetValue(s, out var r) && r.Valid ? r.Freq : 0))
+            {
+                if (probeCores.Count >= 3) break;
+                if (!probeCores.Contains(s)) probeCores.Add(s);
+            }
+            var baseline = MeasurePass(scb, probeCores, $"CCD{ccd} 频率搜索 起点", win, ct);
+            if (ct.IsCancellationRequested) break;
+            if (baseline.Count != probeCores.Count || baseline.Values.Any(r => !r.Valid || r.Errors > 0))
+            {
+                string skipped = $"CCD{ccd}：起点测量无效，跳过频率搜索";
+                Log.Write(skipped, "WARN");
+                notes.Add(skipped);
+                continue;
+            }
+
+            var startingCo = cores.Select(s => offsets[s]).ToArray();
+            int maxShift = cores.Min(s => offsets[s] - coMin);
+            int currentShift = 0;
+            bool SetShift(int shift, string what)
+            {
+                if (shift == currentShift) return true;
+                var next = new List<int>(offsets);
+                for (int i = 0; i < cores.Count; i++) next[cores[i]] = startingCo[i] - shift;
+                if (!Apply(next, what)) return false;
+                for (int i = 0; i < offsets.Count; i++) offsets[i] = next[i];
+                currentShift = shift;
+                return true;
+            }
+
+            var observed = new Dictionary<int, double> { [0] = baseline.Values.Max(r => r.Freq) };
+            double peakMHz = observed[0];
+            int lastValidShift = 0;
+            int noGain = 0;
+            string stopReason = "已达 CO 下限";
+            Log.Write($"CCD{ccd}：采样核心 Core {string.Join("、", probeCores)}，起点 {peakMHz:F0} MHz");
+
+            for (int round = 1; round <= MaxCoarseRounds && !ct.IsCancellationRequested; round++)
+            {
+                if (fmax > 0 && peakMHz >= (double)fmax - 25)
+                {
+                    stopReason = "已达 FMax";
+                    break;
+                }
+                int shift = Math.Min(maxShift, currentShift + CoarseFrequencyStep);
+                if (shift == currentShift) break;
+                if (!SetShift(shift, $"CCD{ccd} 整体 -{shift} 档")) return false;
+
+                var pass = MeasurePass(scb, probeCores, $"CCD{ccd} 频率搜索 第 {round} 轮", win, ct);
+                if (ct.IsCancellationRequested) break;
+                if (pass.Count != probeCores.Count || pass.Values.Any(r => !r.Valid || r.Errors > 0))
+                {
+                    stopReason = "测量无效";
+                    Log.Write($"CCD{ccd}：测量无效，停止搜索", "WARN");
+                    break;
+                }
+
+                double mhz = pass.Values.Max(r => r.Freq);
+                observed[shift] = mhz;
+                lastValidShift = shift;
+                Log.Write($"CCD{ccd}：整体 -{shift} 档，{mhz:F0} MHz");
+                noGain = mhz >= peakMHz + PlateauGainMHz ? 0 : noGain + 1;
+                peakMHz = Math.Max(peakMHz, mhz);
+                if (noGain >= PlateauRounds)
+                {
+                    stopReason = "频率已到顶";
+                    break;
+                }
+                if (round == MaxCoarseRounds) stopReason = "已达轮数上限";
+            }
+
+            if (ct.IsCancellationRequested) break;
+            int center = observed.Where(p => p.Value >= peakMHz - NearPeakMHz).Min(p => p.Key);
+            int selectionLimit = lastValidShift;
+            for (int shift = Math.Max(0, center - FineFrequencyStep);
+                 shift <= Math.Min(lastValidShift, center + FineFrequencyStep) && !ct.IsCancellationRequested;
+                 shift += FineFrequencyStep)
+            {
+                if (observed.ContainsKey(shift)) continue;
+                if (!SetShift(shift, $"CCD{ccd} 整体 -{shift} 档")) return false;
+                var pass = MeasurePass(scb, probeCores, $"CCD{ccd} 频率细调 -{shift} 档", win, ct);
+                if (ct.IsCancellationRequested) break;
+                if (pass.Count != probeCores.Count || pass.Values.Any(r => !r.Valid || r.Errors > 0))
+                {
+                    stopReason = "测量无效";
+                    selectionLimit = Math.Min(selectionLimit, Math.Max(0, shift - FineFrequencyStep));
+                    Log.Write($"CCD{ccd}：测量无效，停止搜索", "WARN");
+                    break;
+                }
+                observed[shift] = pass.Values.Max(r => r.Freq);
+                Log.Write($"CCD{ccd}：整体 -{shift} 档，{observed[shift]:F0} MHz");
+            }
+
+            if (ct.IsCancellationRequested) break;
+            // Deepest shift that measured valid, less a small margin: past the frequency plateau extra CO still
+            // lowers voltage, so the search keeps most of it instead of going back to where the plateau began
+            int deepestValid = observed.Keys.Where(s => s <= selectionLimit).Max();
+            int chosenShift = Math.Max(0, deepestValid - FrequencyBackoff);
+            if (!SetShift(chosenShift, $"CCD{ccd} 选定整体 -{chosenShift} 档")) return false;
+            var final = MeasurePass(scb, cores, $"CCD{ccd} 全核复测", win, ct);
+            if (ct.IsCancellationRequested) break;
+            if (final.Count != cores.Count || final.Values.Any(r => !r.Valid || r.Errors > 0))
+            {
+                if (!SetShift(0, $"CCD{ccd} 恢复电压对齐结果")) return false;
+                string skipped = $"CCD{ccd}：全核复测无效，已恢复电压对齐结果";
+                Log.Write(skipped, "WARN");
+                notes.Add(skipped);
+                continue;
+            }
+            foreach (var (s, row) in final) latest[s] = row;
+            string note = $"CCD{ccd}：选定整体 -{chosenShift} 档（{stopReason}），最高 {final.Values.Max(r => r.Freq):F0} MHz";
+            Log.Write(note);
+            notes.Add(note);
+
+            if (!AlignCcdFrequencies(scb, ccd, cores, offsets, latest, coMin, win, ct, notes)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Approximate frequency alignment inside one CCD: every core more than FreqAlignTolMHz below the CCD's best core
+    /// gets FreqAlignStep more negative CO per round and only those cores are re-measured. One step gaining less than
+    /// FreqAlignMinGainMHz is kept on probation, since a single short measurement is noisy near the plateau; if the
+    /// next step still leaves the two-step gain under FreqAlignMinGain2StepMHz, both steps are undone and the core stops.
+    /// An invalid / erroneous measurement, the CO floor or running out of rounds also undo an unconfirmed step.
+    /// Returns false only when a CO write fails.
+    /// </summary>
+    private static bool AlignCcdFrequencies(SingleCoreBoost scb, int ccd, List<int> cores, List<int> offsets,
+                                            Dictionary<int, ScbRow> latest, int coMin, ResultsPanel win,
+                                            CancellationToken ct, List<string> notes)
+    {
+        var valid = cores.Where(s => latest.TryGetValue(s, out var r) && r.Valid).ToList();
+        if (valid.Count < 2) return true;
+        double targetMHz = valid.Max(s => latest[s].Freq);
+        var startCo = cores.ToDictionary(s => s, s => offsets[s]);
+        var startMHz = valid.ToDictionary(s => s, s => latest[s].Freq);
+        var active = valid.Where(s => latest[s].Freq < targetMHz - FreqAlignTolMHz).ToHashSet();
+        if (active.Count == 0)
+        {
+            Log.Write($"CCD{ccd}：各核频率均已达标");
+            return true;
+        }
+        Log.Write($"CCD{ccd} 逐核频率对齐：目标 {targetMHz:F0} MHz，Core {string.Join("、", active.OrderBy(s => s))}");
+
+        // Core → CO and frequency before an unconfirmed weak step; the step is kept until the next one decides
+        var pending = new Dictionary<int, (int Co, double MHz)>();
+        var revertTo = new Dictionary<int, int>();
+
+        bool ApplyReverts(string what)
+        {
+            if (revertTo.Count == 0) return true;
+            var back = new List<int>(offsets);
+            foreach (var (s, co) in revertTo) back[s] = co;
+            revertTo.Clear();
+            if (!Apply(back, what)) return false;
+            for (int i = 0; i < offsets.Count; i++) offsets[i] = back[i];
+            return true;
+        }
+
+        for (int round = 1; round <= MaxFreqAlignRounds && active.Count > 0 && !ct.IsCancellationRequested; round++)
+        {
+            foreach (int s in active.Where(s => offsets[s] - FreqAlignStep < coMin).ToList())
+            {
+                if (pending.Remove(s, out var p))
+                {
+                    revertTo[s] = p.Co;
+                    Log.Write($"CCD{ccd} Core {s}：已达 CO 下限，回退至 {p.Co}", "WARN");
+                }
+                else Log.Write($"CCD{ccd} Core {s}：已达 CO 下限", "WARN");
+                active.Remove(s);
+            }
+            if (!ApplyReverts($"CCD{ccd} 回退")) return false;
+            if (active.Count == 0) break;
+
+            var stepped = active.OrderBy(s => s).ToList();
+            var next = new List<int>(offsets);
+            foreach (int s in stepped) next[s] = offsets[s] - FreqAlignStep;
+            if (!Apply(next, $"CCD{ccd} 频率对齐第 {round} 轮")) return false;
+            for (int i = 0; i < offsets.Count; i++) offsets[i] = next[i];
+
+            var pass = MeasurePass(scb, stepped, $"CCD{ccd} 逐核频率对齐 第 {round} 轮", win, ct);
+            if (ct.IsCancellationRequested) break;
+
+            foreach (int s in stepped)
+            {
+                bool hasPending = pending.TryGetValue(s, out var p);
+                if (!pass.TryGetValue(s, out var r) || !r.Valid || r.Errors > 0)
+                {
+                    // Back to the last step that measured valid and actually helped
+                    int back = hasPending ? p.Co : offsets[s] + FreqAlignStep;
+                    Log.Write($"CCD{ccd} Core {s}：测量无效，回退至 {back}", "WARN");
+                    revertTo[s] = back;
+                    pending.Remove(s);
+                    active.Remove(s);
+                }
+                else if (r.Freq >= targetMHz - FreqAlignTolMHz)
+                {
+                    latest[s] = r;
+                    pending.Remove(s);
+                    active.Remove(s);
+                    Log.Write($"CCD{ccd} Core {s}：{offsets[s]} 档，{r.Freq:F0} MHz，已达标");
+                }
+                else if (hasPending)
+                {
+                    double gain2 = r.Freq - p.MHz;
+                    pending.Remove(s);
+                    if (gain2 < FreqAlignMinGain2StepMHz)
+                    {
+                        Log.Write($"CCD{ccd} Core {s}：频率无提升，回退至 {p.Co}");
+                        revertTo[s] = p.Co;
+                        active.Remove(s);
+                    }
+                    else
+                    {
+                        latest[s] = r;
+                        Log.Write($"CCD{ccd} Core {s}：{offsets[s]} 档，{r.Freq:F0} MHz");
+                    }
+                }
+                else if (r.Freq - latest[s].Freq < FreqAlignMinGainMHz)
+                {
+                    pending[s] = (offsets[s] + FreqAlignStep, latest[s].Freq);
+                    Log.Write($"CCD{ccd} Core {s}：{offsets[s]} 档，{r.Freq:F0} MHz");
+                }
+                else latest[s] = r;
+            }
+            if (!ApplyReverts($"CCD{ccd} 回退")) return false;
+        }
+
+        // Rounds ran out before a weak step was confirmed: do not leave unconfirmed negative CO behind
+        if (!ct.IsCancellationRequested && pending.Count > 0)
+        {
+            foreach (var (s, p) in pending)
+            {
+                revertTo[s] = p.Co;
+                Log.Write($"CCD{ccd} Core {s}：回退至 {p.Co}");
+            }
+            pending.Clear();
+            if (!ApplyReverts($"CCD{ccd} 回退")) return false;
+        }
+
+        var changed = cores.Where(s => offsets[s] != startCo[s]).ToList();
+        var lines = new List<string> { $"CCD{ccd} 逐核频率对齐：" + (changed.Count == 0 ? "无调整" : "") };
+        lines.AddRange(changed.Select(s =>
+            $"Core {s,-3} {startCo[s],3} → {offsets[s],3}   {startMHz[s]:F0} → {latest[s].Freq:F0} MHz"));
+        var lagging = valid.Where(s => latest[s].Freq < targetMHz - FreqAlignTolMHz).OrderBy(s => s).ToList();
+        if (lagging.Count > 0) lines.Add($"未达标：Core {string.Join("、", lagging)}");
+        foreach (string line in lines) Log.Write(line);
+        notes.Add(string.Join("\n", lines));
+        return true;
+    }
+
+    // Last CO written in this run, so each write logs only the cores it changed
+    private static List<int>? lastApplied;
 
     private static bool Apply(List<int> offsets, string what)
     {
         bool ok = Tuning.Apply(offsets, Mode, null, Reason);
-        Log.Write($"电压对齐写入 CO（{what}）: [{string.Join(", ", offsets)}]" + (ok ? "" : "（写入异常，CPU 上的实际 CO 请点 Refresh 核对）"),
-                  ok ? "INFO" : "ERROR");
+        if (ok) Log.WriteCo($"{what}：", offsets, lastApplied);
+        else Log.Write($"{what}：写入失败", "ERROR");
+        lastApplied = ok ? new List<int>(offsets) : null;
         return ok;
     }
 
     private static Dictionary<int, ScbRow> MeasurePass(SingleCoreBoost scb, List<int> slots, string tag, ResultsPanel win, CancellationToken ct)
     {
         win.SetTable(SingleCoreBoost.Columns);
+        string title = $"Single Core Boost · {tag}";
+        Log.Write($"—— {title} ——");   // one title per pass; the core rows below carry no tag
         int done = 0;
         var rows = scb.Measure(slots,
-            s => win.SetStatus($"{tag}：测量 Core {s}（{done + 1}/{slots.Count}）"),
+            s => win.SetStatus($"{title}：Core {s}（{done + 1}/{slots.Count}）"),
             r =>
             {
                 done++;
                 win.AddRow(scb.Cells(r), SingleCoreBoost.RowColor(r));
-                scb.LogRow(tag, r);
+                scb.LogRow(r);
             }, ct);
         return rows.ToDictionary(r => r.Slot);
     }
 
-    /// <summary>Target by CPPC rank inside the CCD; without CPPC, the lowest / second-lowest VID measured at all-0.</summary>
-    private static int PickTarget(SingleCoreBoost scb, List<int> cores, Dictionary<int, ScbRow> baseline, AlignTarget target, out string how)
+    /// <summary>
+    /// Picks the highest-CPPC core needing the least voltage at a common frequency.
+    /// Without a usable CPPC ranking, considers every valid core; ties within the noise floor favor higher frequency.
+    /// </summary>
+    private static int PickTarget(SingleCoreBoost scb, List<int> cores, Dictionary<int, ScbRow> baseline, double slope)
     {
-        int want = target == AlignTarget.Gold ? 2 : 1;   // 银核 = rank 1, 金核 = rank 2, as in the monitor
-        int byRank = cores.FirstOrDefault(s => scb.CcdRank(s) == want, -1);
-        if (byRank >= 0)
-        {
-            how = $"{Name(target)}，CPPC 排名第 {want}";
-            return byRank;
-        }
-        var byVid = cores.Where(s => baseline.TryGetValue(s, out var r) && r.Valid)
-                         .OrderBy(s => baseline[s].Vid).ThenBy(s => s).ToList();
-        how = $"CPPC 不可用，取全 0 下 VID {(want == 1 ? "最低" : "次低")}的核";
-        return byVid.Count >= want ? byVid[want - 1] : -1;
+        var valid = cores.Where(s => baseline.TryGetValue(s, out var r) && r.Valid).ToList();
+        if (valid.Count == 0) return -1;
+
+        uint topCppc = cores.Max(s => scb.Cppc[s]);
+        var top = topCppc > 0 ? valid.Where(s => scb.Cppc[s] == topCppc).ToList() : new List<int>();
+        bool byCppc = top.Count > 0 && top.Count < valid.Count;   // all cores equal: CPPC cannot rank this CCD
+        var candidates = byCppc ? top : valid;
+
+        double refMHz = valid.Max(s => baseline[s].Freq);
+        double Norm(int s) => baseline[s].AlignV - slope * (baseline[s].Freq - refMHz);
+        double best = candidates.Min(Norm);
+        int pick = candidates.Where(s => Norm(s) <= best + FvAnalysis.NoiseFloor)
+                             .OrderByDescending(s => baseline[s].Freq).ThenBy(s => s).First();
+
+        return pick;
     }
 
     private static List<int> Finish(SingleCoreBoost scb, List<int> offsets, Dictionary<int, ScbRow> baseline,
                                     Dictionary<int, ScbRow> latest, Dictionary<int, int> targets, double slope, int coMin,
-                                    HashSet<int> clamped, ResultsPanel win, bool cancelled, int iterations = 0)
+                                    HashSet<int> clamped, ResultsPanel win, bool cancelled, int iterations = 0,
+                                    List<string>? frequencyNotes = null)
     {
-        win.SetTable(ResultColumns, wideLast: true);   // 备注 holds free text
+        win.SetTable(ResultColumns, wideLast: true); // Free-text notes occupy the last column.
         var sb = new StringBuilder();
         sb.Append(cancelled
-            ? "电压对齐已取消：CPU 上保留最后一次写入的 CO"
-            : $"电压对齐完成（{iterations} 轮调整）");
+            ? "电压对齐已取消，保留当前 CO"
+            : $"电压对齐完成（{iterations} 轮）");
 
         var unconverged = new List<int>();
         foreach (int s in Enumerable.Range(0, scb.SlotCount).Where(scb.IsUsable))
@@ -293,7 +580,7 @@ internal static class VoltageAlign
             double? dv1 = !isTarget && r1 is { Valid: true } && t1 is { Valid: true } ? FvAnalysis.DeltaV(r1, t1, slope) : null;
 
             string note;
-            if (isTarget) note = "对齐目标（保持 0）";
+            if (isTarget) note = "电压对齐基准核";
             else if (!targets.ContainsKey(ccd)) note = cancelled ? "已取消" : "本 CCD 无对齐目标，未调整";
             else if (dv1 is not { } d1) note = "测量无效";
             else if (dv0 < -FvAnalysis.NoiseFloor && offsets[s] == 0) note = "低于目标，保持 0";
@@ -310,19 +597,22 @@ internal static class VoltageAlign
                 s.ToString(),
                 SingleCoreBoost.RankLabel(scb.CcdRank(s)),
                 isTarget ? "目标" : "",
-                r0 is { Valid: true } ? $"{r0.Vid:F3}" : "-",
+                r0 is { Valid: true } ? $"{r0.AlignV:F3}" : "-",
                 dv0 is { } x0 ? $"{x0 * 1000:F1}" : "-",
-                r1 is { Valid: true } ? $"{r1.Vid:F3}" : "-",
+                r1 is { Valid: true } ? $"{r1.AlignV:F3}" : "-",
                 dv1 is { } x1 ? $"{x1 * 1000:F1}" : "-",
                 offsets[s].ToString(),
                 note,
             }, isTarget ? MonTheme.Gold : clamped.Contains(s) || unconverged.Contains(s) ? Theme.Warn : null);
         }
 
-        sb.Append($"\n最终 CO: [{string.Join(", ", offsets)}]");
-        if (clamped.Count > 0) sb.Append($"\n到达 CO 下限 {coMin} 的核心：Core {string.Join("、", clamped.OrderBy(s => s))}");
-        if (unconverged.Count > 0) sb.Append($"\n仍高于目标 {FvAnalysis.NoiseFloor * 1000:F0} mV 以上的核心：Core {string.Join("、", unconverged)}");
-        sb.Append("\n结果已填入 CO 编辑器，未保存到 co_profile.json。对齐后的负压必须通过压力测试验证稳定性后再保存使用。");
+        if (frequencyNotes != null)
+            foreach (string note in frequencyNotes) sb.Append($"\n{note}");
+        sb.Append("\n最终 CO：");
+        foreach (int s in Enumerable.Range(0, scb.SlotCount).Where(scb.IsUsable)) sb.Append($"\nCore {s,-3} {offsets[s],3}");
+        if (clamped.Count > 0) sb.Append($"\n达到 CO 下限：Core {string.Join("、", clamped.OrderBy(s => s))}");
+        if (unconverged.Count > 0) sb.Append($"\n未收敛：Core {string.Join("、", unconverged)}");
+        sb.Append("\n结果已填入 CO 编辑器（未保存），请先通过压力测试再保存。");
 
         string text = sb.ToString();
         foreach (string line in text.Split('\n')) Log.Write(line, cancelled || unconverged.Count > 0 ? "WARN" : "INFO");

@@ -2436,7 +2436,7 @@ internal sealed partial class MainForm : Form
         _scbBtn.Margin = new Padding(0, 0, gap, 0);
         _alignBtn.Margin = new Padding(0);
         _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压\n只是测量，不是压力测试，不修改任何参数");
-        _tips.SetToolTip(_alignBtn, "CO 全部置 0 后逐核测量单核电压，各 CCD 以金核或银核为基准\n给电压偏高的核心自动加负压，使单核电压对齐");
+        _tips.SetToolTip(_alignBtn, "CO 全部置 0 后逐核测量单核电压，各 CCD 以 CPPC 最高核心中同频电压最低者为基准对齐\n再分 CCD 粗找、细找单核频率平台，最终全核复核");
         _scbBtn.Click += (_, _) => StartMeasure("Single Core Boost", (win, ct) => SingleCoreBoost.Run(_monitorView, win, ct));
         _alignBtn.Click += (_, _) => OnAlignClick();
         row.Controls.Add(_scbBtn);
@@ -2446,11 +2446,11 @@ internal sealed partial class MainForm : Form
 
     private void OnAlignClick()
     {
-        if (!VoltageAlign.Confirm(this, out var target)) return;
+        if (!VoltageAlign.Confirm(this)) return;
         int editorMin = (int)_coCells[0].Minimum;
         StartMeasure("电压对齐", (win, ct) =>
         {
-            var final = VoltageAlign.Run(_monitorView, target, editorMin, win, ct);
+            var final = VoltageAlign.Run(_monitorView, editorMin, win, ct);
             if (final == null) return false;
             Ui(() => { for (int i = 0; i < _coSlotCount && i < final.Count; i++) SetCell(i, final[i]); });
             return true;
