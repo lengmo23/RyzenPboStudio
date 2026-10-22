@@ -11,19 +11,19 @@
     <AssemblyName>AMD Ryzen PBO Studio</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\ICON.ico</ApplicationIcon>
-    <Version>2.2.0</Version>
-    <!-- 作者信息：显示在 EXE 右键「属性 → 详细信息」中 -->
+    <Version>2.2.0-beta</Version>
+    <!-- Assembly metadata shown in the executable's Details properties. -->
     <Product>AMD Ryzen PBO Studio</Product>
     <Authors>DY冷漠_OC调试</Authors>
     <Company>DY冷漠_OC调试</Company>
     <Copyright>Copyright © 2026 DY冷漠_OC调试. Licensed under GPL-3.0.</Copyright>
     <Description>AMD Ryzen Curve Optimizer 负压测试与自动调整工具</Description>
-    <!-- 编译期固定构建日期，避免运行时读文件时间导致每次打开都变 -->
+    <!-- Fix the build date at compile time instead of reading file timestamps at runtime. -->
     <BuildDate>$([System.DateTime]::Now.ToString("yyyy-MM-dd"))</BuildDate>
-    <!-- 不依赖 wmic：CPU 信息走注册表 + GetLogicalProcessorInformation -->
+    <!-- CPU detection uses registry and Win32 APIs instead of wmic. -->
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- 不能开启：invariant 模式下 WinForms 处理输入法切换（WM_INPUTLANGCHANGE）时会查
-         culture 1033，查不到即抛 CultureNotFoundException 打穿消息循环，切一次输入法就崩溃 -->
+    <!-- WinForms needs culture 1033 when handling WM_INPUTLANGCHANGE;
+         invariant mode would throw CultureNotFoundException. -->
     <InvariantGlobalization>false</InvariantGlobalization>
     <ToolBundlePath>obj\$(Configuration)\$(TargetFramework)\tool-bundle.zip</ToolBundlePath>
   </PropertyGroup>
@@ -33,20 +33,20 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 把构建日期写入程序集元数据，运行时读取，保证同一版本 EXE 时间固定 -->
+    <!-- Store the build date in assembly metadata for stable display. -->
     <AssemblyMetadata Include="BuildDate" Value="$(BuildDate)" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 内嵌包只放 inpoutx64.dll（ZenStates-Core 的 IODriver 硬依赖）：它会被释放到
-         %ProgramData% 下的受保护目录并逐文件校验 SHA-256，放在 EXE 旁的可写目录会有
-         DLL 劫持风险。y-cruncher 体积大且是外部进程，改为随发布目录放在 tools\y-cruncher\。 -->
+    <!-- Bundle inpoutx64.dll for ZenStates-Core; extract it to protected ProgramData
+         and verify SHA-256 to avoid loading a writable DLL beside the executable.
+         Keep external y-cruncher under tools\y-cruncher\ in the publish folder. -->
     <ToolBundleSource Include="..\ryzen-smu-cli-0.1.3\inpoutx64.dll" />
     <ToolBundleSource Include="..\ryzen-smu-cli-0.1.3\InpOut.LICENSE.txt" />
     <ToolBundleSource Include="..\THIRD-PARTY-NOTICES.txt" />
     <EmbeddedResource Include="$(ToolBundlePath)"
                       LogicalName="RyzenPboStudio.Resources.tool-bundle.zip" />
-    <!-- 单文件发布时磁盘无 ICON.ico，内嵌以便运行时设置窗口/任务栏图标 -->
+    <!-- Embed the icon for runtime window and taskbar use. -->
     <EmbeddedResource Include="..\ICON.ico" LogicalName="RyzenPboStudio.ICON.ico" />
   </ItemGroup>
 
@@ -61,8 +61,8 @@
     <Delete Files="$(ToolBundlePath)" />
   </Target>
 
-  <!-- y-cruncher 随发布目录分发到 tools\y-cruncher\。开源仓库不含 y-cruncher，
-       本地缺失时该目标自动跳过，构建照常成功，由用户自行下载放置（见 README）。 -->
+  <!-- Publish y-cruncher under tools\y-cruncher when present;
+       skip it when absent from the local open-source checkout. -->
   <Target Name="CopyYCruncherToPublish" AfterTargets="Publish">
     <ItemGroup>
       <YCruncherFile Include="..\y-cruncher v0.8.7.9547b\**\*" />
