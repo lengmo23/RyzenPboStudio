@@ -5,15 +5,15 @@ namespace RyzenPboStudio;
 
 internal sealed partial class MainForm : Form
 {
-    // ── 控件 ────────────────────────────────────────────────────────────────
-    private readonly ComboBox _modeCombo = new();          // 单项测试下拉
-    private PillButton _seqBtn = null!;                    // 顺序测试
-    private PillButton _comboBtn = null!;                  // 和项测试
-    private PillButton _autoAdjBtn = null!;                // 自动调整负压模式
-    private PillButton _manualAdjBtn = null!;              // 手动模式（报错只提醒）
-    private bool _autoAdjust = true;                       // true=报错自动回退负压；false=只提醒不改负压
-    private readonly List<PillButton> _scopeBtns = new();  // 测试范围：全部 / 各 CCD / 逐 CCD / 自定义
-    // 按钮上只留短标题，具体测哪些项、跑几轮放到悬停提示里，省下纵向空间
+    // Controls
+    private readonly ComboBox _modeCombo = new();
+    private PillButton _seqBtn = null!;
+    private PillButton _comboBtn = null!;
+    private PillButton _autoAdjBtn = null!;
+    private PillButton _manualAdjBtn = null!;
+    private bool _autoAdjust = true; // Automatic mode backs off CO; manual mode only reports errors.
+    private readonly List<PillButton> _scopeBtns = new();
+    // Keep detailed test selection and round counts in tooltips to save vertical space.
     private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 120 };
     private readonly TextBox _durationBox = new();
     private readonly TextBox _roundsBox = new();
@@ -60,7 +60,7 @@ internal sealed partial class MainForm : Form
     private Label _csTitleLabel = null!;
     private CsState _csState = new();
 
-    // ── 运行状态 ────────────────────────────────────────────────────────────
+    // Run state
     private readonly ConcurrentQueue<string> _logQueue = new();
     private CancellationTokenSource? _cts;
     private volatile bool _stopRequested;
@@ -69,27 +69,26 @@ internal sealed partial class MainForm : Form
     private string _testMode = "VT3";
     private string _selectedMode = "VT3";
     private int _durationSeconds = Config.DefaultDuration;
-    // 顺序测试（SEQ）的三个阶段轮数：默认 20 / 10 / 10。
+    // Default round counts for the three sequential test stages.
     private Dictionary<string, int> _iterations = new()
     {
         ["VT3"] = Config.DefaultVt3,
         ["BKT"] = Config.DefaultBkt,
         ["SVT"] = Config.DefaultSvt,
     };
-    private int _singleRounds = Config.DefaultBkt;   // 单项测试轮数（默认 10）
+    private int _singleRounds = Config.DefaultBkt;
     private List<int> _initialOffsets = new();
 
-    // 测试范围：ALL=全部核心（走命令行），CCD=单个 CCD，EACH=逐 CCD 依次跑完整轮次，
-    // CUSTOM=自定义物理核。后三者走 y-cruncher 配置文件限定逻辑核。
+    // CCD, EACH, and CUSTOM scopes use a y-cruncher config to restrict logical cores.
     private string _testScope = "ALL";
     private int _scopeCcd;
     private List<int> _customCores = new();
 
-    // 和项测试（COMBO）固定参数：VT3+BKT+SVT 一起跑 10 轮。
+    // Combined mode runs VT3, BKT, and SVT together for ten rounds.
     private static readonly string[] ComboAlgos = { "VSTv3", "BKT", "SVT" };
     private const int ComboRounds = 10;
 
-    // 单项测试下拉选项：显示文本 + 传给 y-cruncher 的组件名（VSTv3 是 VT3 的别名）。
+    // VSTv3 is y-cruncher’s alias for VT3.
     private static readonly (string display, string mode, string algo)[] ModeOptions =
     {
         ("BKT — Basecase + Karatsuba (Scalar Integer)", "BKT", "BKT"),
@@ -107,10 +106,7 @@ internal sealed partial class MainForm : Form
     {
         _autostartLaunch = autostartLaunch;
         Text = "AMD Ryzen PBO Studio";
-        // AMD PBO 页 = CO | CS + 下方参数条，右侧 LOG；高度让 CO 卡片底边刚好落在 Core 7 下方的「-」之下。
-        // 屏幕放不下时由 FitToScreen 等比缩小
         ClientSize = new Size(1280, 854);
-        // 无系统标题栏：HeaderBar 充当标题栏（拖动 / 最小化 / 关闭），四周留 1px 画描边
         FormBorderStyle = FormBorderStyle.None;
         Padding = new Padding(1);
         MaximizeBox = false;
@@ -142,7 +138,7 @@ internal sealed partial class MainForm : Form
             string resumeHint = st != null && st.TestMode == "SEQ" && !string.IsNullOrEmpty(st.SeqPhase)
                 ? $" · 将从中断的 {st.SeqPhase} 阶段继续"
                 : "";
-            // 中断后已手动改过负压：那组值算用户接管，开测时原样沿用，只续跑测试阶段
+            // A manual CO change after interruption takes ownership of the offsets; resume the stage without backoff.
             if (Journal.ReadLastEntry()?.Reason == Journal.ManualTakeover)
             {
                 SetStatus($"上次测试异常中断 · 负压已手动接管，开始后按此值续跑{resumeHint}", Theme.Warn);
@@ -156,21 +152,21 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    // ── 界面构建 ────────────────────────────────────────────────────────────
+    // UI construction
 
-    private MonitorView? _monitorView;     // 顶部常驻每核监控
-    private readonly HeaderBar _headerBar = new() { Dock = DockStyle.Top, Height = 64 };   // 窗口标题栏 + 硬件信息
-    private Control _pboPanel = null!;      // AMD PBO 页：CO | CS + 参数条
-    private Control _testingPanel = null!;  // TESTING 页：测试设置
-    private Control _loggingPanel = null!;  // LOGGING 页：运行日志
+    private MonitorView? _monitorView;
+    private readonly HeaderBar _headerBar = new() { Dock = DockStyle.Top, Height = 64 };
+    private Control _pboPanel = null!;
+    private Control _testingPanel = null!;
+    private Control _loggingPanel = null!;
     private NavTabButton _navPboBtn = null!;
     private NavTabButton _navTestingBtn = null!;
     private NavTabButton _navLoggingBtn = null!;
 
     private enum Page { Pbo, Testing, Logging }
 
-    /// <summary>按屏幕 DPI 与工作区自适应窗口：先随系统缩放放大布局（字体已由 GDI 自动放大），
-    /// 放大后若超出工作区再整体等比回缩（含字体），最后居中。100% 缩放且屏幕足够时不做任何改动。</summary>
+    /// <summary>Scales the layout for DPI, then shrinks it to fit the work area and centers it.
+    /// Scale does not resize fonts, so font scaling is handled separately.</summary>
     private void FitToScreen()
     {
         float dpi = DeviceDpi / 96f;
@@ -190,7 +186,7 @@ internal sealed partial class MainForm : Form
             wa.Top + Math.Max(0, (wa.Height - Height) / 2));
     }
 
-    /// <summary>递归缩放控件树的所有字体（Scale 只缩布局不缩字体）。</summary>
+    /// <summary>Scales control fonts recursively because Scale only resizes the layout.</summary>
     private static void ScaleAllFonts(Control root, float s)
     {
         foreach (Control c in root.Controls) ScaleAllFonts(c, s);
@@ -207,15 +203,14 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Padding = new Padding(18, 8, 18, 18),
         };
-        // 292 时 CCD 表每行约 26px（RowH 下限），再矮就会裁掉 VID 行
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 292));  // 顶部：常驻监控（CCD0/CCD1 + 限制条）
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 中部：AMD PBO / TESTING / LOGGING 内容
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));   // 底部：AMD PBO / TESTING / LOGGING 沉浸式导航（按钮 42 + 上边距 6）
+        // Keep CCD rows tall enough to show the VID row.
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 292));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
 
         var monitorCard = BuildMonitorCard();
         monitorCard.Margin = new Padding(0, 0, 0, 10);
 
-        // 中部内容宿主：三页叠放，按底部按钮切换可见
         var host = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
         _pboPanel = BuildPboPanel();
         _pboPanel.Dock = DockStyle.Fill;
@@ -251,7 +246,7 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0),
         };
-        page.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 800));   // 参数条带单位后需约 770px，CS 吃掉 CO 以外的宽度
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 800)); // Leave room for PBO values with units and the CS grid.
         page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         var left = new TableLayoutPanel
@@ -263,10 +258,9 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(0, 0, 6, 0),
         };
         left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // CO | CS
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));      // PBO 参数条
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, FooterH)); // 开源声明
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, FooterH));
 
-        // CO、CS 按各自网格 + 按钮列的自然宽度定宽，不留空白；上下内边距收小，卡片底边贴近 Core 7 下方的「-」
         var coCs = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -319,18 +313,17 @@ internal sealed partial class MainForm : Form
         return page;
     }
 
-    /// <summary>TESTING 页：测试设置 | Single Core Boost / 电压对齐结果，底部状态条（右端显示版本）。</summary>
+    /// <summary>Builds the TESTING page with settings, measurement results, and status.</summary>
     private Control BuildTestingPanel()
     {
         var cfg = BuildConfigCard();
-        // 结果卡片底部放 Single Core Boost / 电压对齐，与左侧开始 / 停止底边对齐
         var results = NewCard();
-        results.Padding = new Padding(16, 8, 16, 8);   // 与左侧测试设置卡片一致，底部按钮才对齐
+        results.Padding = new Padding(16, 8, 16, 8); // Match bottom padding so action buttons align.
         results.Controls.Add(_resultsPanel);
         results.Controls.Add(BuildMeasureRow((TestRowWidth - 10) / 2, 10));
 
-        // 左栏固定宽度，窗口变窄时不裁掉开始/停止按钮。
-        // +60 = 卡片内边距 32 + 栏间距 6 + 纵向滚动条余量 22。
+        // Keep Start/Stop visible when the window narrows.
+        // The extra width covers padding, the column gap, and the scrollbar.
         var top = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -340,7 +333,7 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(0),
         };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TestRowWidth + 60));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 结果表吃掉剩余宽度
+        top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         cfg.Margin = new Padding(0, 0, 6, 0);
         results.Margin = new Padding(6, 0, 0, 0);
         top.Controls.Add(cfg, 0, 0);
@@ -360,7 +353,7 @@ internal sealed partial class MainForm : Form
         return holder;
     }
 
-    /// <summary>底部导航：沉浸式标签 AMD PBO / TESTING / LOGGING（仿 HYDRA 底栏）。</summary>
+    /// <summary>Builds the bottom page navigation.</summary>
     private Control BuildNavBar()
     {
         var bar = new TableLayoutPanel
@@ -393,14 +386,14 @@ internal sealed partial class MainForm : Form
         {
             Text = text,
             Size = new Size(170, 42),
-            Anchor = AnchorStyles.None,   // 在各自单元格内居中
+            Anchor = AnchorStyles.None,
             Font = new Font(Theme.FontFamily, 11.5F, FontStyle.Bold),
         };
         b.Click += (_, _) => onClick();
         return b;
     }
 
-    /// <summary>切换中部内容页：监控常驻顶部不动，仅 AMD PBO / TESTING / LOGGING 区互换。</summary>
+    /// <summary>Switches the content page while keeping the monitor visible.</summary>
     private void ShowPage(Page page)
     {
         var panel = page switch { Page.Testing => _testingPanel, Page.Logging => _loggingPanel, _ => _pboPanel };
@@ -421,7 +414,7 @@ internal sealed partial class MainForm : Form
         b.Invalidate();
     }
 
-    /// <summary>顶部常驻监控卡片：嵌入 MonitorView（每核 CPPC/AMD CO/EFFREQ/FREQ/VID）。</summary>
+    /// <summary>Builds the persistent per-core monitor card.</summary>
     private Control BuildMonitorCard()
     {
         var card = NewCard();
@@ -449,12 +442,11 @@ internal sealed partial class MainForm : Form
 
     private Control BuildConfigCard()
     {
-        // 上下内边距比普通卡片小，紧凑排版下各段在 340px 高内放得下
         var card = NewCard();
         card.Margin = new Padding(0);
         card.Padding = new Padding(16, 8, 16, 8);
 
-        // 单列纵向排布，各段统一 TestRowWidth；高 DPI 下放不下时出滚动条，不裁掉开始/停止按钮。
+        // Scroll on high-DPI screens instead of clipping Start/Stop.
         var body = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -522,13 +514,11 @@ internal sealed partial class MainForm : Form
             ("自定义…", "CUSTOM", "自行勾选参与压测的物理核心"),
         });
         var scopeRow2 = BuildCcdScopeRow();
-        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 4);   // 与 CCD 行拉开间距
+        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 4);
 
-        // 开始 / 停止：停靠卡片底部，两键等分 TestRowWidth（含中间 10px 间隔），上内边距与范围按钮隔开
         const int runGap = 10;
         int runBtnWidth = (TestRowWidth - runGap) / 2;
         var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 6, 0, 0) };
-        // 空心描边，与实心红的已选模式/范围按钮区分
         _startBtn.Normal = Theme.SurfaceAlt;
         _startBtn.Hover = Theme.Border;
         _startBtn.Outline = Theme.Accent;
@@ -558,14 +548,14 @@ internal sealed partial class MainForm : Form
         RestyleAdjustButtons();
         RestyleScopeButtons();
 
-        // 添加顺序决定停靠优先级：标题占顶、按钮占底、body 填中间
+        // Dock order keeps the title at the top, buttons at the bottom, and body between them.
         card.Controls.Add(body);
         card.Controls.Add(runRow);
         card.Controls.Add(SectionTitle("测试设置"));
         return card;
     }
 
-    /// <summary>一行测试范围按钮，等分 TestRowWidth。</summary>
+    /// <summary>Builds one row of equally sized scope buttons.</summary>
     private FlowLayoutPanel BuildScopeRow(IReadOnlyList<(string text, string tag, string tip)> specs)
     {
         const int gap = 6;
@@ -580,7 +570,7 @@ internal sealed partial class MainForm : Form
         return row;
     }
 
-    /// <summary>测试范围第二行：每个 CCD 一个键 + 逐 CCD 依次。单 CCD 机型返回 null，整行不出现。</summary>
+    /// <summary>Builds CCD scope buttons; returns null for a single-CCD CPU.</summary>
     private FlowLayoutPanel? BuildCcdScopeRow()
     {
         int ccds = CoreTopology.CcdCount;
@@ -589,7 +579,7 @@ internal sealed partial class MainForm : Form
         var specs = new List<(string, string, string)>();
         for (int c = 0; c < ccds; c++)
         {
-            // 提示里的核心编号要跟 CO 编辑器的槽位一致，不能用 OS 物理核序号
+            // Use SMU slot IDs in tooltips so they match the CO editor; OS core IDs can differ.
             var cores = CoreTopology.PhysicalCoresOfCcd(c)
                 .Select(RyzenSmu.OsCoreToSlot).OrderBy(x => x).ToList();
             specs.Add(($"CCD{c}", $"CCD{c}",
@@ -600,7 +590,7 @@ internal sealed partial class MainForm : Form
         return BuildScopeRow(specs);
     }
 
-    /// <summary>测试范围按钮：点选即切换并高亮；「自定义…」先弹核心选择框，取消则不改范围。</summary>
+    /// <summary>Changes the test scope; cancelling custom selection preserves the current scope.</summary>
     private PillButton MakeScopeButton(string text, string tag, int width, string tip)
     {
         var b = new PillButton
@@ -712,7 +702,7 @@ internal sealed partial class MainForm : Form
         btnRow.Controls.Add(okBtn);
         btnRow.Controls.Add(cancelBtn);
 
-        // 复选框与按钮放在同一个 TableLayoutPanel 里，避免复选框盖住确定/取消
+        // Keep the checkboxes and dialog buttons in one layout so they cannot overlap.
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -747,7 +737,7 @@ internal sealed partial class MainForm : Form
         return true;
     }
 
-    /// <summary>负压调整方式按钮（自动/手动）：点选即切换并高亮。</summary>
+    /// <summary>Switches between automatic backoff and manual adjustment.</summary>
     private PillButton MakeAdjustButton(string text, bool auto, string tip)
     {
         var b = new PillButton
@@ -783,7 +773,7 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>手动模式下检测到报错：只提醒用户，负压保持不变。</summary>
+    /// <summary>Reports a manual-mode error without changing CO offsets.</summary>
     private void NotifyManualError(List<int> crashedPhysical)
     {
         string cores = crashedPhysical.Count > 0
@@ -812,7 +802,7 @@ internal sealed partial class MainForm : Form
             Radius = 8,
             AutoSize = false,
             BackColor = Theme.Surface,
-            Normal = Theme.SurfaceAlt,   // 默认灰色，仅选中时由 RestyleModeButtons 改红
+            Normal = Theme.SurfaceAlt,
             Hover = Theme.Border,
             ForeColor = Theme.TextHi,
             Margin = new Padding(0, 0, 0, 2),
@@ -924,11 +914,11 @@ internal sealed partial class MainForm : Form
         return link;
     }
 
-    // ── 在线更新 ────────────────────────────────────────────────────────────
+    // Online updates
 
     /// <summary>
-    /// 检查 GitHub Release 并在用户确认后完成更新。manual=false 为启动时的静默检查：
-    /// 无更新或网络异常都不打扰用户；manual=true 由「检查更新」触发，各种结果都给回应。
+    /// Checks GitHub Releases and applies an update after user confirmation. Startup checks stay silent
+    /// on no update or network failure; manual checks report every outcome.
     /// </summary>
     private async Task RunUpdateFlowAsync(bool manual)
     {
@@ -1000,20 +990,19 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>状态条链接文字：已检测到新版本时常驻显示版本号，否则显示「检查更新」。</summary>
+    /// <summary>Shows the available version in the info link, or the check action otherwise.</summary>
     private void RefreshUpdateLinkText()
     {
         if (IsDisposed) return;
         _updateLink.Text = _knownNewVersion != null ? $"有新版本 v{_knownNewVersion}" : "检查更新";
     }
 
-    /// <summary>下载并解压新版本；两步都成功才关闭程序交给替换脚本。</summary>
+    /// <summary>Downloads and extracts an update before exiting for the replacement script.</summary>
     private async Task DownloadAndApplyAsync(UpdateInfo info)
     {
         string zipPath;
         try
         {
-            // 百分比变化时才刷新界面
             int lastPercent = -1;
             string source = "";
             var progress = new Progress<int>(p =>
@@ -1025,8 +1014,8 @@ internal sealed partial class MainForm : Form
             });
             SetStatus($"正在下载更新 {info.Tag}...", Theme.Warn);
             zipPath = await Updater.DownloadAsync(info, progress,
-                s => { source = s; lastPercent = -1; },   // 换源后让下一次回调必定刷新
-                // 连接与换源期间没有进度可报，把阶段文字直接写到状态条，等待过程才可见
+                s => { source = s; lastPercent = -1; },
+                // Show connection and source-switch stages when no byte progress is available.
                 stage => Ui(() =>
                 {
                     if (IsDisposed) return;
@@ -1075,7 +1064,7 @@ internal sealed partial class MainForm : Form
         Close();
     }
 
-    /// <summary>下载源全部失败后的兜底提示：给出网盘地址与提取码，用只读 TextBox 显示以便复制。</summary>
+    /// <summary>Shows a copyable fallback download link when all sources fail.</summary>
     private void ShowPanFallbackDialog(string tag)
     {
         using var dlg = new Form
@@ -1125,7 +1114,7 @@ internal sealed partial class MainForm : Form
             }
             catch (Exception ex)
             {
-                // 剪贴板偶尔被别的进程占用，复制不了就让用户自己选中文本框
+                // Leave the text selectable when the clipboard is busy.
                 Log.Write($"复制网盘地址失败：{ex.Message}", "WARN");
                 copyBtn.Text = "复制失败";
             }
@@ -1179,8 +1168,8 @@ internal sealed partial class MainForm : Form
         Margin = new Padding(0, 7, 10, 4),
     };
 
-    /// <summary>只读但可选中复制的文本框。用 ReadOnly 而不是 Enabled=false：
-    /// 禁用的 TextBox 会被系统改成灰底，且文字选不中。</summary>
+    /// <summary>Uses a read-only textbox so users can select text without the disabled gray style.
+    /// </summary>
     private static TextBox NewCopyableBox(string text, int width) => new()
     {
         Text = text,
@@ -1241,7 +1230,7 @@ internal sealed partial class MainForm : Form
         box.Font = new Font(Theme.MonoFamily, 10F);
         box.Dock = DockStyle.Fill;
 
-        // 底部按钮条：左=清除日志，右=保存日志（仅手动导出）
+        // Clearing the display does not remove the session log on disk.
         var btnBar = new Panel { Dock = DockStyle.Bottom, Height = 46, BackColor = Theme.Surface };
         var clearBtn = Ghost("清除日志");
         clearBtn.Size = new Size(118, 36);
@@ -1258,9 +1247,9 @@ internal sealed partial class MainForm : Form
         return card;
     }
 
-    // ── 手动 Curve Optimizer 编辑器 ─────────────────────────────────────────
+    // Curve Optimizer editor
 
-    /// <summary>CO 卡片：每核负压网格 + Apply/Refresh/Save/Load 按钮列。</summary>
+    /// <summary>Builds the per-core CO editor and its action buttons.</summary>
     private Control BuildCoCard()
     {
         var card = NewCard();
@@ -1279,9 +1268,9 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Surface,
             Padding = new Padding(0, 4, 0, 0),
         };
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // CO 核心网格
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // CO 按钮列
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // 占位，使前两列左聚拢
+        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bodyTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         bodyTable.Controls.Add(BuildCoGrid(), 0, 0);
@@ -1305,7 +1294,6 @@ internal sealed partial class MainForm : Form
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        // 顶部 “+”：整列加一档
         grid.Controls.Add(MakeStepButton("+", () => StepRange(0, CoSlotsPerColumn, +1)), 0, 0);
         var ccd1Plus = MakeStepButton("+", () => StepRange(CoSlotsPerColumn, CoDisplaySlotCount, +1));
         ccd1Plus.Enabled = _coSlotCount > CoSlotsPerColumn;
@@ -1317,7 +1305,6 @@ internal sealed partial class MainForm : Form
             grid.Controls.Add(MakeCoreCell(CoSlotsPerColumn + r), 1, r + 1);
         }
 
-        // 底部 “-”：整列减一档
         grid.Controls.Add(MakeStepButton("-", () => StepRange(0, CoSlotsPerColumn, -1)), 0, CoSlotsPerColumn + 1);
         var ccd1Minus = MakeStepButton("-", () => StepRange(CoSlotsPerColumn, CoDisplaySlotCount, -1));
         ccd1Minus.Enabled = _coSlotCount > CoSlotsPerColumn;
@@ -1345,7 +1332,7 @@ internal sealed partial class MainForm : Form
         });
         if (core >= _coSlotCount || RyzenSmu.IsSlotDisabled(core))
         {
-            _coCells[core].Enabled = false;   // 熔丝屏蔽核或不存在的 CCD 槽位：恒 0 灰化不可调
+            _coCells[core].Enabled = false; // Fused-off or absent slots are fixed at zero.
         }
         f.Controls.Add(_coCells[core]);
         return f;
@@ -1370,7 +1357,6 @@ internal sealed partial class MainForm : Form
         var b = Ghost(text);
         b.Size = new Size(58, 24);
         b.Font = new Font(Theme.FontFamily, 11F, FontStyle.Bold);
-        // 左边距 60 = "Core N" 标签宽(54)+间距(6)，使按钮对齐到数字框这一列
         b.Margin = new Padding(60, 0, 14, 4);
         b.Click += (_, _) => onClick();
         return b;
@@ -1384,7 +1370,6 @@ internal sealed partial class MainForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             BackColor = Theme.Surface,
-            // 顶边距 ~32 让按钮整体下移，对齐到第一行 Core 0（避开顶部 “+” 行）
             Margin = new Padding(8, 32, 0, 0),
         };
         PillButton Btn(string text, Action click)
@@ -1465,7 +1450,7 @@ internal sealed partial class MainForm : Form
         StyleUpDown(box, width);
     }
 
-    /// <summary>参数条里数字框与 Scalar 框共用的外观，保证同高同基线。</summary>
+    /// <summary>Applies the shared style to a PBO numeric input.</summary>
     private static void StyleUpDown(UpDownBase box, int width)
     {
         box.Width = width;
@@ -1500,9 +1485,9 @@ internal sealed partial class MainForm : Form
         parent.Controls.Add(box);
     }
 
-    // ── 手动 Curve Shaper 编辑器 ────────────────────────────────────────────
+    // Curve Shaper editor
 
-    /// <summary>CS 卡片：标题 + 5×3 网格 + Apply/Refresh/Save/Load 按钮列。</summary>
+    /// <summary>Builds the 5-by-3 CS grid and its action buttons.</summary>
     private Control BuildCsCard()
     {
         var card = NewCard();
@@ -1516,9 +1501,9 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Surface,
             Padding = new Padding(0, 4, 0, 0),
         };
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // CS 5×3 网格
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));      // CS 按钮列
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // 占位，使前两列左聚拢
+        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bodyTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         bodyTable.Controls.Add(BuildCsGrid(), 0, 0);
         bodyTable.Controls.Add(BuildCsButtonColumn(), 1, 0);
@@ -1537,8 +1522,6 @@ internal sealed partial class MainForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             BackColor = Theme.Surface,
-            // 顶边距与 CO 按钮列一致（32），两张卡片的 Apply/Refresh/Save/Load 水平对齐；
-            // 左边距 18 让按钮落在网格右侧剩余空间的中间，不贴着网格也不贴卡片右边
             Margin = new Padding(18, 32, 0, 0),
         };
         PillButton Btn(string text, Action click)
@@ -1572,12 +1555,10 @@ internal sealed partial class MainForm : Form
         };
         for (int i = 0; i < 4; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        // 表头：温度档（列）
         grid.Controls.Add(new Label { Text = "", AutoSize = false, Width = CsRowLabelWidth, Height = 18, BackColor = Theme.Surface }, 0, 0);
         string[] cols = { "LOW", "MED", "HIGH" };
         for (int c = 0; c < 3; c++) grid.Controls.Add(CsHeader(cols[c], last: c == 2), c + 1, 0);
 
-        // 5 个频率档（行）
         string[] tiers = { "MIN", "LOW", "MED", "HIGH", "MAX" };
         for (int t = 0; t < 5; t++)
         {
@@ -1591,13 +1572,13 @@ internal sealed partial class MainForm : Form
         return grid;
     }
 
-    /// <summary>温度档列（LOW/MED/HIGH）之间的横向间距，表头与数字框共用以保持同宽居中。</summary>
+    /// <summary>Spaces CS temperature columns equally for headers and inputs.</summary>
     private const int CsColumnGap = 10;
 
-    /// <summary>温度档列宽。卡片宽度要同时容下 5×3 网格与右侧按钮列，CS 数字框比 CO 的窄。</summary>
+    /// <summary>Fits the CS grid and action buttons within the card.</summary>
     private const int CsCellWidth = 46;
 
-    /// <summary>last=true 时不留右间距：最后一列的间距会把按钮列挤出卡片。</summary>
+    /// <summary>Omits trailing spacing after the last CS column.</summary>
     private static Label CsHeader(string text, bool last) => new()
     {
         Text = text,
@@ -1611,7 +1592,7 @@ internal sealed partial class MainForm : Form
         Margin = new Padding(0, 0, last ? 0 : CsColumnGap, 2),
     };
 
-    /// <summary>频率档行标（MIN/LOW/MED/HIGH/MAX）的列宽，表头占位格与之同宽。</summary>
+    /// <summary>Sets the width shared by CS row labels and the header spacer.</summary>
     private const int CsRowLabelWidth = 40;
 
     private static Label CsRowLabel(string text) => new()
@@ -1622,9 +1603,7 @@ internal sealed partial class MainForm : Form
         Height = 26,
         ForeColor = Theme.TextLo,
         BackColor = Theme.Surface,
-        // 右对齐，让文字紧贴第一列数字框
         TextAlign = ContentAlignment.MiddleRight,
-        // 上下 5：与数字框同步拉开五个频率档之间的行距
         Margin = new Padding(0, 5, 6, 5),
     };
 
@@ -1642,7 +1621,7 @@ internal sealed partial class MainForm : Form
         Margin = new Padding(0, 5, last ? 0 : CsColumnGap, 5),
     };
 
-    // ── CO 编辑器行为 ───────────────────────────────────────────────────────
+    // CO editor behavior
 
     private void StepRange(int from, int to, int delta)
     {
@@ -1650,7 +1629,7 @@ internal sealed partial class MainForm : Form
             SetCell(i, (int)_coCells[i].Value + delta);
     }
 
-    /// <summary>把核心 i 的数值框设为 v，并夹到合法范围内。</summary>
+    /// <summary>Clamps and sets one core’s CO input.</summary>
     private void SetCell(int i, int v)
     {
         if (i < 0 || i >= _coSlotCount || !_coCells[i].Enabled) return;
@@ -1672,7 +1651,7 @@ internal sealed partial class MainForm : Form
                 Log.Write("检测到手动应用 CO：后续回退以此值为基准", "WARN");
             else
             {
-                // 保留脏标记以续跑中断的阶段，但沿用用户设定的负压，不再叠加 +StepOnError
+                // Resume the interrupted stage using the user’s offsets without another backoff.
                 Log.Write("检测到手动应用 CO，测试沿用手动设定续跑", "WARN");
                 SetStatus("已接管中断负压 · 开始后按此值续跑", Theme.Warn);
                 return;
@@ -1708,14 +1687,14 @@ internal sealed partial class MainForm : Form
         Log.Write("已载入 CO 配置（未应用，确认后点 Apply）");
     }
 
-    /// <summary>参数条一键应用：FMax + PPT + EDC + TDC 一起写 SMU。</summary>
+    /// <summary>Applies FMax, PPT, EDC, and TDC limits together.</summary>
     private void OnPboApply()
     {
         uint fmax = (uint)_fmaxBox.Value;
         uint ppt = (uint)_pptBox.Value;
         uint edc = (uint)_edcBox.Value;
         uint tdc = (uint)_tdcBox.Value;
-        // 不支持 FMax 写入时跳过：SetBoostLimitAllCore 不校验消息 ID，会向 SMU 发送消息 0
+        // Zen3 has no FMax write message; sending message ID 0 would be unsafe.
         bool okF = !_fmaxWritable || RyzenSmu.SetFMax(fmax);
         bool okP = RyzenSmu.SetPptLimit(ppt);
         bool okE = RyzenSmu.SetEdcLimit(edc);
@@ -1732,7 +1711,7 @@ internal sealed partial class MainForm : Form
         SetStatus(ok ? "已应用 PBO 限制（FMax/PPT/EDC/TDC/Scalar）" : "PBO 限制应用部分失败", ok ? Theme.Success : Theme.Accent);
     }
 
-    // ── Curve Shaper 行为 ───────────────────────────────────────────────────
+    // Curve Shaper behavior
 
     private void OnCsApply()
     {
@@ -1740,7 +1719,7 @@ internal sealed partial class MainForm : Form
         bool ok = RyzenSmu.SetCurveShaper(g);
         if (ok)
         {
-            // 保存最后应用值，供旧 BIOS 备用模式（读接口失效）刷新时回填，避免被读回的 0 重置。
+            // Cache applied CS values because older BIOS versions cannot read them back.
             _csState.FromGrid(g);
             _csState.Save();
         }
@@ -1763,11 +1742,11 @@ internal sealed partial class MainForm : Form
 
         if (!hasInterface)
         {
-            // 旧 BIOS：raw args 全 0，CS 电压已生效但无读取接口。切到备用模式，用本地保存值回填。
+            // On older BIOS versions, all-zero readback does not mean the applied CS values were cleared.
             if (!_csState.ReadBroken) { _csState.ReadBroken = true; _csState.Save(); }
             _csTitleLabel.Text = "Curve Shaper（备用模式）";
             if (!_csState.HasMargins)
-                return; // 无本地保存值：保留当前编辑器内容，不用全 0 覆盖
+                return; // Keep editor values when no saved CS values exist.
             g = _csState.ToGrid();
         }
         else
@@ -1784,7 +1763,7 @@ internal sealed partial class MainForm : Form
             }
     }
 
-    /// <summary>载入上次保存的 Curve Shaper（cs_state.json），仅填入编辑器，需手动 Apply。</summary>
+    /// <summary>Loads saved CS values into the editor without writing hardware.</summary>
     private void OnCsLoad()
     {
         if (!_csState.HasMargins)
@@ -1803,7 +1782,7 @@ internal sealed partial class MainForm : Form
         SetStatus("已载入 CS 配置", Theme.Success);
     }
 
-    /// <summary>把编辑器当前 Curve Shaper 值保存到 cs_state.json（仅存盘，不写硬件）。</summary>
+    /// <summary>Saves editor CS values without writing hardware.</summary>
     private void OnCsSave()
     {
         _csState.FromGrid(CsGridFromCells());
@@ -1812,7 +1791,7 @@ internal sealed partial class MainForm : Form
         SetStatus("已保存 CS 配置", Theme.Success);
     }
 
-    /// <summary>启动时按 CPU 是否支持启用/禁用 Curve Shaper，并填充当前值。</summary>
+    /// <summary>Enables CS only on supported CPUs and populates the editor.</summary>
     private void InitCsEditor()
     {
         bool ok = RyzenSmu.IsCurveShaperSupported();
@@ -1829,7 +1808,7 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>启动时用 CPU 当前值填充编辑器。</summary>
+    /// <summary>Populates the editor from current CPU values at startup.</summary>
     private void InitCoEditor()
     {
         OnCoRefresh();
@@ -1837,7 +1816,7 @@ internal sealed partial class MainForm : Form
         InitPboBoxes();
     }
 
-    /// <summary>启动时用 CPU 当前 PBO 上限初始化 PPT / EDC / TDC 参数框。</summary>
+    /// <summary>Initializes PPT, EDC, and TDC controls from current CPU limits.</summary>
     private void InitPboBoxes()
     {
         var (ppt, edc, tdc) = RyzenSmu.ReadPboLimits();
@@ -1845,7 +1824,7 @@ internal sealed partial class MainForm : Form
         if (edc > 0) _edcBox.Value = Math.Clamp(edc, (int)_edcBox.Minimum, (int)_edcBox.Maximum);
         if (tdc > 0) _tdcBox.Value = Math.Clamp(tdc, (int)_tdcBox.Minimum, (int)_tdcBox.Maximum);
 
-        // FMax 在 Zen3 上没有写入命令，置灰输入框挡住修改；PPT / TDC / EDC 仍可写，Apply 照常可用。
+        // Zen3 cannot write FMax; leave the other PBO limits available.
         _fmaxWritable = RyzenSmu.IsFMaxWriteSupported();
         if (!_fmaxWritable)
         {
@@ -1853,7 +1832,7 @@ internal sealed partial class MainForm : Form
             Log.Write("当前 CPU 的 SMU 无 FMax 写入命令，已禁用该项；PPT / TDC / EDC 不受影响");
         }
 
-        // Scalar 读数 0 是 OC 模式或读不到，按 Auto 显示；1~10 取整后回填
+        // Scalar zero means OC mode or an unavailable reading, so show Auto.
         float s = RyzenSmu.ReadPboScalar();
         SelectScalar(s >= 1 ? (int)Math.Round(s) : 1);
         _scalarWritable = RyzenSmu.IsPboScalarWriteSupported();
@@ -1864,7 +1843,7 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    // ── 构件工厂 ────────────────────────────────────────────────────────────
+    // Control factories
 
     private static Card NewCard() => new()
     {
@@ -1910,7 +1889,7 @@ internal sealed partial class MainForm : Form
         AutoSize = false,
     };
 
-    /// <summary>把下拉框选中项同步到给定模式（找不到则回退到第一项）。</summary>
+    /// <summary>Selects a mode in the dropdown, falling back to the first item.</summary>
     private void SelectComboFor(string mode)
     {
         int idx = Array.FindIndex(ModeOptions, o => o.mode == mode);
@@ -1962,11 +1941,9 @@ internal sealed partial class MainForm : Form
     {
         try
         {
-            // 磁盘上的 ICON.ico
             string ico = Path.Combine(Workspace.BaseDir, "ICON.ico");
             if (File.Exists(ico)) { Icon = new Icon(ico); return; }
 
-            // 磁盘上没有时回退到内嵌资源
             using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("RyzenPboStudio.ICON.ico");
             if (stream != null) Icon = new Icon(stream);
         }
@@ -1976,10 +1953,10 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    // ── 无边框窗口 ──────────────────────────────────────────────────────────
+    // Borderless window
 
-    /// <summary>无边框窗口补回系统行为：WS_MINIMIZEBOX | WS_SYSMENU 让任务栏单击可最小化 / 还原、Alt+Space 可用；
-    /// CS_DROPSHADOW 给窗口加阴影。</summary>
+    /// <summary>Restores minimize, system-menu, and drop-shadow behavior on the borderless window.
+    /// </summary>
     protected override CreateParams CreateParams
     {
         get
@@ -2019,7 +1996,7 @@ internal sealed partial class MainForm : Form
         bool any = false;
         while (_logQueue.TryDequeue(out var line))
         {
-            // AMD PBO 页与 LOGGING 页各有一个日志框，同步追加保证切页后内容一致
+            // Mirror log lines into both page-specific textboxes.
             _logBox.AppendText(line + "\r\n");
             _logBoxPbo.AppendText(line + "\r\n");
             any = true;
@@ -2043,12 +2020,11 @@ internal sealed partial class MainForm : Form
             }
             catch
             {
-                // 读取失败时保持原显示
             }
         });
     }
 
-    // ── 测试控制 ────────────────────────────────────────────────────────────
+    // Test control
 
     private void StartTest(object? sender, EventArgs e)
     {
@@ -2057,7 +2033,7 @@ internal sealed partial class MainForm : Form
         if (!TryReadSettings(out int duration, out int singleRounds))
             return;
 
-        // 压测前预检 y-cruncher：本软件不附带，缺失时给出下载与放置指引而非静默失败。
+        // Check for y-cruncher before starting a stress test and show placement instructions if absent.
         try
         {
             YCruncher.FindExe();
@@ -2071,7 +2047,7 @@ internal sealed partial class MainForm : Form
 
         _testMode = SelectedMode();
         _durationSeconds = duration;
-        _singleRounds = singleRounds;   // SEQ 仍用固定 20/10/10，COMBO 用固定 10
+        _singleRounds = singleRounds; // SEQ and COMBO use fixed round counts.
         _stopRequested = false;
         _cts = new CancellationTokenSource();
 
@@ -2109,15 +2085,15 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>返回 true 表示所有测试都已跑完；未跑完（含 y-cruncher 中途退出、下发负压失败）返回 false。</summary>
+    /// <summary>Returns true only after all tests finish; process exit or CO write failure returns false.</summary>
     private bool RunTest()
     {
-        // 先判断上次是否异常中断（脏标记），再立即为本次运行打标记
+        // Check the previous crash marker before marking this run active.
         bool interrupted = Workspace.WasInterrupted();
         var prev = Workspace.LoadState();
         var lastEntry = Journal.ReadLastEntry();
         var lastApplied = lastEntry?.Offsets;
-        // 中断后用户手动改过负压：以这组值起跑，不再叠加 +StepOnError
+        // Resume from manually adopted offsets without an extra backoff.
         bool manualTakeover = lastEntry?.Reason == Journal.ManualTakeover;
         Workspace.MarkInProgress($"start {DateTime.Now:O}");
         OnTestStartedForAutostart();
@@ -2135,7 +2111,7 @@ internal sealed partial class MainForm : Form
                 ? "上次测试异常中断 + 内核电源事件（疑似死机/断电），执行恢复"
                 : "上次测试未正常结束，执行恢复", "WARN");
 
-            // 崩溃前负压：优先取落盘日志最后一条，其次状态文件
+            // Prefer the last persisted CO record over the state file after a crash.
             offsets = lastApplied is { Count: > 0 }
                 ? new List<int>(lastApplied)
                 : (prev is { Offsets.Count: > 0 } ? new List<int>(prev.Offsets) : Enumerable.Repeat(0, numCores).ToList());
@@ -2161,7 +2137,7 @@ internal sealed partial class MainForm : Form
             }
             else
             {
-                _testMode = SelectedMode(); // 状态文件丢失，沿用当前界面选择
+                _testMode = SelectedMode(); // Use current UI mode when persisted state is missing.
             }
 
             var preRecovery = new List<int>(offsets);
@@ -2227,8 +2203,8 @@ internal sealed partial class MainForm : Form
 
         var token = _cts!.Token;
 
-        // 逐 CCD 模式下把整套测试对每个 CCD 各跑一遍；其余模式只跑一遍。
-        // 断电恢复时 _scopeCcd 记着上次跑到哪个 CCD，从那里接着来。
+        // EACH mode repeats the full test suite on each CCD.
+        // Resume at the CCD saved before interruption.
         bool eachCcd = _testScope == "EACH" && CoreTopology.CcdCount > 1;
         int scopeStart = eachCcd ? Math.Clamp(_scopeCcd, 0, CoreTopology.CcdCount - 1) : 0;
         int scopeEnd = eachCcd ? CoreTopology.CcdCount - 1 : 0;
@@ -2238,14 +2214,13 @@ internal sealed partial class MainForm : Form
         {
             if (_stopRequested) break;
             if (eachCcd) _scopeCcd = pass;
-            // 逐 CCD 时 CCD 号来自循环，单选某个 CCD 时来自用户的选择（此时循环只跑一趟，pass 恒为 0）
             int ccd = eachCcd ? pass : _scopeCcd;
             var (scopeLogical, scopeCores) = ResolveScope(eachCcd ? "CCD" : _testScope, ccd);
             string scopeLabel = ScopeLabel(eachCcd ? "CCD" : _testScope, ccd);
 
             bool passOk = RunOnePass(scopeLogical, scopeCores, scopeLabel);
-            seqResumePhase = null;   // 下一个 CCD 从第一个阶段重新开始
-            if (!passOk)             // 本轮没跑完（取消／无法继续），不再往下一个 CCD 走
+            seqResumePhase = null;
+            if (!passOk) // Do not advance CCD after an incomplete pass.
             {
                 allPassed = false;
                 break;
@@ -2413,7 +2388,7 @@ internal sealed partial class MainForm : Form
         }
 
         Workspace.ClearState();
-        Workspace.ClearInProgress();   // 正常结束/手动停止，清除脏标记
+        Workspace.ClearInProgress(); // Normal completion or manual stop clears the marker.
 
         var finalSnapshot = new List<int>(offsets);
         Ui(() => _offsetsLabel.Text = $"最终负压: [{string.Join(", ", finalSnapshot)}]");
@@ -2444,11 +2419,10 @@ internal sealed partial class MainForm : Form
     private PillButton _alignBtn = null!;
     private CancellationTokenSource? _measureCts;
     private Task? _measureTask;
-    private readonly ResultsPanel _resultsPanel = new() { Dock = DockStyle.Fill };   // TESTING 页右栏
+    private readonly ResultsPanel _resultsPanel = new() { Dock = DockStyle.Fill };
 
     private FlowLayoutPanel BuildMeasureRow(int btnWidth, int gap)
     {
-        // 上内边距把按钮和结果摘要隔开；按钮与开始 / 停止同高
         var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 6, 0, 0) };
         _scbBtn = Ghost("Single Core Boost");
         _alignBtn = Ghost("电压对齐");
@@ -2519,7 +2493,6 @@ internal sealed partial class MainForm : Form
         });
     }
 
-    // ── 辅助 ────────────────────────────────────────────────────────────────
 
     private void SetStatus(string text, Color color)
     {
@@ -2530,7 +2503,7 @@ internal sealed partial class MainForm : Form
     private (string algo, int iters) GetTestConfig(string mode)
     {
         string algo = Array.Find(ModeOptions, o => o.mode == mode).algo;
-        if (string.IsNullOrEmpty(algo)) algo = "VSTv3"; // 兜底
+        if (string.IsNullOrEmpty(algo)) algo = "VSTv3";
         return (algo, _singleRounds);
     }
 
@@ -2566,8 +2539,8 @@ internal sealed partial class MainForm : Form
         _roundsBox.Text = _singleRounds.ToString();
     }
 
-    /// <summary>把测试范围解析成 (要压的逻辑核, 对应物理核)。全部核心返回 (null, null)，
-    /// 表示不限定核心、走 y-cruncher 命令行路径。</summary>
+    /// <summary>Returns the selected logical and physical cores; all-core scope returns
+    /// (null, null) to use the unrestricted y-cruncher command.</summary>
     private (List<int>? logical, List<int>? physical) ResolveScope(string scope, int ccd)
     {
         switch (scope)
@@ -2575,7 +2548,7 @@ internal sealed partial class MainForm : Form
             case "CCD":
             {
                 var logical = CoreTopology.LogicalCoresOfCcd(ccd);
-                if (logical.Count == 0) return (null, null);   // 拓扑读不到就退回全核，不因此中断测试
+                if (logical.Count == 0) return (null, null); // Fall back to all cores when topology is unavailable.
                 var slots = CoreTopology.PhysicalCoresOfCcd(ccd)
                     .Select(RyzenSmu.OsCoreToSlot).OrderBy(x => x).ToList();
                 return (logical, slots);
@@ -2583,7 +2556,7 @@ internal sealed partial class MainForm : Form
             case "CUSTOM":
             {
                 if (_customCores.Count == 0) return (null, null);
-                // 复选框给的是槽位，问逻辑核之前要换回 OS 物理核序号
+                // Convert selected SMU slots to OS core IDs before resolving logical cores.
                 var osCores = _customCores.Select(RyzenSmu.SlotToOsCore).Where(c => c >= 0).ToList();
                 var logical = CoreTopology.LogicalCoresOfPhysical(osCores);
                 if (logical.Count == 0) return (null, null);
@@ -2607,7 +2580,6 @@ internal sealed partial class MainForm : Form
     private void SelectMode(string mode)
     {
         _selectedMode = mode;
-        // 单项测试同步下拉；顺序/和项不在下拉里，仅高亮对应按钮。
         if (Array.Exists(ModeOptions, o => o.mode == mode)) SelectComboFor(mode);
         RestyleModeButtons();
     }
@@ -2644,7 +2616,6 @@ internal sealed partial class MainForm : Form
         }
         catch
         {
-            // 窗口正在关闭，忽略
         }
     }
 
@@ -2670,7 +2641,7 @@ internal sealed partial class MainForm : Form
 
         _measureCts?.Cancel();
 
-        // 只有用户主动关闭才清脏标记；其余情况保留，下次启动按「上次测试中断」续跑并回退负压。
+        // Clear the crash marker only on user close; otherwise resume and back off CO at next launch.
         if (userClosing)
             Workspace.ClearInProgress();
         OnClosingForAutostart(userClosing);

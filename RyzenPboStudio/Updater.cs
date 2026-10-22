@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace RyzenPboStudio;
 
-/// <summary>GitHub Release 返回体中本程序用得到的字段。</summary>
+/// <summary>GitHub Release fields used by this application.</summary>
 internal sealed class GhRelease
 {
     [JsonPropertyName("tag_name")] public string TagName { get; set; } = "";
@@ -26,16 +26,15 @@ internal sealed class GhAsset
     [JsonPropertyName("browser_download_url")] public string DownloadUrl { get; set; } = "";
 }
 
-/// <summary>检测到的新版本。</summary>
+/// <summary>Available update metadata.</summary>
 internal sealed record UpdateInfo(Version Version, string Tag, string Notes, string DownloadUrl, long Size);
 
 /// <summary>
-/// 从 GitHub Release 检查并应用更新。
+/// Checks GitHub Releases and applies updates.
 ///
-/// 更新分两段执行：下载与解压全部在程序还活着时完成，任何失败都能当场报给用户并放弃；
-/// 只有「用新文件覆盖安装目录」这一步必须等程序退出后由外部脚本做——Windows 不允许
-/// 覆盖正在运行的 exe/dll。覆盖时排除 logs 与 profiles：profiles 里存着断电恢复要用的
-/// 负压历史，更新绝不能把它抹掉。
+/// Download and extraction finish while the application can report failures.
+/// File replacement waits until exit because Windows locks running binaries.
+/// Exclude logs and profiles from replacement to preserve recovery history.
 /// </summary>
 internal static class Updater
 {
@@ -43,25 +42,25 @@ internal static class Updater
     private const string Repo = "RyzenPboStudio";
     private const string LatestReleaseApi = $"https://api.github.com/repos/{Owner}/{Repo}/releases/latest";
 
-    /// <summary>项目主页。</summary>
+    /// <summary>Project homepage.</summary>
     public const string HomePage = $"https://github.com/{Owner}/{Repo}";
 
-    /// <summary>发布页地址，供「查看更新内容」等场景打开。</summary>
+    /// <summary>Release page opened from update details.</summary>
     public const string ReleasesPage = $"{HomePage}/releases";
 
-    /// <summary>所有下载源都失败时给出的网盘地址，由用户手动下载后覆盖安装。</summary>
+    /// <summary>Manual download URL shown when all sources fail.</summary>
     public const string PanUrl = "https://wwbnf.lanzoum.com/b01eupfd7c";
 
-    /// <summary>网盘提取码。</summary>
+    /// <summary>Extraction code for the manual download.</summary>
     public const string PanCode = "csdf";
 
-    /// <summary>单个源等待响应头的上限，超时即换下一个源。</summary>
+    /// <summary>Response-header timeout for one source.</summary>
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>传输空闲上限：连续这么久收不到新数据才判失败，慢速网络不会被误判。</summary>
+    /// <summary>Idle-transfer timeout; slow but active downloads continue.</summary>
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromSeconds(20);
 
-    /// <summary>下载源，按顺序尝试：空前缀直连 GitHub，其余为 GitHub 加速镜像。</summary>
+    /// <summary>Try GitHub directly before mirror sources.</summary>
     private static readonly (string Prefix, string Name)[] DownloadSources =
     {
         ("", "GitHub"),
@@ -73,11 +72,11 @@ internal static class Updater
     public static Version CurrentVersion =>
         typeof(Updater).Assembly.GetName().Version is { } v ? new Version(v.Major, v.Minor, v.Build) : new Version(0, 0, 0);
 
-    /// <summary>查询最新 Release。无更新或查询失败返回 null（由调用方决定是否提示）。</summary>
+    /// <summary>Returns the latest update, or null when absent or unavailable.</summary>
     public static async Task<UpdateInfo?> CheckAsync(CancellationToken token = default)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        // GitHub API 强制要求 User-Agent，缺失会被 403 拒绝
+        // GitHub API requires User-Agent.
         http.DefaultRequestHeaders.UserAgent.ParseAdd($"RyzenPboStudio/{CurrentVersion}");
         http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
 
@@ -87,7 +86,7 @@ internal static class Updater
         if (!TryParseTag(release.TagName, out Version latest)) return null;
         if (latest <= CurrentVersion) return null;
 
-        // 优先取 update 包（不含 y-cruncher），没有时回退到 full 包
+        // Prefer the smaller update archive; use full only when update is absent.
         var zips = release.Assets
             .Where(a => a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) && a.DownloadUrl.Length > 0)
             .ToList();
@@ -99,25 +98,25 @@ internal static class Updater
         return new UpdateInfo(latest, release.TagName, PlainText(release.Body), zip.DownloadUrl, zip.Size);
     }
 
-    /// <summary>把 Release 正文的 Markdown 转成纯文字，供 MessageBox 显示。</summary>
+    /// <summary>Converts Release Markdown to plain text for the update dialog.</summary>
     private static string PlainText(string markdown)
     {
         var lines = new List<string>();
         foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
         {
             string line = raw.Trim();
-            if (line.StartsWith("```")) continue;                        // 代码围栏
+            if (line.StartsWith("```")) continue;
             if (line.Length > 0 && line.All(c => c == '-' || c == '='))
-                continue;                                                // 分隔线 / setext 下划线
-            line = line.TrimStart('#', '>').Trim();                      // 标题、引用前缀
+                continue;
+            line = line.TrimStart('#', '>').Trim();
             if (line.StartsWith("- ") || line.StartsWith("* ") || line.StartsWith("+ "))
-                line = "· " + line[2..].Trim();                          // 列表符号统一
+                line = "· " + line[2..].Trim();
             line = line.Replace("**", "").Replace("__", "").Replace("`", "");
-            line = Regex.Replace(line, @"\[([^\]]*)\]\([^)]*\)", "$1");   // [文字](链接) → 文字
+            line = Regex.Replace(line, @"\[([^\]]*)\]\([^)]*\)", "$1");
             lines.Add(line);
         }
 
-        // 连续空行折叠成一个
+        // Collapse repeated blank lines.
         var sb = new StringBuilder();
         bool blank = false;
         foreach (string line in lines)
@@ -130,17 +129,17 @@ internal static class Updater
         return sb.ToString().Trim();
     }
 
-    // ── 「暂不更新」的版本记忆 ──────────────────────────────────────────────
+    // Remember skipped updates
 
     private static string SkipFile => Path.Combine(Workspace.ProfilesDir, "update_skip.txt");
 
-    /// <summary>用户在提示里点了「否」：记下这个版本，之后启动不再弹窗。</summary>
+    /// <summary>Records a declined version so startup does not prompt for it again.</summary>
     public static void SkipVersion(Version version)
     {
-        try { File.WriteAllText(SkipFile, version.ToString()); } catch { /* 记不下最多是下次再弹一次 */ }
+        try { File.WriteAllText(SkipFile, version.ToString()); } catch { /* A failed save only repeats the prompt next time. */ }
     }
 
-    /// <summary>该版本是否已被用户跳过。只用于启动时的静默检查，手动「检查更新」不受影响。</summary>
+    /// <summary>Checks skipped versions only during silent startup checks.</summary>
     public static bool IsSkipped(Version version)
     {
         try
@@ -152,13 +151,13 @@ internal static class Updater
         catch { return false; }
     }
 
-    /// <summary>已经是最新版本时清掉记录，避免旧版本号一直留在 profiles 里。</summary>
+    /// <summary>Clears an obsolete skipped-version record when already current.</summary>
     public static void ClearSkip()
     {
         try { if (File.Exists(SkipFile)) File.Delete(SkipFile); } catch { }
     }
 
-    /// <summary>把 "v2.1.0" / "2.1.0" 解析成 Version。</summary>
+    /// <summary>Parses tags with or without a leading v.</summary>
     private static bool TryParseTag(string tag, out Version version)
     {
         version = new Version(0, 0, 0);
@@ -166,8 +165,8 @@ internal static class Updater
         return Version.TryParse(t, out Version? parsed) && (version = parsed) != null;
     }
 
-    /// <summary>下载 zip 到临时目录，直连失败则依次改用镜像。progress 回调传 0-100，
-    /// onSource 告知当前源名，onStage 推送「正在连接 / 正在换源」等阶段文字。</summary>
+    /// <summary>Downloads an archive through GitHub or mirrors and reports percent
+    /// progress, active source, and connection stage.</summary>
     public static async Task<string> DownloadAsync(UpdateInfo info, IProgress<int>? progress,
         Action<string>? onSource = null, Action<string>? onStage = null, CancellationToken token = default)
     {
@@ -190,7 +189,7 @@ internal static class Updater
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                throw;   // 仅用户主动取消走这里；超时由 FetchAsync 转成 TimeoutException，照常换源
+                throw; // Only user cancellation escapes; source timeouts trigger failover.
             }
             catch (Exception e)
             {
@@ -203,18 +202,18 @@ internal static class Updater
         throw new IOException("所有下载源均失败。\n" + string.Join("\n", errors));
     }
 
-    /// <summary>从单个 URL 下载，并与 GitHub API 报告的大小核对（镜像失效时可能返回 200 的错误页）。</summary>
+    /// <summary>Checks downloaded size against GitHub metadata to reject mirror error pages.</summary>
     private static async Task FetchAsync(string url, string zipPath, long expectedSize,
         IProgress<int>? progress, Action<string>? onStage, string sourceName, CancellationToken token)
     {
-        // 走系统代理访问 GitHub
+        // Use the system proxy for GitHub.
         using var handler = new HttpClientHandler
         {
             UseProxy = true,
             Proxy = HttpClient.DefaultProxy,
             UseDefaultCredentials = true,
         };
-        // 不设总超时，连接超时与传输停滞分别由下面两个 CTS 控制
+        // Separate connection and idle-transfer timeouts avoid a total download deadline.
         using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         http.DefaultRequestHeaders.UserAgent.ParseAdd($"RyzenPboStudio/{CurrentVersion}");
 
@@ -255,7 +254,7 @@ internal static class Updater
                     throw new TimeoutException($"传输停滞 {IdleTimeout.TotalSeconds:0} 秒");
                 }
                 if (read <= 0) break;
-                idleCts.CancelAfter(IdleTimeout);   // 收到数据就把空闲计时推后
+                idleCts.CancelAfter(IdleTimeout); // Reset idle timeout after each chunk.
                 await dst.WriteAsync(buffer.AsMemory(0, read), token);
                 done += read;
                 if (total > 0) progress?.Report((int)(done * 100 / total));
@@ -267,7 +266,7 @@ internal static class Updater
             throw new IOException($"文件大小不符，应为 {expectedSize} 字节、实际 {actual} 字节");
     }
 
-    /// <summary>把下载失败的原因压成状态条放得下的短语。</summary>
+    /// <summary>Shortens download errors for the status bar.</summary>
     private static string ShortReason(Exception e) => e switch
     {
         TimeoutException => e.Message,
@@ -278,8 +277,8 @@ internal static class Updater
     };
 
     /// <summary>
-    /// 解压到临时目录并定位新版本的根目录（发布包顶层是一个版本命名的文件夹）。
-    /// 校验其中确有主程序，避免把损坏或结构不符的包拿去覆盖安装目录。
+    /// Extracts the update and finds its root by locating the main executable.
+    /// Rejects packages without the executable before replacing installed files.
     /// </summary>
     public static string ExtractAndVerify(string zipPath)
     {
@@ -293,7 +292,7 @@ internal static class Updater
         string root = extractDir;
         if (!File.Exists(Path.Combine(root, exeName)))
         {
-            // 顶层若是单个文件夹（发布包的常见形态），下沉一层再找
+            // Release archives usually place the executable one directory below the archive root.
             string[] subDirs = Directory.GetDirectories(root);
             string? match = subDirs.FirstOrDefault(d => File.Exists(Path.Combine(d, exeName)));
             if (match == null)
@@ -304,8 +303,8 @@ internal static class Updater
     }
 
     /// <summary>
-    /// 写出并启动替换脚本，然后由调用方退出程序。脚本等待本进程结束后用新文件覆盖安装目录，
-    /// 再重新启动程序。logs 与 profiles 被排除在覆盖之外——profiles 里是断电恢复所需的负压历史。
+    /// Writes a replacement script and launches it after download; caller then exits.
+    /// The script preserves logs and profiles and restarts the application.
     /// </summary>
     public static void LaunchReplacerAndExit(string newVersionRoot)
     {
@@ -314,7 +313,7 @@ internal static class Updater
         string workDir = Path.GetDirectoryName(newVersionRoot)!;
         string script = Path.Combine(workDir, "apply-update.cmd");
 
-        // /E 含空目录，/XD 排除运行时数据目录，/R /W 缩短重试以免卡住
+        // /E includes empty directories; /XD excludes runtime data; /R and /W limit retries.
         var sb = new StringBuilder();
         sb.AppendLine("@echo off");
         sb.AppendLine("chcp 65001 >nul");
@@ -343,7 +342,7 @@ internal static class Updater
             FileName = script,
             WorkingDirectory = workDir,
             UseShellExecute = true,
-            CreateNoWindow = false,   // 保留窗口，覆盖失败时用户能看到提示
+            CreateNoWindow = false, // Keep the console visible if replacement fails.
         });
     }
 }

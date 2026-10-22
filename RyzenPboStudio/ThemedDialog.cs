@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace RyzenPboStudio;
 
-/// <summary>暗色标题栏（Win10 2004+ 用属性 20，更早版本回退 19）。失败时标题栏保持系统色。</summary>
+/// <summary>Uses DWM dark-title attribute 20, falling back to 19 on older Windows.</summary>
 internal static class DarkTitleBar
 {
     [DllImport("dwmapi.dll")]

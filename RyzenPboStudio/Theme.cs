@@ -2,16 +2,16 @@ using System.Drawing.Drawing2D;
 
 namespace RyzenPboStudio;
 
-/// <summary>暗色主题调色板与绘图工具。</summary>
+/// <summary>Dark theme colors and drawing helpers.</summary>
 internal static class Theme
 {
-    public static readonly Color Bg = Color.FromArgb(0x16, 0x18, 0x1D);          // 窗口背景
-    public static readonly Color Surface = Color.FromArgb(0x21, 0x24, 0x2B);     // 卡片
-    public static readonly Color SurfaceAlt = Color.FromArgb(0x2A, 0x2E, 0x37);  // 输入框/次级面
-    public static readonly Color Border = Color.FromArgb(0x36, 0x3B, 0x46);      // 描边
-    public static readonly Color TextHi = Color.FromArgb(0xE6, 0xE8, 0xEC);      // 主文字
-    public static readonly Color TextLo = Color.FromArgb(0x8B, 0x91, 0x9E);      // 次文字
-    public static readonly Color Accent = Color.FromArgb(0xE2, 0x23, 0x1A);      // AMD 红
+    public static readonly Color Bg = Color.FromArgb(0x16, 0x18, 0x1D);
+    public static readonly Color Surface = Color.FromArgb(0x21, 0x24, 0x2B);
+    public static readonly Color SurfaceAlt = Color.FromArgb(0x2A, 0x2E, 0x37);
+    public static readonly Color Border = Color.FromArgb(0x36, 0x3B, 0x46);
+    public static readonly Color TextHi = Color.FromArgb(0xE6, 0xE8, 0xEC);
+    public static readonly Color TextLo = Color.FromArgb(0x8B, 0x91, 0x9E);
+    public static readonly Color Accent = Color.FromArgb(0xE2, 0x23, 0x1A);
     public static readonly Color AccentHover = Color.FromArgb(0xF2, 0x47, 0x3F);
     public static readonly Color AccentText = Color.White;
     public static readonly Color Success = Color.FromArgb(0x3F, 0xB9, 0x50);
@@ -39,7 +39,7 @@ internal static class Theme
     }
 }
 
-/// <summary>圆角卡片面板。</summary>
+/// <summary>Rounded card panel.</summary>
 internal sealed class Card : Panel
 {
     public int Radius { get; set; } = 10;
@@ -55,8 +55,8 @@ internal sealed class Card : Panel
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        // UserPaint 下系统不再自动填背景，必须先把圆角外的四角刷成父级底色，
-        // 否则四角会残留缓冲区里的黑色/杂色。
+        // UserPaint skips background fill, so clear the corners outside the rounded path
+        // with the parent color to avoid stale buffer pixels.
         e.Graphics.Clear(Parent?.BackColor ?? BackColor);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
@@ -68,14 +68,14 @@ internal sealed class Card : Panel
     }
 }
 
-/// <summary>扁平圆角按钮，带悬停/禁用态。</summary>
+/// <summary>Flat rounded button with hover and disabled states.</summary>
 internal sealed class PillButton : Button
 {
     public int Radius { get; set; } = 10;
     public Color Normal { get; set; } = Theme.Accent;
     public Color Hover { get; set; } = Theme.AccentHover;
     public Color Disabled { get; set; } = Theme.SurfaceAlt;
-    /// <summary>非 Empty 时在填充外再描一圈边，用于空心按钮；禁用时自动退成灰色描边。</summary>
+    /// <summary>Optional outline for hollow buttons; disabled outlines become gray.</summary>
     public Color Outline { get; set; } = Color.Empty;
 
     private bool _hover;
@@ -97,7 +97,7 @@ internal sealed class PillButton : Button
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        // 先用父级底色清掉圆角外的四角，避免黑色/红色残留边
+        // Clear outside corners with the parent color before drawing.
         e.Graphics.Clear(Parent?.BackColor ?? BackColor);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
@@ -107,7 +107,7 @@ internal sealed class PillButton : Button
         e.Graphics.FillPath(b, path);
         if (Outline != Color.Empty)
         {
-            // 描边路径内缩 1px，1.5px 的笔才不会被控件边界削掉外侧
+            // Inset the outline so its stroke stays within the control bounds.
             using var op = Theme.RoundRect(new Rectangle(1, 1, Width - 3, Height - 3), Math.Max(1, Radius - 1));
             using var pen = new Pen(Enabled ? Outline : Theme.Border, 1.5f);
             e.Graphics.DrawPath(pen, op);
@@ -118,7 +118,7 @@ internal sealed class PillButton : Button
     }
 }
 
-/// <summary>沉浸式导航标签（仿 HYDRA 底栏）：透明融入背景，激活时亮白文字 + 底部红色短下划线。</summary>
+/// <summary>Navigation tab with an underline for the active page.</summary>
 internal sealed class NavTabButton : Button
 {
     public bool Active { get; set; }

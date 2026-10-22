@@ -4,9 +4,9 @@ using System.Text.RegularExpressions;
 
 namespace RyzenPboStudio;
 
-/// <summary>读取 HWiNFO 共享内存(Global\HWiNFO_SENS_SM2)中每核 "Core N Clock" 频率，使监控 FREQ 与 HWiNFO 完全一致。
-/// 需 HWiNFO 运行并开启「共享内存支持」；不可用（未运行/未开/无权限）时返回 null，调用方回退到自算频率。
-/// 读数元素布局采用 HWiNFO SDK 文档偏移：szLabelOrig[128]@12、szUnit[16]@268、Value(double)@284。</summary>
+/// <summary>Reads per-core clock values from HWiNFO shared memory.
+/// Returns null when shared memory is unavailable so the monitor can use its fallback.
+/// Sensor offsets follow the HWiNFO SDK layout.</summary>
 internal static class HwInfoReader
 {
     private const string SmName = "Global\\HWiNFO_SENS_SM2";
@@ -14,7 +14,7 @@ internal static class HwInfoReader
     private const int ValueOffset = 284;   // 12 + szLabelOrig[128] + szLabelUser[128] + szUnit[16]
     private static readonly Regex CoreClockRx = new(@"^Core (\d+) Clock\b", RegexOptions.Compiled);
 
-    /// <summary>返回 物理核索引 → 当前 Core Clock(MHz)；HWiNFO 不可用时返回 null。</summary>
+    /// <summary>Maps physical cores to Core Clock in MHz, or returns null.</summary>
     public static Dictionary<int, double>? ReadCoreClocks()
     {
         try
@@ -36,7 +36,7 @@ internal static class HwInfoReader
                 int z = Array.IndexOf(lbl, (byte)0);
                 if (z <= 0) continue;
                 var m = CoreClockRx.Match(Encoding.ASCII.GetString(lbl, 0, z));
-                if (!m.Success) continue;   // 跳过 "Core N T0 Effective Clock" 等
+                if (!m.Success) continue; // Ignore per-thread effective-clock labels.
                 int core = int.Parse(m.Groups[1].Value);
                 double val = acc.ReadDouble(b + ValueOffset);
                 if (val > 0 && val < 10000) result[core] = val;
@@ -45,12 +45,12 @@ internal static class HwInfoReader
         }
         catch
         {
-            return null;   // OpenExisting 抛出即视为 HWiNFO 不可用
+            return null;
         }
     }
 
-    /// <summary>读取 HWiNFO 的 CPU 实测电压（SVI3 TFN 遥测）。Zen5 label 为 "CPU VDDCR_VDD Voltage (SVI3 TFN)"，
-    /// Zen4 为 "CPU Core Voltage (SVI3 TFN)"。HWiNFO 不可用时返回 null，调用方显示 "--"。</summary>
+    /// <summary>Reads SVI3 measured CPU voltage using Zen4/Zen5 sensor labels;
+    /// returns null when HWiNFO is unavailable.</summary>
     public static double? ReadCpuTelemetryVoltage()
     {
         try
@@ -84,8 +84,8 @@ internal static class HwInfoReader
         }
     }
 
-    /// <summary>读取 HWiNFO 的 "Bus Clock"（BCLK）。外置时钟发生器的主板上 CPU 内部 PLL 寄存器
-    /// 读不到真实外频，HWiNFO 的这个读数是准的。不可用时返回 null，调用方回退到自行反推。</summary>
+    /// <summary>Reads HWiNFO Bus Clock when the CPU PLL cannot see an external clock;
+    /// returns null when unavailable.</summary>
     public static double? ReadBusClock()
     {
         try

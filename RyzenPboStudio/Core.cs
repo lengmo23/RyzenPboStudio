@@ -83,15 +83,15 @@ internal sealed class TestState
     [JsonPropertyName("seq_phase")] public string? SeqPhase { get; set; }
     [JsonPropertyName("duration_seconds")] public int? DurationSeconds { get; set; }
     [JsonPropertyName("iterations_map")] public Dictionary<string, int>? IterationsMap { get; set; }
-    // 测试范围：ALL=全部核心，CCD=单个 CCD，EACH=逐 CCD 依次，CUSTOM=自定义核心。
-    // EACH 时 ScopeCcd 记录断电前跑到第几个 CCD，恢复后从那个 CCD 继续。
+    // Scope values: ALL, one CCD, each CCD in turn, or custom cores.
+    // EACH stores the current CCD so crash recovery can resume there.
     [JsonPropertyName("test_scope")] public string? TestScope { get; set; }
     [JsonPropertyName("scope_ccd")] public int? ScopeCcd { get; set; }
     [JsonPropertyName("scope_cores")] public List<int>? ScopeCores { get; set; }
     [JsonPropertyName("timestamp")] public double Timestamp { get; set; }
 }
 
-/// <summary>统一的子进程调用：捕获 stdout+stderr，带超时。</summary>
+/// <summary>Runs a child process with captured output and a timeout.</summary>
 internal static class ProcUtil
 {
     public static (int code, string output) Capture(
@@ -120,34 +120,34 @@ internal static class ProcUtil
         {
             try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
         }
-        p.WaitForExit(); // 确保异步读取回调全部冲刷
+        p.WaitForExit();
 
         return (p.HasExited ? p.ExitCode : -1, sb.ToString());
     }
 }
 
-/// <summary>工作目录、路径、状态文件、关机标记等。</summary>
+/// <summary>Application paths and runtime state files.</summary>
 internal static class Workspace
 {
-    /// <summary>EXE 所在目录（外部工具基于这里查找）。运行时产物见 LogsDir / ProfilesDir。</summary>
+    /// <summary>Executable directory used to locate external tools.</summary>
     public static readonly string BaseDir =
         AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
 
-    /// <summary>日志目录：y-cruncher 输出、手动导出的运行日志，均按日期时间命名。</summary>
+    /// <summary>Directory for session logs and y-cruncher output.</summary>
     public static string LogsDir => Path.Combine(BaseDir, "logs");
 
-    /// <summary>配置与状态目录：负压历史、恢复状态、CO/CS 配置、校准数据。</summary>
+    /// <summary>Directory for CO history, recovery state, CS settings, and calibration.</summary>
     public static string ProfilesDir => Path.Combine(BaseDir, "profiles");
 
     public static string StateFile => Path.Combine(ProfilesDir, "undervolt_state.json");
     public static string InProgressFlag => Path.Combine(ProfilesDir, "test_in_progress");
     public static string FinalOffsets => Path.Combine(ProfilesDir, "final_offsets.txt");
 
-    /// <summary>新建一条带时间戳的日志路径：logs\{prefix}_yyyyMMdd_HHmmss.{ext}。</summary>
+    /// <summary>Creates a timestamped path under logs.</summary>
     public static string NewLogPath(string prefix, string ext) =>
         Path.Combine(LogsDir, $"{prefix}_{DateTime.Now:yyyyMMdd_HHmmss}.{ext}");
 
-    /// <summary>旧版本把运行时文件直接写在 EXE 同目录。</summary>
+    /// <summary>Legacy runtime files were stored beside the executable.</summary>
     private static readonly string[] LegacyProfileFiles =
     {
         "undervolt_state.json", "test_in_progress", "final_offsets.txt",
@@ -157,14 +157,13 @@ internal static class Workspace
     private static readonly string[] LegacyLogFiles = { "y-cruncher.log", "undervolt_log.txt" };
 
     /// <summary>
-    /// 建立 logs\ 与 profiles\ 目录，并把旧版本遗留在 EXE 同目录的运行时文件迁移进来。
-    /// 必须在读取脏标记与负压历史之前调用：否则从旧版本升级后会读不到上次崩溃的恢复点，
-    /// 断电恢复会静默失效。
+    /// Creates runtime directories and migrates files from the old executable directory.
+    /// Call before reading the crash marker or CO history so upgrades preserve recovery.
     /// </summary>
     public static void EnsureLayout()
     {
-        try { Directory.CreateDirectory(LogsDir); } catch { /* 写入时会再报错 */ }
-        try { Directory.CreateDirectory(ProfilesDir); } catch { /* 同上 */ }
+        try { Directory.CreateDirectory(LogsDir); } catch { /* Report directory errors when writing. */ }
+        try { Directory.CreateDirectory(ProfilesDir); } catch { /* Report directory errors when writing. */ }
 
         foreach (string name in LegacyProfileFiles)
             MoveLegacy(Path.Combine(BaseDir, name), Path.Combine(ProfilesDir, name));
@@ -172,7 +171,7 @@ internal static class Workspace
             MoveLegacy(Path.Combine(BaseDir, name), Path.Combine(LogsDir, name));
     }
 
-    /// <summary>迁移单个旧文件。目标已存在说明新位置的数据更新，保留新的、不覆盖。</summary>
+    /// <summary>Migrates a legacy file without replacing newer data at the destination.</summary>
     private static void MoveLegacy(string from, string to)
     {
         try
@@ -182,7 +181,7 @@ internal static class Workspace
         }
         catch
         {
-            // 迁移失败不阻断启动；旧文件留在原处，最多是这一次读不到历史
+            // Keep the legacy file if migration fails; startup can continue.
         }
     }
 
@@ -191,7 +190,7 @@ internal static class Workspace
         try { if (File.Exists(StateFile)) File.Delete(StateFile); } catch { }
     }
 
-    /// <summary>标记「测试进行中」（脏标记）。正常结束/退出时清除；下次启动若仍在 = 上次异常中断。</summary>
+    /// <summary>Marks a test active; an uncleared marker indicates an interrupted run.</summary>
     public static void MarkInProgress(string info)
     {
         try { DurableIO.WriteAllText(InProgressFlag, info); } catch { }
@@ -209,7 +208,7 @@ internal static class Workspace
         try
         {
             string json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
-            DurableIO.WriteAllText(StateFile, json);   // 强制落盘 + 原子替换
+            DurableIO.WriteAllText(StateFile, json); // Flush and replace atomically.
         }
         catch (Exception e)
         {
@@ -235,7 +234,7 @@ internal static class Workspace
         return null;
     }
 
-    /// <summary>查询事件日志最近是否有内核电源事件(41)/Bug Check(1001)，仅用于丰富恢复日志，不作为判定依据。</summary>
+    /// <summary>Reads recent power or bug-check events for recovery logs, not crash detection.</summary>
     public static bool RecentKernelPowerEvent()
     {
         try
@@ -255,13 +254,13 @@ internal static class Workspace
         }
         catch
         {
-            // 查询失败按无事件处理
+            // Treat event-log query failure as no event.
         }
         return false;
     }
 }
 
-/// <summary>带强制落盘的写入：先写临时文件并 Flush 到物理磁盘，再原子替换；追加同样落盘。</summary>
+/// <summary>Flushes writes to disk before atomic replacement or append.</summary>
 internal static class DurableIO
 {
     public static void WriteAllText(string path, string text)
@@ -273,9 +272,9 @@ internal static class DurableIO
         {
             w.Write(text);
             w.Flush();
-            fs.Flush(flushToDisk: true);   // 真正写到盘，不只是系统缓存
+            fs.Flush(flushToDisk: true); // Flush through the OS cache to disk.
         }
-        File.Move(tmp, path, overwrite: true); // 同卷原子替换，断电不会留下半截文件
+        File.Move(tmp, path, overwrite: true); // Same-volume replacement prevents a partial state file.
     }
 
     public static void AppendLine(string path, string line)
@@ -288,7 +287,7 @@ internal static class DurableIO
     }
 }
 
-/// <summary>负压应用日志的一条记录。</summary>
+/// <summary>One persisted CO application record.</summary>
 internal sealed class AppliedEntry
 {
     [JsonPropertyName("ts")] public string Ts { get; set; } = "";
@@ -299,18 +298,17 @@ internal sealed class AppliedEntry
 }
 
 /// <summary>
-/// 负压应用历史日志（NDJSON，每行一组）。每次下发负压前先在这里强制落盘，
-/// 因此即便随后立刻死机断电，崩溃前的负压也已在磁盘上。追加式天然抗崩溃：
-/// 断电最多损坏最后一行，读取时自动跳过。
+/// Append and flush each CO group before writing the CPU.
+/// A crash can damage only the final NDJSON line, which readers skip.
 /// </summary>
 internal static class Journal
 {
     public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_offsets.ndjson");
 
-    /// <summary>用户在测试未运行时手动下发的负压：接管上次中断的负压，恢复时不再回退一档。</summary>
+    /// <summary>Manual CO applied while idle takes ownership and skips recovery backoff.</summary>
     public const string ManualTakeover = "manual-takeover";
 
-    /// <summary>用户在测试运行中手动下发的负压：其后若死机，仍按正常规则回退。</summary>
+    /// <summary>Manual CO applied during a test still receives crash backoff.</summary>
     public const string ManualInTest = "manual-in-test";
 
     public static void Record(IReadOnlyList<int> offsets, string mode, string? phase, string reason)
@@ -333,7 +331,7 @@ internal static class Journal
         }
     }
 
-    /// <summary>读取最后一条有效记录（跳过断电导致损坏的尾行）。</summary>
+    /// <summary>Reads the last valid record, skipping a damaged tail line.</summary>
     public static AppliedEntry? ReadLastEntry()
     {
         try
@@ -351,13 +349,13 @@ internal static class Journal
                 }
                 catch
                 {
-                    // 损坏行，继续往前找
+                    // Skip a damaged record and continue backward.
                 }
             }
         }
         catch
         {
-            // 读失败按无记录处理
+            // Treat a read failure as no history.
         }
         return null;
     }

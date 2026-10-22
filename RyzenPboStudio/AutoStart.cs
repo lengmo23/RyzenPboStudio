@@ -298,7 +298,7 @@ internal static class AutoStart
     }
 }
 
-/// <summary>Auto-resume countdown: OK on timeout or 立即开始, Cancel on 取消 or close.</summary>
+/// <summary>Accepts on timeout or Start Now; cancels on Cancel or close.</summary>
 internal sealed class ResumeCountdownDialog : Form
 {
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };

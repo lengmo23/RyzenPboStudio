@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace RyzenPboStudio;
 
-/// <summary>手动 Curve Optimizer 编辑器的可保存配置：每核负压 + FMax。</summary>
+/// <summary>Saved per-core CO offsets and FMax for the manual editor.</summary>
 internal sealed class CoProfile
 {
     [JsonPropertyName("offsets")] public List<int> Offsets { get; set; } = new();

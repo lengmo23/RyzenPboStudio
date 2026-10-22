@@ -1,8 +1,9 @@
 namespace RyzenPboStudio;
 
-/// <summary>Removes frequency differences from single-core voltages. Each core boosts to its own FMAX and the SMU
-/// follows the F/V curve, so a faster core legitimately asks for more voltage; comparing raw VID would rank
-/// well-binned fast cores as voltage-hungry.</summary>
+/// <summary>Removes frequency differences from single-core voltages (ScbRow.AlignV: the per-core voltage, or the
+/// global VID when the per-core segment is missing). Each core boosts to its own FMAX and the SMU follows the F/V
+/// curve, so a faster core legitimately asks for more voltage; comparing raw voltages would rank well-binned fast
+/// cores as voltage-hungry.</summary>
 internal static class FvAnalysis
 {
     /// <summary>Typical Zen4 / Zen5 F/V slope near 5.5 GHz, used when the samples cannot give a sane fit.</summary>
