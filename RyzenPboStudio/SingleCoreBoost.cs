@@ -9,8 +9,13 @@ namespace RyzenPboStudio;
 /// threads briefly wake other cores and spike the global rail, and a median ignores such sparse spikes.</summary>
 internal sealed record ScbRow(
     int Slot, int OsCore, int Ccd,
-    double Freq, double EffFreq, double Vid, double Tel, double Temp, double Power,
-    double Occ, int BusiestSlot, long Errors, int Frames, bool Valid);
+    double Freq, double EffFreq, double Vid, double Tel, double CoreVid, double Temp, double Power,
+    double Occ, int BusiestSlot, long Errors, int Frames, bool Valid)
+{
+    /// <summary>Voltage compared by voltage alignment: the core's own voltage from the PM table per-core segment,
+    /// or the global VDDCR_CPU VID when that segment was not found (CoreVid = 0).</summary>
+    public double AlignV => CoreVid > 0 ? CoreVid : Vid;
+}
 
 /// <summary>Single Core Boost: runs the synthetic load on one physical core at a time and records what that core
 /// reaches under the current CO. It is a measurement, not a stress test: it never writes CO and does not touch the
@@ -40,7 +45,7 @@ internal sealed class SingleCoreBoost : IDisposable
     public const int SecondsPerCore = 4;
 
     public static readonly string[] Columns =
-        { "Core", "Freq", "EffFreq", "VID", "TEL", "Temp", "Power" };
+        { "Core", "Freq", "EffFreq", "VID", "TEL", "CoreV", "Temp", "Power" };
 
     private static double? tscMHzCache;
 
@@ -117,7 +122,7 @@ internal sealed class SingleCoreBoost : IDisposable
     {
         if (!IsSupported)
         {
-            Log.Write("CPU 不支持 AVX2 / FMA，无法运行 Single Core Boost 负载", "ERROR");
+            Log.Write("CPU 不支持 AVX2 / FMA，无法运行 Single Core Boost", "ERROR");
             return null;
         }
 
@@ -129,18 +134,17 @@ internal sealed class SingleCoreBoost : IDisposable
             for (int k = 0; k < 5 && !scb.ProbeLayout(); k++) Thread.Sleep(300);
             if (scb.layout == null)
             {
-                Log.Write("PM Table 布局探测失败，无法进行单核测量", "ERROR");
+                Log.Write("PM Table 读取失败，无法测量", "ERROR");
                 scb.Dispose();
                 return null;
             }
             if (scb.powIdx < 0)
-                Log.Write("PM Table 每核功耗段未探到：无法确认负载是否落在目标核上，每核改为固定等待", "WARN");
-            Log.Write($"单核测量已就绪：BCLK {scb.bclk:F2} MHz，加重 {LoadHeavyPct}%，测量期间顶部监控只读 PM Table，不读每核 MSR");
+                Log.Write("未读到每核功耗，改为固定等待", "WARN");
             return scb;
         }
         catch (Exception e)
         {
-            Log.Write($"单核测量初始化失败: {e.Message}", "ERROR");
+            Log.Write($"单核测量初始化失败：{e.Message}", "ERROR");
             if (scb != null) scb.Dispose();
             else monitor?.EndQuiet();
             return null;
@@ -152,7 +156,7 @@ internal sealed class SingleCoreBoost : IDisposable
 
     public int CcdOf(int slot) => slot / CoresPerCcd;
 
-    /// <summary>CPPC rank inside the slot's CCD (1 = 银核, 2 = 金核, same as the monitor); 0 when CPPC cannot rank this CCD.
+    /// <summary>CPPC rank within the CCD (1 = silver core, 2 = gold core); zero when unavailable.
     /// The two top cores usually share one CPPC value, so ties go by core index.</summary>
     public int CcdRank(int slot) => slot >= 0 && slot < SlotCount ? ccdRank[slot] : 0;
 
@@ -176,14 +180,14 @@ internal sealed class SingleCoreBoost : IDisposable
             for (int attempt = 0; attempt < 2 && !ct.IsCancellationRequested; attempt++)
             {
                 if (!WaitForLoad(slot, ct) && !ct.IsCancellationRequested)
-                    Log.Write($"SCB Core {slot}: 等待负载就绪超时（{ReadyTimeoutMs / 1000}s），仍按现状采样", "WARN");
+                    Log.Write($"Core {slot}：负载就绪超时", "WARN");
                 long err0 = load.Errors;
                 if (ct.WaitHandle.WaitOne(SettleMs)) break;
                 r = Sample(slot, ct);
                 if (ct.IsCancellationRequested) { r = null; break; }
                 r = r with { Errors = load.Errors - err0 };
                 if (r.Valid || attempt == 1) break;
-                Log.Write($"SCB Core {slot}: 采样无效（{InvalidReason(r)}），重采一次", "WARN");
+                Log.Write($"Core {slot}：采样无效，重测", "WARN");
             }
             if (r == null) break;
 
@@ -306,7 +310,7 @@ internal sealed class SingleCoreBoost : IDisposable
         ReadCounters(slot, out ulong a0, out ulong m0, out ulong t0);
         long tick0 = Stopwatch.GetTimestamp();
 
-        var vids = new List<double>(); var tels = new List<double>(); var temps = new List<double>();
+        var vids = new List<double>(); var tels = new List<double>(); var coreVs = new List<double>(); var temps = new List<double>();
         var pows = new List<double>(); var freqs = new List<double>(); var effs = new List<double>();
         var hwFreqs = new List<double>(); var c0Self = new List<double>();
         var c0Sum = new double[n];
@@ -322,7 +326,10 @@ internal sealed class SingleCoreBoost : IDisposable
                     tels.Add(t[lay.CpuTelIdx]);
                 }
                 if (lay.PerCoreVoltIdx >= 0 && t.Length > lay.PerCoreVoltIdx + n + slot)
+                {
+                    coreVs.Add(t[lay.PerCoreVoltIdx + slot]);
                     temps.Add(t[lay.PerCoreVoltIdx + n + slot]);
+                }
                 if (powIdx >= 0 && t.Length > powIdx + slot)
                     pows.Add(t[powIdx + slot]);
                 if (lay.PerCoreFreqIdx >= 0 && t.Length > lay.PerCoreFreqIdx + n + slot)
@@ -368,7 +375,7 @@ internal sealed class SingleCoreBoost : IDisposable
         bool loaded = pows.Count == 0 || pow >= MinLoadW;
         int frames = vids.Count;
 
-        return new ScbRow(slot, os, CcdOf(slot), freq, eff, Median(vids), Median(tels), temp, pow,
+        return new ScbRow(slot, os, CcdOf(slot), freq, eff, Median(vids), Median(tels), Median(coreVs), temp, pow,
                           occ, busiest, 0, frames, frames > 0 && occ >= MinOcc && loaded);
     }
 
@@ -381,11 +388,11 @@ internal sealed class SingleCoreBoost : IDisposable
     }
 
     private static string InvalidReason(ScbRow r) =>
-        r.BusiestSlot >= 0 && r.BusiestSlot != r.Slot ? $"负载实际在 Core {r.BusiestSlot}"
-        : r.Occ < MinOcc ? $"占用率仅 {r.Occ:F0}%"
-        : $"核心功耗仅 {r.Power:F1} W，负载未压上";
+        r.BusiestSlot >= 0 && r.BusiestSlot != r.Slot ? $"负载在 Core {r.BusiestSlot}"
+        : r.Occ < MinOcc ? $"占用 {r.Occ:F0}%"
+        : $"功耗 {r.Power:F1} W";
 
-    public static string RankLabel(int rank) => rank switch { 1 => "#1 银", 2 => "#2 金", > 0 => $"#{rank}", _ => "-" };
+    public static string RankLabel(int rank) => rank switch { 1 or 2 => "#1", > 0 => $"#{rank}", _ => "-" };
 
     /// <summary>Table row; invalid rows and computation errors show only through RowColor, details go to the log.</summary>
     public string[] Cells(ScbRow r) => new[]
@@ -395,26 +402,28 @@ internal sealed class SingleCoreBoost : IDisposable
         $"{r.EffFreq:F0}",
         $"{r.Vid:F3}",
         $"{r.Tel:F3}",
+        r.CoreVid > 0 ? $"{r.CoreVid:F3}" : "-",
         $"{r.Temp:F1}",
         $"{r.Power:F1}",
     };
 
     public static Color? RowColor(ScbRow r) => !r.Valid ? Theme.TextLo : r.Errors > 0 ? Theme.Warn : null;
 
-    public void LogRow(string tag, ScbRow r)
+    /// <summary>One data line per core; the pass it belongs to is logged once before the rows.</summary>
+    public void LogRow(ScbRow r)
     {
-        var sb = new StringBuilder($"{tag} CCD{r.Ccd} Core {r.Slot,-2} {RankLabel(CcdRank(r.Slot)),-5} " +
-                                   $"FREQ {r.Freq,5:F0}  EFF {r.EffFreq,5:F0}  VID {r.Vid:F3}  TEL {r.Tel:F3}  " +
+        var sb = new StringBuilder($"CCD{r.Ccd} Core {r.Slot,-2} {RankLabel(CcdRank(r.Slot)),-5} " +
+                                   $"FREQ {r.Freq,5:F0}  EFF {r.EffFreq,5:F0}  VID {r.Vid:F3}  TEL {r.Tel:F3}  CORE V {r.CoreVid:F3}  " +
                                    $"TEMP {r.Temp,4:F1}  PWR {r.Power,4:F1}W");
-        if (r.Errors > 0) sb.Append($"  ERR {r.Errors}（计算结果与参考值不符）");
-        if (!r.Valid) sb.Append($"  ← 无效（{InvalidReason(r)}）");
+        if (r.Errors > 0) sb.Append($"  ERR {r.Errors}");
+        if (!r.Valid) sb.Append($"  无效（{InvalidReason(r)}）");
         Log.Write(sb.ToString(), r.Valid && r.Errors == 0 ? "INFO" : "WARN");
     }
 
     /// <summary>Button flow: measure every usable core once, fill the window and log a summary.</summary>
     public static bool Run(MonitorView? monitor, ResultsPanel win, CancellationToken ct)
     {
-        Log.Write("Single Core Boost 开始：逐核运行单核负载，测量当前 CO 下的频率 / 有效频率 / 电压（不修改任何参数）");
+        Log.Write("Single Core Boost 开始");
         using var scb = Open(monitor);
         if (scb == null) return false;
 
@@ -427,7 +436,7 @@ internal sealed class SingleCoreBoost : IDisposable
             {
                 done++;
                 win.AddRow(scb.Cells(r), RowColor(r));
-                scb.LogRow("SCB", r);
+                scb.LogRow(r);
             }, ct);
 
         string text = scb.Summary(rows, ct.IsCancellationRequested);
@@ -452,11 +461,10 @@ internal sealed class SingleCoreBoost : IDisposable
         }
         var errs = rows.Where(r => r.Errors > 0).ToList();
         if (errs.Count > 0)
-            sb.Append($"\n计算错误：{string.Join("、", errs.Select(r => $"Core {r.Slot} ×{r.Errors}"))}。" +
-                      "SCB 不是压力测试，仅作提示，稳定性请以压力测试为准");
+            sb.Append($"\n计算错误：{string.Join("、", errs.Select(r => $"Core {r.Slot} ×{r.Errors}"))}");
         var invalid = rows.Where(r => !r.Valid).Select(r => r.Slot).ToList();
         if (invalid.Count > 0)
-            sb.Append($"\n无效测量：Core {string.Join("、", invalid)}（负载未落到目标核，读数不可信）");
+            sb.Append($"\n无效：Core {string.Join("、", invalid)}");
         return sb.ToString();
     }
 
