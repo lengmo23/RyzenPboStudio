@@ -16,14 +16,14 @@ internal static class DarkTitleBar
             if (DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int)) != 0)
                 DwmSetWindowAttribute(hwnd, 19, ref on, sizeof(int));
         }
-        catch { /* 非关键 */ }
+        catch { /* Dark title bar is optional. */ }
     }
 }
 
-/// <summary>与主界面同风格的提示框：暗色卡片底、左侧色条（警告为黄色）、红色「确定」按钮。</summary>
+/// <summary>Dark message and confirmation dialog matching the main window.</summary>
 internal sealed class ThemedDialog : Form
 {
-    private ThemedDialog(string text, string title, bool warning)
+    private ThemedDialog(string text, string title, bool warning, string acceptText, string? cancelText)
     {
         Text = title;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -53,19 +53,36 @@ internal sealed class ThemedDialog : Form
             BackColor = Theme.Surface,
             Margin = new Padding(0, 0, 0, 16),
         };
-        var ok = new PillButton
+        PillButton NewButton(string label, DialogResult result, bool primary) => new()
         {
-            Text = "确定",
+            Text = label,
             Size = new Size(96, 34),
-            Normal = Theme.Accent,
-            Hover = Theme.AccentHover,
-            ForeColor = Theme.AccentText,
+            Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
+            Hover = primary ? Theme.AccentHover : Theme.Border,
+            ForeColor = primary ? Theme.AccentText : Theme.TextHi,
             BackColor = Theme.Surface,
             Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold),
-            Anchor = AnchorStyles.Right,
-            DialogResult = DialogResult.OK,
+            DialogResult = result,
             Margin = new Padding(0),
         };
+        var ok = NewButton(acceptText, cancelText == null ? DialogResult.OK : DialogResult.Yes, true);
+        var buttons = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.RightToLeft,
+            Anchor = AnchorStyles.Right,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        PillButton? cancel = null;
+        if (cancelText != null)
+        {
+            cancel = NewButton(cancelText, DialogResult.No, false);
+            cancel.Margin = new Padding(8, 0, 0, 0);
+            buttons.Controls.Add(cancel);
+        }
+        buttons.Controls.Add(ok);
 
         var layout = new TableLayoutPanel
         {
@@ -80,11 +97,11 @@ internal sealed class ThemedDialog : Form
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         layout.Controls.Add(stripe, 0, 0);
         layout.Controls.Add(message, 1, 0);
-        layout.Controls.Add(ok, 1, 1);
+        layout.Controls.Add(buttons, 1, 1);
 
         Controls.Add(layout);
         AcceptButton = ok;
-        CancelButton = ok;
+        CancelButton = cancel ?? ok;
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -93,9 +110,16 @@ internal sealed class ThemedDialog : Form
         DarkTitleBar.Apply(Handle);
     }
 
-    public static void Show(IWin32Window owner, string text, string title, bool warning = false)
+    public static void Show(IWin32Window? owner, string text, string title, bool warning = false)
     {
-        using var dlg = new ThemedDialog(text, title, warning);
-        dlg.ShowDialog(owner);
+        using var dlg = new ThemedDialog(text, title, warning, "确定", null);
+        if (owner == null) dlg.StartPosition = FormStartPosition.CenterScreen;
+        if (owner == null) dlg.ShowDialog(); else dlg.ShowDialog(owner);
+    }
+
+    public static bool Ask(IWin32Window owner, string text, string title, string acceptText, string cancelText)
+    {
+        using var dlg = new ThemedDialog(text, title, false, acceptText, cancelText);
+        return dlg.ShowDialog(owner) == DialogResult.Yes;
     }
 }

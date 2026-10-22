@@ -649,11 +649,11 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>自定义核心选择框：逐物理核勾选（熔丝屏蔽槽禁用）。确认且至少选中一个才返回 true。</summary>
+    /// <summary>Selects physical cores, excluding fused-off slots; requires at least one selection.</summary>
     private bool PromptCustomCores()
     {
         int slots = _coSlotCount > 0 ? _coSlotCount : RyzenSmu.SlotCount;
-        if (slots <= 0) { MessageBox.Show("未能读取核心拓扑，无法自定义测试范围。", "提示"); return false; }
+        if (slots <= 0) { ThemedDialog.Show(this, "未能读取核心拓扑，无法自定义测试范围。", "提示", warning: true); return false; }
 
         using var dlg = new Form
         {
@@ -666,6 +666,7 @@ internal sealed partial class MainForm : Form
             ForeColor = Theme.TextHi,
             Font = new Font(Theme.FontFamily, 9F),
         };
+        dlg.HandleCreated += (_, _) => DarkTitleBar.Apply(dlg.Handle);
 
         int rows = (slots + 1) / 2;
         var grid = new TableLayoutPanel
@@ -730,7 +731,7 @@ internal sealed partial class MainForm : Form
 
         if (picked.Count == 0)
         {
-            MessageBox.Show("至少要选择一个核心。", "提示");
+            ThemedDialog.Show(this, "至少要选择一个核心。", "提示", warning: true);
             return false;
         }
         _customCores = picked;
@@ -782,14 +783,14 @@ internal sealed partial class MainForm : Form
         Ui(() =>
         {
             SetStatus($"手动模式：物理核心 [{cores}] 报错，负压未自动调整", Theme.Accent);
-            MessageBox.Show(
+            ThemedDialog.Show(this,
                 $"检测到报错，已停止测试。\n\n报错物理核心: {cores}\n\n" +
                 "当前为「手动模式」，负压未做任何改动。请在 AMD PBO 页手动调整负压后重新开始测试。",
-                "手动模式 · 检测到报错", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "手动模式 · 检测到报错", warning: true);
         });
     }
 
-    /// <summary>组合测试按钮（顺序/和项）：点选即设为当前模式并高亮。</summary>
+    /// <summary>Selects sequential or combined test mode.</summary>
     private PillButton MakeModeButton(string text, string mode, int width, string tip)
     {
         var b = new PillButton
@@ -920,12 +921,11 @@ internal sealed partial class MainForm : Form
     {
         if (_updateBusy) return;
 
-        // 压测期间不更新：更新需退出程序，应先让测试正常收尾
+        // Do not exit for an update while a stress test is running.
         if (_testTask is { IsCompleted: false })
         {
             if (manual)
-                MessageBox.Show("测试进行中，无法更新。\n\n请先停止测试，待其安全收尾后再试。",
-                    "正在测试", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                ThemedDialog.Show(Form.ActiveForm ?? this, "测试进行中，无法更新。\n\n请先停止测试，待其安全收尾后再试。", "正在测试");
             return;
         }
 
@@ -941,8 +941,7 @@ internal sealed partial class MainForm : Form
             catch (Exception e)
             {
                 if (manual)
-                    MessageBox.Show($"检查更新失败：{e.Message}", "检查更新",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    ThemedDialog.Show(Form.ActiveForm ?? this, $"检查更新失败：{e.Message}", "检查更新", warning: true);
                 return;
             }
             if (IsDisposed) return;
@@ -953,8 +952,7 @@ internal sealed partial class MainForm : Form
                 Updater.ClearSkip();
                 RefreshUpdateLinkText();
                 if (manual)
-                    MessageBox.Show($"当前已是最新版本 v{Updater.CurrentVersion}。", "检查更新",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    ThemedDialog.Show(Form.ActiveForm ?? this, $"当前已是最新版本 v{Updater.CurrentVersion}。", "检查更新");
                 return;
             }
 
@@ -962,19 +960,19 @@ internal sealed partial class MainForm : Form
             _knownNewVersion = info.Version;
             RefreshUpdateLinkText();
 
-            // 用户跳过的版本启动时不再弹窗，状态条仍显示新版本，点击可更新
+            // Keep a skipped version visible in the info dialog without prompting at startup.
             if (!manual && Updater.IsSkipped(info.Version)) return;
 
             string notes = info.Notes.Length > 600 ? info.Notes[..600] + "\n..." : info.Notes;
-            var choice = MessageBox.Show(
+            bool update = ThemedDialog.Ask(Form.ActiveForm ?? this,
                 $"发现新版本 {info.Tag}，当前为 v{Updater.CurrentVersion}。\n\n" +
                 $"{notes}\n\n" +
                 $"下载大小约 {info.Size / 1024.0 / 1024.0:F1} MB。\n" +
                 "更新会关闭程序、覆盖安装目录后自动重启；\n" +
                 "logs 与 profiles 文件夹（负压历史与恢复数据）不会被改动。\n\n" +
                 "现在更新吗？",
-                "发现新版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (choice != DialogResult.Yes)
+                "发现新版本", "现在更新", "暂不更新");
+            if (!update)
             {
                 Updater.SkipVersion(info.Version);
                 return;
@@ -1044,12 +1042,11 @@ internal sealed partial class MainForm : Form
             RefreshUpdateLinkText();
             SetStatus("更新包校验失败", Theme.Accent);
             Log.Write($"更新包解压/校验失败：{e.Message}", "WARN");
-            MessageBox.Show($"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ThemedDialog.Show(Form.ActiveForm ?? this, $"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新", warning: true);
             return;
         }
 
-        // 到这一步新文件已就绪，剩下的覆盖必须等本进程退出后由脚本执行
+        // Replacement must wait until this process exits.
         try
         {
             Updater.LaunchReplacerAndExit(newRoot);
@@ -1057,8 +1054,7 @@ internal sealed partial class MainForm : Form
         catch (Exception e)
         {
             RefreshUpdateLinkText();
-            MessageBox.Show($"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新", warning: true);
             return;
         }
 
@@ -1080,6 +1076,7 @@ internal sealed partial class MainForm : Form
             ForeColor = Theme.TextHi,
             Font = new Font(Theme.FontFamily, 9F),
         };
+        dlg.HandleCreated += (_, _) => DarkTitleBar.Apply(dlg.Handle);
 
         var tip = new Label
         {
@@ -1157,7 +1154,7 @@ internal sealed partial class MainForm : Form
         dlg.CancelButton = closeBtn;
         dlg.AutoSize = true;
         dlg.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        dlg.ShowDialog(this);
+        dlg.ShowDialog(Form.ActiveForm ?? this);
     }
 
     private static Label NewFieldLabel(string text) => new()
@@ -1199,8 +1196,8 @@ internal sealed partial class MainForm : Form
         return b;
     }
 
-    /// <summary>用系统默认浏览器打开链接。</summary>
-    private static void OpenUrl(string url)
+    /// <summary>Opens a link in the default browser.</summary>
+    private void OpenUrl(string url)
     {
         try
         {
@@ -1208,13 +1205,12 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception e)
         {
-            MessageBox.Show($"无法打开链接：{e.Message}\n\n{url}", "提示",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法打开链接：{e.Message}\n\n{url}", "提示", warning: true);
         }
     }
 
-    /// <summary>运行日志卡片。LOGGING 页与 AMD PBO 页各建一个实例（一个 TextBox 无法同时挂在两页），
-    /// 两个日志框由 OnLogTimer 镜像写入，内容始终一致。</summary>
+    /// <summary>Builds a log card for either page; separate textboxes mirror the same log
+    /// because one control cannot belong to two parents.</summary>
     private Control BuildLogCard(TextBox box)
     {
         var card = NewCard();
@@ -2043,8 +2039,7 @@ internal sealed partial class MainForm : Form
         }
         catch (FileNotFoundException ex)
         {
-            MessageBox.Show(ex.Message, "缺少 y-cruncher",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ThemedDialog.Show(this, ex.Message, "缺少 y-cruncher", warning: true);
             _startBtn.Enabled = true;
             return;
         }
@@ -2411,14 +2406,14 @@ internal sealed partial class MainForm : Form
         OnTestFinishedForAutostart();
 
         if (_testCompletedNormally && !_stopRequested)
-            MessageBox.Show("测试已完成！", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ThemedDialog.Show(this, "测试已完成！", "完成");
         else if (!_stopRequested)
-            MessageBox.Show("测试未跑完，未生成最终结果，原因见运行日志。", "测试未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ThemedDialog.Show(this, "测试未跑完，未生成最终结果，原因见运行日志。", "测试未完成", warning: true);
         else
-            MessageBox.Show("测试已停止，进程已清理完成。", "已停止", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ThemedDialog.Show(this, "测试已停止，进程已清理完成。", "已停止");
     }
 
-    // ── Single Core Boost / 电压对齐 ────────────────────────────────────────
+    // Single Core Boost and voltage alignment
 
     private PillButton _scbBtn = null!;
     private PillButton _alignBtn = null!;
@@ -2464,7 +2459,7 @@ internal sealed partial class MainForm : Form
         if (_testTask is { IsCompleted: false } || _measureTask is { IsCompleted: false }) return;
         if (!SingleCoreBoost.IsSupported)
         {
-            MessageBox.Show("CPU 不支持 AVX2 / FMA，无法运行单核负载。", title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ThemedDialog.Show(this, "CPU 不支持 AVX2 / FMA，无法运行单核负载。", title, warning: true);
             return;
         }
 
@@ -2526,7 +2521,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "参数错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ThemedDialog.Show(this, ex.Message, "参数错误", warning: true);
             return false;
         }
     }
@@ -2630,17 +2625,15 @@ internal sealed partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // 仅用户主动关闭算「正常退出」；系统重启/关机、任务管理器结束等都视为异常中断。
+        // Only user-initiated close is a normal exit; preserve recovery state on shutdown or termination.
         bool userClosing = e.CloseReason is CloseReason.UserClosing or CloseReason.ApplicationExitCall;
 
         if (_testTask is { IsCompleted: false })
         {
-            // 系统重启/关机时不要弹窗阻塞流程；只在用户主动关闭时确认。
+            // Do not block system shutdown with a confirmation dialog.
             if (userClosing)
             {
-                var r = MessageBox.Show("测试正在运行，确定要退出吗？", "确认",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (r != DialogResult.Yes)
+                if (!ThemedDialog.Ask(this, "测试正在运行，确定要退出吗？", "确认", "退出", "取消"))
                 {
                     e.Cancel = true;
                     return;
