@@ -488,7 +488,16 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return (0, 0, 0); }
     }
 
-    /// <summary>设置所有物理核心负压。</summary>
+    private const int CoReadbackPolls = 3;          // readbacks after each write
+    private const int CoMinWaitMs = 75;             // first wait between readbacks / rewrites
+    private const int CoMaxWaitMs = 1000;           // the wait doubles up to this while the SMU stays busy
+    private const int CoCoreTimeoutMs = 20_000;     // per core; a busy SMU clears long before this
+
+    /// <summary>
+    /// Writes each active core's CO and verifies its readback. A busy SMU mailbox makes writes or readbacks fail for
+    /// a while, so a core is rewritten with a growing wait until its readback matches; only a core that still does not
+    /// match after CoCoreTimeoutMs fails the call. Retries are not logged; the caller reports a failure.
+    /// </summary>
     public static bool SetOffsets(IReadOnlyList<int> offsets)
     {
         try
@@ -496,12 +505,35 @@ internal static class RyzenSmu
             lock (IoLock)
             {
                 var cpu = GetCpu();
+
+                bool WriteVerified(int i)
+                {
+                    var (ccd, core) = MapIndex(cpu, i);
+                    uint mask = cpu.MakeCoreMask(core, ccd, 0);
+                    long deadline = Environment.TickCount64 + CoCoreTimeoutMs;
+                    int wait = CoMinWaitMs;
+                    while (true)
+                    {
+                        cpu.SetPsmMarginSingleCore(mask, offsets[i]);   // the readback decides, not the return value
+                        for (int poll = 0; poll < CoReadbackPolls; poll++)
+                        {
+                            Thread.Sleep(wait);
+                            if (TryReadMargin(cpu, ccd, core) == offsets[i]) return true;
+                        }
+                        if (Environment.TickCount64 >= deadline) return false;
+                        wait = Math.Min(wait * 2, CoMaxWaitMs);
+                    }
+                }
+
+                for (int i = 0; i < offsets.Count; i++)
+                    if (!IsSlotDisabledNoLock(cpu, i) && !WriteVerified(i)) return false;
+
+                // Final pass: a core that drifted while the others were written is written again the same way
                 for (int i = 0; i < offsets.Count; i++)
                 {
                     if (IsSlotDisabledNoLock(cpu, i)) continue;
                     var (ccd, core) = MapIndex(cpu, i);
-                    if (!cpu.SetPsmMarginSingleCore(cpu.MakeCoreMask(core, ccd, 0), offsets[i]))
-                        Log.Write($"负压写入失败: 核心 {i} (CCD{ccd} Core{core}) 返回 false", "WARN");
+                    if (TryReadMargin(cpu, ccd, core) != offsets[i] && !WriteVerified(i)) return false;
                 }
                 return true;
             }
