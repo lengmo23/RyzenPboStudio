@@ -80,18 +80,32 @@ internal sealed class ResultsPanel : Panel
             Height = 64,
             Multiline = true,
             ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
+            ScrollBars = ScrollBars.None,   // UpdateSummaryScroll turns it on only when the text overflows
             BorderStyle = BorderStyle.None,
             BackColor = Theme.Surface,
             ForeColor = Theme.TextHi,
             Font = new Font(Theme.FontFamily, 9F),
         };
 
-        // 添加顺序决定停靠优先级：标题、状态占顶，摘要占底，表格填中间
+        summary.Resize += (_, _) => UpdateSummaryScroll();
+
+        // Dock order keeps the title and status above the summary and filling table.
         Controls.Add(grid);
         Controls.Add(summary);
         Controls.Add(status);
         Controls.Add(title);
+    }
+
+    /// <summary>Shows the summary's scrollbar only when its text is taller than the box; an always-on bar shows an
+    /// empty track while idle.</summary>
+    private void UpdateSummaryScroll()
+    {
+        int width = Math.Max(1, summary.ClientSize.Width - SystemInformation.VerticalScrollBarWidth);
+        int height = summary.Text.Length == 0 ? 0
+            : TextRenderer.MeasureText(summary.Text, summary.Font, new Size(width, int.MaxValue),
+                                       TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height;
+        var want = height > summary.ClientSize.Height ? ScrollBars.Vertical : ScrollBars.None;
+        if (summary.ScrollBars != want) summary.ScrollBars = want;
     }
 
     /// <summary>Clears the previous result for a new run (UI thread).</summary>
@@ -104,6 +118,7 @@ internal sealed class ResultsPanel : Panel
         grid.Rows.Clear();
         grid.Columns.Clear();
         summary.Clear();
+        UpdateSummaryScroll();
     }
 
     private void Post(Action a)
@@ -140,7 +155,11 @@ internal sealed class ResultsPanel : Panel
         catch (InvalidOperationException) { }   // no room to display rows
     });
 
-    public void SetSummary(string text) => Post(() => summary.Text = text.Replace("\n", "\r\n"));
+    public void SetSummary(string text) => Post(() =>
+    {
+        summary.Text = text.Replace("\n", "\r\n");
+        UpdateSummaryScroll();
+    });
 
     public void Finish(string finalStatus, bool ok) => Post(() =>
     {
