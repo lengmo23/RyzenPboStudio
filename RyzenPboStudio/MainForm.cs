@@ -2179,13 +2179,13 @@ internal sealed partial class MainForm : Form
         {
             _testMode = SelectedMode();
             seqResumePhase = null;
-            // 逐 CCD 模式正常启动时总是从 CCD0 开始；_scopeCcd 只在崩溃恢复时用作续跑起点
+            // Start EACH mode at CCD0 unless resuming an interrupted CCD.
             if (_testScope == "EACH") _scopeCcd = 0;
             offsets = RyzenSmu.ReadOffsets(numCores);
             testRound = 0;
-            Log.Write($"当前负压: [{string.Join(", ", offsets)}]");
+            Log.WriteCo("当前 CO 值：", offsets);
 
-            // 记录基线负压（落盘），作为尚未回调时的崩溃恢复依据
+            // Persist baseline offsets for recovery before the first test callback.
             Journal.Record(offsets, _testMode, null, "baseline");
         }
 
@@ -2352,9 +2352,20 @@ internal sealed partial class MainForm : Form
         }
 
         Log.Write("\n" + new string('=', 50));
-        Log.Write("最终负压设置:");
-        for (int i = 0; i < offsets.Count; i++)
-            Log.Write($"  物理核心 {i}: {offsets[i]}");
+        Log.WriteCo("过测 PBO 参数：", offsets);
+        if (RyzenSmu.IsCurveShaperSupported())
+        {
+            int[,]? cs = RyzenSmu.ReadCurveShaper(out bool csReadable);
+            // Old BIOS cannot read CS back; the last applied values stand in
+            if (!csReadable) cs = _csState.HasMargins ? _csState.ToGrid() : null;
+            if (cs != null)
+            {
+                Log.Write($"{"Curve Shaper",-12}{"LOW",5}{"MED",5}{"HIGH",5}");
+                string[] tiers = { "MIN", "LOW", "MED", "HIGH", "MAX" };
+                for (int t = 0; t < 5; t++)
+                    Log.Write($"{tiers[t],-12}{cs[t, 0],5}{cs[t, 1],5}{cs[t, 2],5}");
+            }
+        }
 
         try
         {
