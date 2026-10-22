@@ -42,16 +42,16 @@ internal sealed partial class MainForm : Form
     private readonly NumericUpDown _fmaxBox = new();
     private bool _fmaxWritable = true;
 
-    // ── PBO 限制参数条（fmax 复用 _fmaxBox）─────────────────────────────────
+    // PBO limit controls
     private readonly NumericUpDown _pptBox = new();
     private readonly NumericUpDown _edcBox = new();
     private readonly NumericUpDown _tdcBox = new();
-    private readonly DomainUpDown _scalarBox = new();
+    private readonly ComboBox _scalarBox = new();
     private bool _scalarWritable = true;
-    private bool _scalarDirty;   // 用户改过 Scalar 选项；没改过时 Apply 不写它，避免 5000 系顺带打开 PBO
-    private bool _scalarLoading; // 程序回填 Scalar 时不算用户改动
+    private bool _scalarDirty; // Avoid writing unchanged Scalar, which would enable PBO on Zen3.
+    private bool _scalarLoading; // Programmatic Scalar refresh is not a user change.
 
-    // ── 手动 Curve Shaper 编辑器（5 频率档 × 3 温度档）──────────────────────
+    // Curve Shaper editor
     private readonly NumericUpDown[,] _csCells = new NumericUpDown[5, 3];
     private PillButton _csApplyBtn = null!;
     private PillButton _csRefreshBtn = null!;
@@ -465,8 +465,7 @@ internal sealed partial class MainForm : Form
             Padding = new Padding(0),
         };
 
-        // 单项测试：标题与每轮(秒) / 轮数同一行，下拉框在其下方
-        var modeTitle = new Label { Text = "单项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 6, 12, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var modeTitle = new Label { Text = "单项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 4), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
 
         _modeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         _modeCombo.FlatStyle = FlatStyle.Flat;
@@ -474,23 +473,21 @@ internal sealed partial class MainForm : Form
         _modeCombo.BackColor = Theme.SurfaceAlt;
         _modeCombo.ForeColor = Theme.TextHi;
         _modeCombo.Font = new Font(Theme.FontFamily, 10F);
-        _modeCombo.Margin = new Padding(0, 0, 0, 2);
+        _modeCombo.Margin = new Padding(0);
         foreach (var opt in ModeOptions) _modeCombo.Items.Add(opt.display);
         _modeCombo.SelectedIndexChanged += (_, _) =>
         {
             if (_modeCombo.SelectedIndex < 0) return;
-            _selectedMode = ModeOptions[_modeCombo.SelectedIndex].mode; // 选单项即清除组合测试高亮
+            _selectedMode = ModeOptions[_modeCombo.SelectedIndex].mode;
             RestyleModeButtons();
         };
-        var head = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
-        head.Controls.Add(modeTitle);
-        AddFieldPair(head, "每轮(秒)", _durationBox, 66);
-        AddFieldPair(head, "轮数", _roundsBox, 60);
+        var fields = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 6, 0, 6) };
+        AddFieldPair(fields, "每轮(秒)", _durationBox, 66);
+        AddFieldPair(fields, "轮数", _roundsBox, 60);
         _durationBox.Text = _durationSeconds.ToString();
         _roundsBox.Text = _singleRounds.ToString();
 
-        // 多项测试（顺序 / 组合）：两键横排，测试项与轮数放在悬停提示里
-        var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int modeGap = 10;
         int modeBtnWidth = (TestRowWidth - modeGap) / 2;
         _seqBtn = MakeModeButton("顺序测试", "SEQ", modeBtnWidth,
@@ -499,12 +496,11 @@ internal sealed partial class MainForm : Form
             $"VT3 + BKT + SVT 三项同时跑，共 {ComboRounds} 轮\n同时施加多种负载，比单项更容易暴露不稳定");
         _seqBtn.Margin = new Padding(0, 0, modeGap, 0);
         _comboBtn.Margin = new Padding(0);
-        var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0) };
+        var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
         modeRow.Controls.Add(_seqBtn);
         modeRow.Controls.Add(_comboBtn);
 
-        // 负压调整方式：自动回退 / 手动（只提醒），两键横排等分一行
-        var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int adjGap = 10;
         int adjBtnWidth = (TestRowWidth - adjGap) / 2;
         _autoAdjBtn   = MakeAdjustButton("自动模式", true,
@@ -515,12 +511,11 @@ internal sealed partial class MainForm : Form
         _manualAdjBtn.Width = adjBtnWidth;
         _autoAdjBtn.Margin = new Padding(0, 0, adjGap, 0);
         _manualAdjBtn.Margin = new Padding(0);
-        var adjRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 0) };
+        var adjRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
         adjRow.Controls.Add(_autoAdjBtn);
         adjRow.Controls.Add(_manualAdjBtn);
 
-        // 测试范围：第一行「全部核心 | 自定义」所有机型都有；第二行「各 CCD | 逐 CCD」只有多 CCD 机型才出。
-        var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 0), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         var scopeRow1 = BuildScopeRow(new (string, string, string)[]
         {
             ("全部核心", "ALL", "所有核心一起压测，与旧版本行为一致"),
@@ -548,8 +543,9 @@ internal sealed partial class MainForm : Form
         runRow.Controls.Add(_startBtn);
         runRow.Controls.Add(_stopBtn);
 
-        body.Controls.Add(head);
+        body.Controls.Add(modeTitle);
         body.Controls.Add(_modeCombo);
+        body.Controls.Add(fields);
         body.Controls.Add(comboTitle);
         body.Controls.Add(modeRow);
         body.Controls.Add(adjTitle);
@@ -1417,20 +1413,24 @@ internal sealed partial class MainForm : Form
         ConfigNumBox(_pptBox, 30, 400, 5, 62);
         ConfigNumBox(_edcBox, 10, 400, 5, 62);
         ConfigNumBox(_tdcBox, 10, 300, 5, 62);
-        _pptBox.Value = 142;   // 启动后由 InitPboBoxes 用 CPU 实际值覆盖
+        _pptBox.Value = 142; // Replaced with live CPU limits during initialization.
         _edcBox.Value = 180;
         _tdcBox.Value = 160;
 
-        // PBO Scalar：与数字框同款上下箭头框。列表倒序排，箭头向上即倍数变大；Auto 即 1X
-        StyleUpDown(_scalarBox, 84);
-        _scalarBox.ReadOnly = true;
-        _scalarBox.Wrap = false;
-        for (int x = 10; x >= 2; x--) _scalarBox.Items.Add($"{x}X");
-        _scalarBox.Items.Add("Auto(1X)");
+        // Scalar 1X maps to Auto.
+        _scalarBox.Width = 70;
+        _scalarBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        _scalarBox.MaxDropDownItems = 10;
+        _scalarBox.FlatStyle = FlatStyle.Flat;
+        _scalarBox.BackColor = Theme.SurfaceAlt;
+        _scalarBox.ForeColor = Theme.TextHi;
+        _scalarBox.Font = new Font(Theme.MonoFamily, 10F);
+        _scalarBox.Margin = new Padding(0, 5, 8, 0);
+        for (int x = 1; x <= 10; x++) _scalarBox.Items.Add($"{x}X");
         SelectScalar(1);
-        _scalarBox.SelectedItemChanged += (_, _) => { if (!_scalarLoading) _scalarDirty = true; };
+        _scalarBox.SelectedIndexChanged += (_, _) => { if (!_scalarLoading) _scalarDirty = true; };
         _tips.SetToolTip(_scalarBox,
-            "PBO Scalar：Auto 即 1X。倍数越大，SMU 在 boost 时给的电压越高。\n" +
+            "PBO Scalar：1X 对应 Auto。倍数越大，SMU 在 boost 时给的电压越高。\n" +
             "只在选项改动后点 Apply 才写入；5000 系写入时会同时打开 PBO。");
 
         var flow = new FlowLayoutPanel
@@ -1441,7 +1441,7 @@ internal sealed partial class MainForm : Form
             FlowDirection = FlowDirection.LeftToRight,
             Margin = new Padding(0),
         };
-        AddParamPair(flow, "FMax (MHz)", _fmaxBox);
+        AddParamPair(flow, "FMax", _fmaxBox);
         AddParamPair(flow, "PPT (W)", _pptBox);
         AddParamPair(flow, "EDC (A)", _edcBox);
         AddParamPair(flow, "TDC (A)", _tdcBox);
@@ -1477,15 +1477,15 @@ internal sealed partial class MainForm : Form
         box.Margin = new Padding(0, 7, 10, 0);
     }
 
-    /// <summary>按倍数（1~10）选中 Scalar 项；列表倒序，10X 在索引 0、Auto(1X) 在末尾。</summary>
+    /// <summary>Selects and clamps the Scalar multiplier to 1–10.</summary>
     private void SelectScalar(int scalar)
     {
         _scalarLoading = true;
-        _scalarBox.SelectedIndex = 10 - Math.Clamp(scalar, 1, 10);
+        _scalarBox.SelectedIndex = Math.Clamp(scalar, 1, 10) - 1;
         _scalarLoading = false;
     }
 
-    private uint SelectedScalar() => (uint)(10 - _scalarBox.SelectedIndex);
+    private uint SelectedScalar() => (uint)(_scalarBox.SelectedIndex + 1);
 
     private static void AddParamPair(FlowLayoutPanel parent, string label, Control box)
     {
@@ -1991,15 +1991,28 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>四周 1px 描边（Padding 留出的那一圈）。</summary>
+    /// <summary>Updates the rounded window region after resizing.</summary>
+    protected override void OnSizeChanged(EventArgs e)
+    {
+        base.OnSizeChanged(e);
+        if (Width <= 0 || Height <= 0) return;
+        using var path = Theme.RoundRect(new Rectangle(0, 0, Width, Height), 8);
+        var previous = Region;
+        Region = new Region(path);
+        previous?.Dispose();
+    }
+
+    /// <summary>Draws a one-pixel rounded window border.</summary>
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
         using var pen = new Pen(Theme.Border);
-        e.Graphics.DrawRectangle(pen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var path = Theme.RoundRect(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), 8);
+        e.Graphics.DrawPath(pen, path);
     }
 
-    // ── 定时器 ──────────────────────────────────────────────────────────────
+    // Timers
 
     private void OnLogTimer(object? sender, EventArgs e)
     {
