@@ -365,12 +365,20 @@ internal static class Journal
     public static List<int>? ReadLastOffsets() => ReadLastEntry()?.Offsets;
 }
 
-/// <summary>下发负压的唯一入口：先落盘日志，再写入 CPU（persist-before-apply）。</summary>
+/// <summary>Persists CO history before applying offsets to the CPU.</summary>
 internal static class Tuning
 {
     public static bool Apply(IReadOnlyList<int> offsets, string mode, string? phase, string reason)
     {
-        Journal.Record(offsets, mode, phase, reason); // ① 先强制落盘
-        return RyzenSmu.SetOffsets(offsets);          // ② 再下发到 CPU
+        Journal.Record(offsets, mode, phase, reason); // Persist offsets first.
+        bool ok = RyzenSmu.SetOffsets(offsets); // Then apply and verify each core.
+        if (!ok)
+        {
+            // A failed write may leave some cores changed; preserve the observed state for crash recovery.
+            var observed = RyzenSmu.ReadOffsets(offsets.Count);
+            Journal.Record(observed, mode, phase, "write-verification-failed");
+            Log.WriteCo("CO 写入失败，当前读数（读取失败记为 0）：", observed, level: "WARN");
+        }
+        return ok;
     }
 }
