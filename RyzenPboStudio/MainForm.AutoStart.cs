@@ -4,36 +4,43 @@ namespace RyzenPboStudio;
 internal sealed partial class MainForm
 {
     private readonly bool _autostartLaunch;   // launched by the scheduled task with --autostart
-    private PillButton _bootApplyBtn = null!;
+    private CheckBox _bootApplyCheck = null!;
     private bool _bootApplyOn;
 
-    /// <summary>Boot-apply toggle under the CO buttons: grey when off, accent red when on, like the mode buttons.</summary>
-    private PillButton BuildBootApplyButton()
+    /// <summary>Boot-apply checkbox beside the source credit.</summary>
+    private CheckBox BuildBootApplyCheckBox()
     {
-        _bootApplyBtn = Ghost("开机自动应用");
+        _bootApplyCheck = new CheckBox
+        {
+            Text = "开机自动应用 CO/CS",
+            AutoCheck = false,
+            AutoSize = false,
+            Size = new Size(158, 24),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.Bg,
+            ForeColor = Theme.TextLo,
+            Font = new Font(Theme.FontFamily, 8.5F),
+        };
+        _bootApplyCheck.FlatAppearance.BorderColor = Theme.Border;
+        _bootApplyCheck.FlatAppearance.CheckedBackColor = Theme.Accent;
         _bootApplyOn = AutoStart.BootApplyEnabled;
-        RestyleBootApplyButton();
-        _tips.SetToolTip(_bootApplyBtn,
-            "开启后每次登录 Windows，本程序会自动以管理员身份启动，\n" +
-            "并写入已保存的 CO（Curve Optimizer 的 Save）与 CS（Curve Shaper 的 Save / 最后一次 Apply）。\n" +
-            "只写每核负压与 Curve Shaper，不改 FMax / PPT / EDC / TDC / Scalar。再点一次即关闭。\n" +
-            "测试中途死机重启后也会借此自动启动并恢复测试；完全无人值守需在 Windows 中开启自动登录。");
-        _bootApplyBtn.Click += (_, _) => OnBootApplyToggled(!_bootApplyOn);
-        return _bootApplyBtn;
+        RestyleBootApplyCheckBox();
+        _bootApplyCheck.Click += (_, _) => OnBootApplyToggled(!_bootApplyOn);
+        return _bootApplyCheck;
     }
 
-    private void RestyleBootApplyButton()
+    private void RestyleBootApplyCheckBox()
     {
-        _bootApplyBtn.Normal = _bootApplyOn ? Theme.Accent : Theme.SurfaceAlt;
-        _bootApplyBtn.Hover = _bootApplyOn ? Theme.AccentHover : Theme.Border;
-        _bootApplyBtn.ForeColor = _bootApplyOn ? Theme.AccentText : Theme.TextHi;
-        _bootApplyBtn.Invalidate();
+        _bootApplyCheck.Checked = _bootApplyOn;
+        _bootApplyCheck.ForeColor = _bootApplyOn ? Theme.TextHi : Theme.TextLo;
     }
 
     private void OnBootApplyToggled(bool on)
     {
         if (on)
         {
+            if (!ConfirmBootApplyRisk()) return;
+
             var profile = CoProfile.Load();
             int slots = RyzenSmu.SlotCount;
             string? problem = profile.Offsets.Count == 0
@@ -54,12 +61,74 @@ internal sealed partial class MainForm
             return;
         }
         _bootApplyOn = on;
-        RestyleBootApplyButton();
+        RestyleBootApplyCheckBox();
         Log.Write(on
             ? "已开启开机自动应用 CO/CS：每次登录 Windows 后自动启动并写入已保存的 CO/CS"
             : "已关闭开机自动应用 CO/CS");
         SetStatus(on ? "已开启开机自动应用 CO/CS" : "已关闭开机自动应用 CO/CS", Theme.Success);
         SyncAutoStartInBackground();
+    }
+
+    private bool ConfirmBootApplyRisk()
+    {
+        using var dialog = new Form
+        {
+            Text = "开机自动应用 CO/CS",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(480, 150),
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            BackColor = Theme.Surface,
+            ForeColor = Theme.TextHi,
+            Font = new Font(Theme.FontFamily, 10F),
+        };
+        dialog.HandleCreated += (_, _) => DarkTitleBar.Apply(dialog.Handle);
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Theme.Surface,
+            Padding = new Padding(20, 18, 20, 16),
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        layout.Controls.Add(new Label
+        {
+            Text = "请确保当前保存的CO/CS经过测试，否则开机可能会CPU欠压出现冻屏死机问题！",
+            Dock = DockStyle.Fill,
+            ForeColor = Theme.TextHi,
+            BackColor = Theme.Surface,
+            TextAlign = ContentAlignment.MiddleLeft,
+        }, 0, 0);
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        var acknowledge = Primary("我已知晓");
+        acknowledge.Size = new Size(112, 34);
+        acknowledge.BackColor = Theme.Surface;
+        acknowledge.Margin = new Padding(0);
+        acknowledge.DialogResult = DialogResult.OK;
+        var cancel = Ghost("取消");
+        cancel.Size = new Size(84, 34);
+        cancel.BackColor = Theme.Surface;
+        cancel.Margin = new Padding(0, 0, 10, 0);
+        cancel.DialogResult = DialogResult.Cancel;
+        buttons.Controls.Add(acknowledge);
+        buttons.Controls.Add(cancel);
+        layout.Controls.Add(buttons, 0, 1);
+        dialog.Controls.Add(layout);
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog(this) == DialogResult.OK;
     }
 
     /// <summary>Runs once the form is shown and editors are initialised: handles --autostart and syncs the task.</summary>
