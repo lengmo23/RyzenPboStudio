@@ -2430,7 +2430,7 @@ internal sealed partial class MainForm : Form
         _scbBtn.Margin = new Padding(0, 0, gap, 0);
         _alignBtn.Margin = new Padding(0);
         _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压\n只是测量，不是压力测试，不修改任何参数");
-        _tips.SetToolTip(_alignBtn, "CO 全部置 0 后逐核测量单核电压，各 CCD 以 CPPC 最高核心中同频电压最低者为基准对齐\n再分 CCD 粗找、细找单核频率平台，最终全核复核");
+        _tips.SetToolTip(_alignBtn, "全部核心 CO 归零后逐核测量频率与电压，各 CCD 以 CPPC 最高核心中同频电压最低者为基准核，逐步降低 CO 对齐电压\n再以 CCD 为单位整体降低 CO 探明单核频率平台，复测全部核心后微调频率偏低的核心");
         _scbBtn.Click += (_, _) => StartMeasure("Single Core Boost", (win, ct) => SingleCoreBoost.Run(_monitorView, win, ct));
         _alignBtn.Click += (_, _) => OnAlignClick();
         row.Controls.Add(_scbBtn);
