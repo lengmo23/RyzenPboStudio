@@ -127,7 +127,7 @@ internal static class AutoStart
                 bool want = BootApplyEnabled || (Workspace.WasInterrupted() && !LoadResume().Declined);
                 bool exists = TaskExists();
                 if (want)
-                    return exists && TaskMatchesCurrentExe() ? null : Register(exists);
+                    return exists && TaskMatchesCurrentExe() ? null : Register();
                 return exists ? Unregister() : null;
             }
             catch (Exception e)
@@ -161,7 +161,7 @@ internal static class AutoStart
         }
     }
 
-    private static string? Register(bool replacing)
+    private static string? Register()
     {
         string exe = Environment.ProcessPath
             ?? throw new InvalidOperationException("无法获取程序路径");
@@ -189,9 +189,6 @@ internal static class AutoStart
             Log.Write($"注册开机自启任务失败（schtasks 返回 {code}）: {output.Trim()}", "WARN");
             return "开机自启任务注册失败，详见日志";
         }
-        Log.Write(replacing
-            ? "已更新开机自启任务（程序路径已变更）"
-            : "已注册开机自启任务：登录 Windows 约 30 秒后自动以管理员身份启动本程序");
         return null;
     }
 
@@ -203,7 +200,6 @@ internal static class AutoStart
             Log.Write($"移除开机自启任务失败（schtasks 返回 {code}）: {output.Trim()}", "WARN");
             return "开机自启任务移除失败，详见日志";
         }
-        Log.Write("已移除开机自启任务");
         return null;
     }
 
