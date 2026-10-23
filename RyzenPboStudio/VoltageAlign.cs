@@ -59,24 +59,25 @@ internal static class VoltageAlign
                                              * SingleCoreBoost.SecondsPerCore / 60.0);
 
         var text = new StringBuilder();
-        text.Append("电压对齐将依次执行：\n");
-        text.Append("1. 将所有核心 CO 置 0（Curve Shaper 不变）；\n");
-        text.Append("2. 运行 Single Core Boost 逐核测量频率与电压，每个 CCD 选出目标核；\n");
-        text.Append($"3. 电压对齐：电压偏高的核心逐步加负压，向目标核看齐（最多 {MaxIterations} 轮）；\n");
-        text.Append("4. 频率对齐：每个 CCD 整体加负压寻找频率上限，再单独微调频率偏低的核心。\n");
-        text.Append($"预计最长约 {minutes} 分钟。\n\n");
+        text.Append("【开始前必看】\n");
+        text.Append("· 请先保存正在编辑的文档和工作进度，并关闭不需要的程序。测试过程中可能出现冻屏死机，未保存的数据将会丢失；\n");
+        text.Append("· 请关闭浏览器、游戏、下载工具及其他后台程序，并暂停 Windows 更新、杀毒扫描等可能在后台运行的任务；\n");
+        text.Append("· 测试期间请勿操作电脑。任何额外负载都会干扰单核测量，导致结果失真。\n\n");
 
-        text.Append("【测试环境】\n");
-        text.Append("请先关闭浏览器、游戏、监控软件及其他后台程序，测试期间不要操作电脑。" +
-                    "后台负载会干扰单核测量，导致结果偏差。\n\n");
+        text.Append("电压对齐将按以下流程自动执行：\n");
+        text.Append("1. 将全部核心的 CO 归零，CS 保持不变；\n");
+        text.Append("2. 运行 Single Core Boost，逐核采集频率与电压，并为每个 CCD 选定基准核；\n");
+        text.Append($"3. 电压对齐：对电压高于基准核的核心逐步降低 CO，使其向基准核收敛（最多 {MaxIterations} 轮）；\n");
+        text.Append("4. 频率对齐：以 CCD 为单位整体降低 CO，探明单核频率平台；复测全部核心后，再对频率偏低的核心单独微调。\n");
+        text.Append($"预计耗时最长约 {minutes} 分钟。\n\n");
 
         text.Append("【风险声明】\n");
-        text.Append("· 电压对齐会向 CPU 写入负压（CO），负压过深可能导致系统不稳定、蓝屏或死机重启，重启后写入的 CO 自动失效；\n");
-        text.Append("· 对齐结果仅基于单核负载测量，未经稳定性验证，保存使用前必须通过压力测试；\n");
-        text.Append("· 结果会填入 CO 编辑器，不会自动保存；\n");
+        text.Append("· 电压对齐过程中会向 CPU 写入 CO，CPU 电压过低可能导致系统不稳定、冻屏死机，重启后本次写入的 CO 自动失效；\n");
+        text.Append("· 对齐结果仅基于单核负载测量，尚未经过稳定性验证，保存使用前务必完成压力测试；\n");
+        text.Append("· 结果将填入 CO 编辑器，不会自动保存；\n");
         text.Append("· 降压与超频存在硬件风险，由此造成的数据丢失或硬件损坏由用户自行承担。");
         if (Workspace.WasInterrupted())
-            text.Append($"\n\n注意：存在上次压测中断的恢复点，之后开始测试将在对齐结果上 +{Config.StepOnError} 续跑。");
+            text.Append($"\n\n注意：检测到上次压测中断的恢复点。之后开始测试时，将以本次对齐结果为基础，统一回退 {Config.StepOnError} 档后继续。");
 
         using var dlg = new Form
         {
