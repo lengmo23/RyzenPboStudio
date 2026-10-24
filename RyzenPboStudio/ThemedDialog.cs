@@ -23,7 +23,7 @@ internal static class DarkTitleBar
 /// <summary>Dark message and confirmation dialog matching the main window.</summary>
 internal sealed class ThemedDialog : Form
 {
-    private ThemedDialog(string text, string title, bool warning, string acceptText, string? cancelText)
+    private ThemedDialog(string text, string title, string acceptText, string? cancelText)
     {
         Text = title;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -37,13 +37,6 @@ internal sealed class ThemedDialog : Form
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
-        var stripe = new Panel
-        {
-            Width = 4,
-            Dock = DockStyle.Fill,
-            BackColor = warning ? Theme.Warn : Theme.Border,
-            Margin = new Padding(0, 2, 12, 2),
-        };
         var message = new Label
         {
             Text = text,
@@ -88,16 +81,14 @@ internal sealed class ThemedDialog : Form
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2,
+            ColumnCount = 1,
             RowCount = 2,
             BackColor = Theme.Surface,
             Padding = new Padding(18, 16, 18, 14),
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.Controls.Add(stripe, 0, 0);
-        layout.Controls.Add(message, 1, 0);
-        layout.Controls.Add(buttons, 1, 1);
+        layout.Controls.Add(message, 0, 0);
+        layout.Controls.Add(buttons, 0, 1);
 
         Controls.Add(layout);
         AcceptButton = ok;
@@ -110,16 +101,16 @@ internal sealed class ThemedDialog : Form
         DarkTitleBar.Apply(Handle);
     }
 
-    public static void Show(IWin32Window? owner, string text, string title, bool warning = false)
+    public static void Show(IWin32Window? owner, string text, string title)
     {
-        using var dlg = new ThemedDialog(text, title, warning, "确定", null);
+        using var dlg = new ThemedDialog(text, title, "确定", null);
         if (owner == null) dlg.StartPosition = FormStartPosition.CenterScreen;
         if (owner == null) dlg.ShowDialog(); else dlg.ShowDialog(owner);
     }
 
     public static bool Ask(IWin32Window owner, string text, string title, string acceptText, string cancelText)
     {
-        using var dlg = new ThemedDialog(text, title, false, acceptText, cancelText);
+        using var dlg = new ThemedDialog(text, title, acceptText, cancelText);
         return dlg.ShowDialog(owner) == DialogResult.Yes;
     }
 }

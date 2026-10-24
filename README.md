@@ -14,7 +14,8 @@ A PBO tuning and Curve Optimizer undervolt testing tool for AMD Ryzen 5000 / 700
 
 ### Live monitoring
 
-A per-core monitor stays at the top of the window, split by CCD:
+The title bar shows the CPU, motherboard and BIOS, memory, graphics card and OS. Below it, a per-core
+monitor stays at the top of the window, split by CCD:
 
 - Per-core CPPC ranking (gold / silver core marks), CO value, effective frequency, frequency and VID
 - Average load and hotspot temperature of each CCD
@@ -22,15 +23,34 @@ A per-core monitor stays at the top of the window, split by CCD:
 
 Per-core frequency is taken from the first available source:
 
-1. HWiNFO readings, when HWiNFO is running with shared memory enabled
-2. The per-core frequency reported by the SMU in the PM Table, scaled by BCLK
-3. The HW P-state snapshot MSR `0xC0010293`, when the PM Table does not provide it
+1. The per-core frequency reported by the SMU in the PM Table, scaled by BCLK
+2. The HW P-state snapshot MSR `0xC0010293`, when the PM Table does not provide it
+
+When the PM Table provides per-core frequency, effective frequency and load are read from it too, without
+core-pinned counter reads, so idle cores are not woken up.
 
 ### Manual tuning
 
 - **Curve Optimizer**: per-core offsets, with save and load
 - **Curve Shaper**: 5 frequency points × 3 temperature points
-- **PBO limits**: FMax, PPT, EDC and TDC applied in one click
+- **PBO limits**: FMax, PPT, EDC, TDC and PBO Scalar (1X–10X) applied in one click; items the CPU does
+  not support are disabled
+- **Apply at boot**: when checked, the program starts at every Windows logon and applies the saved CO /
+  Curve Shaper (FMax, PPT, EDC, TDC and Scalar are left alone). Turning it on asks you to confirm the
+  settings have passed a stress test; if the system restarts abnormally shortly after applying, the next
+  boot skips applying to avoid a crash loop
+
+### Single Core Boost and voltage alignment
+
+Both need AVX2 / FMA and are on the **TESTING** page:
+
+- **Single Core Boost**: runs a single-core load on each core in turn and measures its frequency,
+  effective frequency, VID and per-core voltage under the current CO. It only measures and changes nothing
+- **Voltage alignment**: sets every core's CO to 0 and measures each core, then in each CCD takes the
+  highest-CPPC core needing the least voltage at the same frequency as the reference and adds negative
+  offset to cores that need more voltage. It then shifts each CCD as a whole to find the frequency
+  ceiling, fine-tunes cores that fall behind and rechecks all cores. The result only fills the CO
+  editor and is not saved; it must pass a stress test before you use it
 
 ### Automatic undervolt testing
 
@@ -38,11 +58,15 @@ y-cruncher is used as the stress engine. Three test types are available:
 
 | Type       | Description                                                  |
 | ---------- | ------------------------------------------------------------ |
-| Single     | One of VT3, BKT, SVT, BBP, SFTv4, SNT, FFTv4 or N63          |
+| Single     | One of VT3, BKT, SVT, BBP, SFTv4, SNT, FFTv4, N63 or YC018   |
 | Sequential | VT3 → BKT → SVT one after another, 20 / 10 / 10 rounds by default |
 | Combined   | VT3, BKT and SVT together, 10 rounds by default              |
 
 The duration of each round is adjustable (120 seconds by default), and so is the round count of a single test.
+
+YC018 is a memory-intensive Pi benchmark whose size follows installed memory: 10b at 48 GB or more, 5b at
+32 GB or more, 2.5b below that. It always uses all cores; the round count is the number of benchmark
+runs and the round duration does not apply.
 
 Test scope:
 
@@ -70,10 +94,15 @@ backs every core off by one step, and continues from where it stopped.
 
 If you applied CO values by hand after the crash, the test continues with your values and does not back off.
 
+Starting a test registers a logon task. If the system crashes mid-test, the program starts again after
+you log on to Windows and resumes the test after a 30-second countdown, which you can cancel. After 10
+consecutive crashes following an automatic resume it stops resuming and leaves the rest to you. For fully
+unattended runs, enable automatic logon in Windows.
+
 ### Online update
 
-New versions on GitHub are checked at startup, or manually from the bottom-right corner of the TESTING
-page. If GitHub is unreachable, several download mirrors are tried in turn. Updates never touch
+New versions on GitHub are checked at startup, or manually from the About dialog behind the i button in
+the title bar. If GitHub is unreachable, several download mirrors are tried in turn. Updates never touch
 `logs\` or `profiles\`.
 
 ## Requirements
@@ -104,7 +133,8 @@ Feature support by generation:
 2. Run `AMD Ryzen PBO Studio.exe` as administrator
 3. On the **AMD PBO** page, check that the monitor shows valid readings (per-core frequency and CO values)
 4. On the **TESTING** page, choose the test type and scope, then click Start
-5. When every test passes, the final offsets are written to `profiles\final_offsets.txt`
+5. When every test passes, the run log lists the passed CO and Curve Shaper values, and the final offsets
+   are written to `profiles\final_offsets.txt`
 
 The program creates two folders next to the EXE:
 

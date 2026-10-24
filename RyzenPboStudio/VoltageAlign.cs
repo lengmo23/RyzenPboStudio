@@ -10,6 +10,9 @@ internal static class VoltageAlign
 {
     private const int MaxIterations = 8;
     private const int MaxStepPerIteration = 10;   // negative CO counts per core per iteration
+    private const int MaxStepPerIterationPositive = 4;  // a positive start means the margin below it is thin
+    private const double OcBclkMHz = 100.2;       // CPU BCLK above this counts as raised; leaves room for 100.05 readings
+    private const int MaxStartCo = 30;            // same ceiling as the CO editor
     private const int OvershootBackoff = 1;       // a core overshot below the target gets this many counts back per iteration
     private const int CoarseFrequencyStep = 4;
     private const int FineFrequencyStep = 2;
@@ -35,8 +38,15 @@ internal static class VoltageAlign
 
     private const string Mode = "ALIGN", Reason = "voltage-align";
 
-    private static readonly string[] ResultColumns =
-        { "CCD", "Core", "排名", "角色", "CoreV 全0", "ΔV 全0 (mV)", "CoreV 最终", "ΔV 最终 (mV)", "最终 CO", "备注" };
+    private static string[] ResultColumns(int startCo)
+    {
+        string start = startCo == 0 ? "全0" : "起点";
+        return new[] { "CCD", "Core", "排名", "角色", $"CoreV {start}", $"ΔV {start} (mV)", "CoreV 最终", "ΔV 最终 (mV)", "最终 CO", "备注" };
+    }
+
+    private static bool IsBclkRaised(double bclk) => bclk > OcBclkMHz;
+
+    private static string CoLabel(int co) => co > 0 ? $"+{co}" : co.ToString();
 
     /// <summary>Zen3 accepts CO down to -30, Zen4 / Zen5 down to -50.</summary>
     private static int GenerationCoMin()
@@ -50,9 +60,13 @@ internal static class VoltageAlign
         }
     }
 
-    /// <summary>Confirmation dialog; the target core is chosen from the all-0 measurement, not by the user.</summary>
-    public static bool Confirm(IWin32Window owner)
+    /// <summary>Confirmation dialog; the target core is chosen from the starting measurement, not by the user.
+    /// Under raised BCLK the user sets the common starting CO, since the positive CO a core needs depends on the BCLK.</summary>
+    public static bool Confirm(IWin32Window owner, MonitorView? monitor, out int startCo)
     {
+        startCo = 0;
+        double bclk = SingleCoreBoost.ResolveBclk(monitor);
+        bool raised = IsBclkRaised(bclk);
         int cores = Enumerable.Range(0, RyzenSmu.SlotCount).Count(s => !RyzenSmu.IsSlotDisabled(s));
         int ccdCount = Math.Max(1, (int)RyzenSmu.SharedCpu.info.topology.ccds);
         int minutes = (int)Math.Ceiling((cores * (2 + MaxIterations + MaxFreqAlignRounds) + ccdCount * 3 * (1 + MaxCoarseRounds + 3))
@@ -65,7 +79,7 @@ internal static class VoltageAlign
         text.Append("· 测试期间请勿操作电脑。任何额外负载都会干扰单核测量，导致结果失真。\n\n");
 
         text.Append("电压对齐将按以下流程自动执行：\n");
-        text.Append("1. 将全部核心的 CO 归零，CS 保持不变；\n");
+        text.Append(raised ? "1. 将全部核心的 CO 统一设为下方的起点 CO，CS 保持不变；\n" : "1. 将全部核心的 CO 归零，CS 保持不变；\n");
         text.Append("2. 运行 Single Core Boost，逐核采集频率与电压，并为每个 CCD 选定基准核；\n");
         text.Append($"3. 电压对齐：对电压高于基准核的核心逐步降低 CO，使其向基准核收敛（最多 {MaxIterations} 轮）；\n");
         text.Append("4. 频率对齐：以 CCD 为单位整体降低 CO，探明单核频率平台；复测全部核心后，再对频率偏低的核心单独微调。\n");
@@ -104,6 +118,39 @@ internal static class VoltageAlign
         };
         body.Controls.Add(new Label { Text = text.ToString(), AutoSize = true, MaximumSize = new Size(560, 0), Margin = new Padding(0, 0, 0, 12) });
 
+        NumericUpDown? startBox = null;
+        if (raised)
+        {
+            // Default to the highest positive CO now in effect, usually what the BIOS needs for this BCLK
+            int current = Math.Max(0, RyzenSmu.ReadOffsets(RyzenSmu.SlotCount).DefaultIfEmpty(0).Max());
+            body.Controls.Add(new Label
+            {
+                Text = $"检测到核心外频 {bclk:F2} MHz。外频提高后部分核心可能需要正 CO 才能稳定，请填写起点 CO：" +
+                       "对齐从全部核心统一设为该值开始，结果不会高于该值；起点大于 0 时单步下调上限为 " +
+                       $"{MaxStepPerIterationPositive} 档。默认值为当前生效 CO 中的最大正值。",
+                AutoSize = true,
+                MaximumSize = new Size(560, 0),
+                ForeColor = Theme.Warn,
+                Margin = new Padding(0, 0, 0, 6),
+            });
+            var row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, BackColor = Theme.Bg, Margin = new Padding(0, 0, 0, 12) };
+            row.Controls.Add(new Label { Text = "起点 CO", AutoSize = true, Margin = new Padding(0, 5, 8, 0) });
+            startBox = new NumericUpDown
+            {
+                Minimum = 0,
+                Maximum = MaxStartCo,
+                Value = Math.Min(current, MaxStartCo),
+                Width = 58,
+                BackColor = Theme.SurfaceAlt,
+                ForeColor = Theme.TextHi,
+                BorderStyle = BorderStyle.FixedSingle,
+                TextAlign = HorizontalAlignment.Center,
+                Font = new Font(Theme.MonoFamily, 10F),
+            };
+            row.Controls.Add(startBox);
+            body.Controls.Add(row);
+        }
+
         var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Anchor = AnchorStyles.Right, BackColor = Theme.Bg };
         Button Btn(string t, DialogResult r) => new()
         {
@@ -124,12 +171,14 @@ internal static class VoltageAlign
         dlg.AcceptButton = ok;
         dlg.CancelButton = cancel;
 
-        return dlg.ShowDialog(owner) == DialogResult.OK;
+        if (dlg.ShowDialog(owner) != DialogResult.OK) return false;
+        startCo = startBox != null ? (int)startBox.Value : 0;
+        return true;
     }
 
     /// <summary>Runs the alignment. Returns the offsets last applied to the CPU (also after cancel), or null when
     /// nothing was applied.</summary>
-    public static List<int>? Run(MonitorView? monitor, int editorMin, ResultsPanel win, CancellationToken ct)
+    public static List<int>? Run(MonitorView? monitor, int editorMin, int startCo, ResultsPanel win, CancellationToken ct)
     {
         Log.Write("电压对齐开始");
         using var scb = SingleCoreBoost.Open(monitor);
@@ -139,21 +188,26 @@ internal static class VoltageAlign
         int coMin = Math.Max(editorMin, GenerationCoMin());
         var slots = Enumerable.Range(0, n).Where(scb.IsUsable).ToList();
         var ccds = slots.GroupBy(scb.CcdOf).OrderBy(g => g.Key).ToDictionary(g => g.Key, g => g.ToList());
+        int maxStep = startCo > 0 ? MaxStepPerIterationPositive : MaxStepPerIteration;
+        if (IsBclkRaised(scb.Bclk))
+            Log.Write($"核心外频 {scb.Bclk:F2} MHz，起点 CO {CoLabel(startCo)}，单步下调上限 {maxStep} 档");
 
-        // Zeroing is not logged; later writes log only the cores they change relative to it
-        var offsets = Enumerable.Repeat(0, n).ToList();
+        // Every core starts at the same CO so the cross-core F/V fit stays valid; the start write is not logged,
+        // later writes log only the cores they change relative to it
+        var offsets = Enumerable.Repeat(startCo, n).ToList();
         if (!Tuning.Apply(offsets, Mode, null, Reason))
         {
-            Log.Write("CO 置 0 失败", "ERROR");
+            Log.Write($"CO 置 {CoLabel(startCo)} 失败", "ERROR");
             return null;
         }
         lastApplied = new List<int>(offsets);
 
-        var baseline = MeasurePass(scb, slots, "基准测量（CO 全 0）", win, ct);
+        var stopped = new HashSet<int>();
+        var baseline = MeasurePass(scb, slots, $"基准测量（CO 全 {CoLabel(startCo)}）", win, ct);
         if (ct.IsCancellationRequested)
-            return Finish(scb, offsets, baseline, baseline, new Dictionary<int, int>(), 0, coMin, new HashSet<int>(), win, true);
+            return Finish(scb, offsets, baseline, baseline, new Dictionary<int, int>(), 0, coMin, new HashSet<int>(), stopped, startCo, win, true);
 
-        // Slope from the all-0 pass only: once CO differs per core the cross-core fit no longer measures the F/V curve
+        // Slope from the common-start pass only: once CO differs per core the cross-core fit no longer measures the F/V curve
         double slope = FvAnalysis.Slope(baseline.Values.ToList(), out _);
         if (baseline.Values.Any(r => r.Valid && r.CoreVid <= 0)) Log.Write("部分核心无每核电压，改用 VID", "WARN");
 
@@ -175,6 +229,15 @@ internal static class VoltageAlign
         var clamped = new HashSet<int>();
         int iterations = 0;
 
+        // Last CO each core measured without computation errors, with that measurement
+        var lastGood = new Dictionary<int, (int Co, ScbRow Row)>();
+        foreach (var (s, r) in baseline)
+        {
+            if (!r.Valid) continue;
+            if (r.Errors == 0) lastGood[s] = (startCo, r);
+            else if (stopped.Add(s)) Log.Write($"Core {s}：起点 CO {CoLabel(startCo)} 下计算出错，不做下调", "WARN");
+        }
+
         for (int iter = 1; iter <= MaxIterations && !ct.IsCancellationRequested; iter++)
         {
             var next = new List<int>(offsets);
@@ -188,10 +251,10 @@ internal static class VoltageAlign
                 }
                 foreach (int s in ccds[ccd])
                 {
-                    if (s == t || !latest.TryGetValue(s, out var r) || !r.Valid) continue;
+                    if (s == t || stopped.Contains(s) || !latest.TryGetValue(s, out var r) || !r.Valid) continue;
                     double dv = FvAnalysis.DeltaV(r, tr, slope);
-                    // Overshot below the target: back off one count per round, never above 0
-                    if (dv < -FvAnalysis.NoiseFloor && offsets[s] < 0)
+                    // Overshot below the target: back off one count per round, never above the start
+                    if (dv < -FvAnalysis.NoiseFloor && offsets[s] < startCo)
                     {
                         next[s] = offsets[s] + OvershootBackoff;
                         clamped.Remove(s);
@@ -201,7 +264,7 @@ internal static class VoltageAlign
                     if (dv <= FvAnalysis.NoiseFloor) continue;
                     if (offsets[s] <= coMin) { clamped.Add(s); continue; }
 
-                    int step = Math.Clamp((int)Math.Round(dv / k[s]), 1, MaxStepPerIteration);
+                    int step = Math.Clamp((int)Math.Round(dv / k[s]), 1, maxStep);
                     next[s] = Math.Max(offsets[s] - step, coMin);
                     if (next[s] == coMin) clamped.Add(s);
                     usedDv[s] = dv;
@@ -232,13 +295,38 @@ internal static class VoltageAlign
                 double measured = (dvBefore - FvAnalysis.DeltaV(r, tr, slope)) / span;
                 if (measured > 0) k[s] = Math.Clamp(measured, KMin, KMax);
             }
+
+            // A computation error means the core went past its stable point: return it to the CO it last
+            // measured clean at and stop lowering it
+            var reverted = new List<int>(offsets);
+            bool anyReverted = false;
+            foreach (var (s, r) in pass)
+            {
+                if (!r.Valid) continue;
+                if (r.Errors == 0) { lastGood[s] = (offsets[s], r); continue; }
+                if (!stopped.Add(s)) continue;
+                if (lastGood.TryGetValue(s, out var g) && g.Co != offsets[s])
+                {
+                    reverted[s] = g.Co;
+                    latest[s] = g.Row;
+                    clamped.Remove(s);
+                    anyReverted = true;
+                    Log.Write($"Core {s}：计算出错，回退至 {CoLabel(g.Co)} 并停止下调", "WARN");
+                }
+                else Log.Write($"Core {s}：计算出错，停止下调", "WARN");
+            }
+            if (anyReverted)
+            {
+                if (!Apply(reverted, $"对齐第 {iter} 轮 报错回退")) return null;
+                offsets = reverted;
+            }
         }
 
         var frequencyNotes = new List<string>();
         if (!ct.IsCancellationRequested && !ProbeFrequencyPlatforms(scb, ccds, offsets, latest, coMin, win, ct, frequencyNotes))
             return null;
 
-        return Finish(scb, offsets, baseline, latest, targets, slope, coMin, clamped, win,
+        return Finish(scb, offsets, baseline, latest, targets, slope, coMin, clamped, stopped, startCo, win,
                       ct.IsCancellationRequested, iterations, frequencyNotes);
     }
 
@@ -247,7 +335,8 @@ internal static class VoltageAlign
                                                  List<int> offsets, Dictionary<int, ScbRow> latest, int coMin,
                                                  ResultsPanel win, CancellationToken ct, List<string> notes)
     {
-        uint fmax = RyzenSmu.ReadFMax();
+        // FMax is set against a 100 MHz reference; measured clocks already include BCLK
+        double fmaxMHz = RyzenSmu.ReadFMax() * scb.Bclk / 100.0;
         Log.Write("频率搜索开始");
 
         foreach (var (ccd, cores) in ccds)
@@ -292,7 +381,7 @@ internal static class VoltageAlign
 
             for (int round = 1; round <= MaxCoarseRounds && !ct.IsCancellationRequested; round++)
             {
-                if (fmax > 0 && peakMHz >= (double)fmax - 25)
+                if (fmaxMHz > 0 && peakMHz >= fmaxMHz - 25)
                 {
                     stopReason = "已达 FMax";
                     break;
@@ -558,14 +647,15 @@ internal static class VoltageAlign
 
     private static List<int> Finish(SingleCoreBoost scb, List<int> offsets, Dictionary<int, ScbRow> baseline,
                                     Dictionary<int, ScbRow> latest, Dictionary<int, int> targets, double slope, int coMin,
-                                    HashSet<int> clamped, ResultsPanel win, bool cancelled, int iterations = 0,
-                                    List<string>? frequencyNotes = null)
+                                    HashSet<int> clamped, HashSet<int> stopped, int startCo, ResultsPanel win,
+                                    bool cancelled, int iterations = 0, List<string>? frequencyNotes = null)
     {
-        win.SetTable(ResultColumns, wideLast: true); // Free-text notes occupy the last column.
+        win.SetTable(ResultColumns(startCo), wideLast: true); // Free-text notes occupy the last column.
         var sb = new StringBuilder();
         sb.Append(cancelled
             ? "电压对齐已取消，保留当前 CO"
             : $"电压对齐完成（{iterations} 轮）");
+        if (startCo != 0) sb.Append($"，起点 CO {CoLabel(startCo)}");
 
         var unconverged = new List<int>();
         foreach (int s in Enumerable.Range(0, scb.SlotCount).Where(scb.IsUsable))
@@ -583,14 +673,15 @@ internal static class VoltageAlign
             string note;
             if (isTarget) note = "电压对齐基准核";
             else if (!targets.ContainsKey(ccd)) note = cancelled ? "已取消" : "本 CCD 无对齐目标，未调整";
+            else if (stopped.Contains(s)) note = "计算出错，已停止下调";
             else if (dv1 is not { } d1) note = "测量无效";
-            else if (dv0 < -FvAnalysis.NoiseFloor && offsets[s] == 0) note = "低于目标，保持 0";
+            else if (dv0 < -FvAnalysis.NoiseFloor && offsets[s] == startCo) note = $"低于目标，保持 {CoLabel(startCo)}";
             else if (d1 <= FvAnalysis.NoiseFloor)
-                note = offsets[s] == 0 ? "无需调整" : d1 < -FvAnalysis.NoiseFloor ? $"已对齐（过冲 {-d1 * 1000:F1} mV）" : "已对齐";
+                note = offsets[s] == startCo ? "无需调整" : d1 < -FvAnalysis.NoiseFloor ? $"已对齐（过冲 {-d1 * 1000:F1} mV）" : "已对齐";
             else if (clamped.Contains(s)) note = $"到达 CO 下限 {coMin}";
             else note = cancelled ? "已取消，未对齐" : "未收敛（已达最大轮数）";
 
-            if (!isTarget && dv1 > FvAnalysis.NoiseFloor) unconverged.Add(s);
+            if (!isTarget && !stopped.Contains(s) && dv1 > FvAnalysis.NoiseFloor) unconverged.Add(s);
 
             win.AddRow(new[]
             {
@@ -604,7 +695,7 @@ internal static class VoltageAlign
                 dv1 is { } x1 ? $"{x1 * 1000:F1}" : "-",
                 offsets[s].ToString(),
                 note,
-            }, isTarget ? MonTheme.Gold : clamped.Contains(s) || unconverged.Contains(s) ? Theme.Warn : null);
+            }, isTarget ? MonTheme.Gold : clamped.Contains(s) || stopped.Contains(s) || unconverged.Contains(s) ? Theme.Warn : null);
         }
 
         if (frequencyNotes != null)
@@ -612,6 +703,7 @@ internal static class VoltageAlign
         sb.Append("\n最终 CO：");
         foreach (int s in Enumerable.Range(0, scb.SlotCount).Where(scb.IsUsable)) sb.Append($"\nCore {s,-3} {offsets[s],3}");
         if (clamped.Count > 0) sb.Append($"\n达到 CO 下限：Core {string.Join("、", clamped.OrderBy(s => s))}");
+        if (stopped.Count > 0) sb.Append($"\n计算出错已停止下调：Core {string.Join("、", stopped.OrderBy(s => s))}");
         if (unconverged.Count > 0) sb.Append($"\n未收敛：Core {string.Join("、", unconverged)}");
         sb.Append("\n结果已填入 CO 编辑器（未保存），请先通过压力测试再保存。");
 

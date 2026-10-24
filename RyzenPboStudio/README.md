@@ -15,9 +15,7 @@
 | `Updater.cs`      | 从 GitHub Release 检查和安装更新                                    |
 | `ToolBundle.cs`   | 释放并校验内嵌的 `inpoutx64.dll`                                    |
 | `SystemInfo.cs`   | CPU / 主板 / 显卡 / 内存信息，逻辑核与物理核、CCD 的映射            |
-| `HwInfoReader.cs` | 读 HWiNFO 共享内存（每核频率、SVI3 电压、Bus Clock）                |
 | `CppcReader.cs`   | 5000 系从内核电源事件 55 读 CPPC                                    |
-| `TelVoltCalib.cs` | 借助 HWiNFO 校准 TEL 电压在 PM Table 中的偏移                       |
 
 ## 硬件访问
 
@@ -68,7 +66,6 @@ EXE 同目录的文件迁移进来。它必须早于任何状态读取，否则�
 - `test_in_progress`：脏标记
 - `final_offsets.txt`：测试全部通过后的最终负压
 - `co_profile.json`、`cs_state.json`：CO / Curve Shaper 配置
-- `tel_calib.json`：TEL 电压偏移校准
 - `update_skip.txt`：用户选择跳过的版本
 
 ## 在线更新

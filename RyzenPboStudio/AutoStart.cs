@@ -307,7 +307,7 @@ internal sealed class ResumeCountdownDialog : Form
     public ResumeCountdownDialog(bool manualTakeover, int attempt)
     {
         _remaining = AutoStart.ResumeCountdownSeconds;
-        _offsetNote = manualTakeover ? "沿用手动接管的负压" : $"所有核心负压 +{Config.StepOnError}";
+        _offsetNote = manualTakeover ? "沿用手动接管的 CO" : $"所有核心 CO +{Config.StepOnError}";
 
         Text = "自动恢复测试";
         FormBorderStyle = FormBorderStyle.FixedDialog;

@@ -108,13 +108,13 @@ internal static partial class YCruncher
 
                 default:
                     Log.Write($"YC018 基准测试失败：{reason}", "ERROR");
-                    Log.Write("该错误无法定位到具体核心，未调整任何负压，测试停止。" +
+                    Log.Write("该错误无法定位到具体核心，未调整任何 CO，测试停止。" +
                               "原因可能是内存 / IF（FCLK）/ CO 不稳定，建议先单独验证内存与 FCLK 设置；" +
                               "若日志显示内存分配失败，请关闭占用内存的程序后重试", "ERROR");
                     return (false, current);
             }
 
-            Log.Write($"负压已调整，3 秒后重新开始 {rounds} 轮测试...");
+            Log.Write($"CO 已调整，3 秒后重新开始 {rounds} 轮测试...");
             if (token.WaitHandle.WaitOne(3000))
                 return (false, current);
         }
@@ -187,7 +187,8 @@ internal static partial class YCruncher
             proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lines.Add(e.Data); };
 
             proc.Start();
-            if (Job.Value == IntPtr.Zero || !AssignProcessToJobObject(Job.Value, proc.Handle))
+            IntPtr job = GetJob();
+            if (job == IntPtr.Zero || !AssignProcessToJobObject(job, proc.Handle))
                 Log.Write($"y-cruncher 加入进程作业失败 (错误 {Marshal.GetLastWin32Error()})，结束测试时可能无法清理其子进程", "WARN");
             proc.BeginOutputReadLine();
             proc.BeginErrorReadLine();

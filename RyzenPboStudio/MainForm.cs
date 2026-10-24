@@ -20,8 +20,8 @@ internal sealed partial class MainForm : Form
     private readonly PillButton _startBtn = Primary("▶  开始测试");
     private readonly PillButton _stopBtn = Ghost("■  停止测试");
     private readonly Label _statusLabel = new() { Text = "就绪", AutoSize = true };
-    private readonly Label _initialOffsetsLabel = new() { Text = "初始负压: 未读取", AutoSize = true };
-    private readonly Label _offsetsLabel = new() { Text = "当前负压: 未读取", AutoSize = true };
+    private readonly Label _initialOffsetsLabel = new() { Text = "初始 CO: 未读取", AutoSize = true };
+    private readonly Label _offsetsLabel = new() { Text = "当前 CO: 未读取", AutoSize = true };
     private readonly TextBox _logBox = new(); // Log textbox on the LOGGING page.
     private readonly TextBox _logBoxPbo = new(); // Mirrors log content on the AMD PBO page.
     private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 100 };
@@ -69,13 +69,6 @@ internal sealed partial class MainForm : Form
     private string _testMode = "VT3";
     private string _selectedMode = "VT3";
     private int _durationSeconds = Config.DefaultDuration;
-    // Default round counts for the three sequential test stages.
-    private Dictionary<string, int> _iterations = new()
-    {
-        ["VT3"] = Config.DefaultVt3,
-        ["BKT"] = Config.DefaultBkt,
-        ["SVT"] = Config.DefaultSvt,
-    };
     private int _singleRounds = Config.DefaultBkt;
     private List<int> _initialOffsets = new();
 
@@ -83,10 +76,6 @@ internal sealed partial class MainForm : Form
     private string _testScope = "ALL";
     private int _scopeCcd;
     private List<int> _customCores = new();
-
-    // Combined mode runs VT3, BKT, and SVT together for ten rounds.
-    private static readonly string[] ComboAlgos = { "VSTv3", "BKT", "SVT" };
-    private const int ComboRounds = 10;
 
     // VSTv3 is y-cruncher’s alias for VT3.
     private static readonly (string display, string mode, string algo)[] ModeOptions =
@@ -141,13 +130,13 @@ internal sealed partial class MainForm : Form
             // A manual CO change after interruption takes ownership of the offsets; resume the stage without backoff.
             if (Journal.ReadLastEntry()?.Reason == Journal.ManualTakeover)
             {
-                SetStatus($"上次测试异常中断 · 负压已手动接管，开始后按此值续跑{resumeHint}", Theme.Warn);
-                Log.Write($"上次测试异常中断，手动接管负压后不再自动调整{resumeHint}", "WARN");
+                SetStatus($"上次测试异常中断 · CO 已手动接管，开始后按此值续跑{resumeHint}", Theme.Warn);
+                Log.Write($"上次测试异常中断，手动接管 CO 后不再自动调整{resumeHint}", "WARN");
             }
             else
             {
-                SetStatus($"上次测试异常中断 · 开始后将自动回退恢复负压{resumeHint}", Theme.Warn);
-                Log.Write($"上次测试异常中断（疑似死机/断电）：开始测试时崩溃前负压 +{Config.StepOnError}{resumeHint}", "WARN");
+                SetStatus($"上次测试异常中断 · 开始后将自动回退恢复 CO{resumeHint}", Theme.Warn);
+                Log.Write($"上次测试异常中断（疑似死机/断电）：开始测试时崩溃前 CO +{Config.StepOnError}{resumeHint}", "WARN");
             }
         }
     }
@@ -481,24 +470,24 @@ internal sealed partial class MainForm : Form
 
         var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int modeGap = 10;
-        int modeBtnWidth = (TestRowWidth - modeGap) / 2;
-        _seqBtn = MakeModeButton("顺序测试", "SEQ", modeBtnWidth,
-            $"VT3 → BKT → SVT 依次各测一遍\n轮数：VT3 {_iterations["VT3"]} 轮 / BKT {_iterations["BKT"]} 轮 / SVT {_iterations["SVT"]} 轮\n每项跑完清理进程再进入下一项");
-        _comboBtn = MakeModeButton("组合测试", "COMBO", modeBtnWidth,
-            $"VT3 + BKT + SVT 三项同时跑，共 {ComboRounds} 轮\n同时施加多种负载，比单项更容易暴露不稳定");
+        _multiSetBtn = BuildMultiSettingsButton();
+        int modeBtnWidth = (TestRowWidth - _multiSetBtn.Width - 2 * modeGap) / 2;
+        _seqBtn = MakeModeButton("顺序测试", "SEQ", modeBtnWidth, SeqTip());
+        _comboBtn = MakeModeButton("组合测试", "COMBO", modeBtnWidth, ComboTip());
         _seqBtn.Margin = new Padding(0, 0, modeGap, 0);
-        _comboBtn.Margin = new Padding(0);
+        _comboBtn.Margin = new Padding(0, 0, modeGap, 0);
         var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
         modeRow.Controls.Add(_seqBtn);
         modeRow.Controls.Add(_comboBtn);
+        modeRow.Controls.Add(_multiSetBtn);
 
-        var adjTitle = new Label { Text = "负压调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var adjTitle = new Label { Text = "CO 调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int adjGap = 10;
         int adjBtnWidth = (TestRowWidth - adjGap) / 2;
         _autoAdjBtn   = MakeAdjustButton("自动模式", true,
-            $"压测报错时，把出错核心的负压自动回退一档（+{Config.StepOnError}）后重跑整轮，\n直到该轮通过或你手动停止。y-cruncher 整体崩溃时，回退本次测试范围内仍在负压的核心。");
+            $"压测报错时，把出错核心的 CO 自动回退一档（+{Config.StepOnError}）后重跑整轮，\n直到该轮通过或你手动停止。y-cruncher 整体崩溃时，回退本次测试范围内的全部核心。\nCO 最多回退到 +{Config.CoMax}，到达上限即停止测试。");
         _manualAdjBtn = MakeAdjustButton("手动模式", false,
-            "压测报错时只弹提示并停止，不改动任何负压。\n由你自己判断怎么调，调完重新开始测试。");
+            "报错仅提示");
         _autoAdjBtn.Width = adjBtnWidth;
         _manualAdjBtn.Width = adjBtnWidth;
         _autoAdjBtn.Margin = new Padding(0, 0, adjGap, 0);
@@ -510,7 +499,7 @@ internal sealed partial class MainForm : Form
         var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         var scopeRow1 = BuildScopeRow(new (string, string, string)[]
         {
-            ("全部核心", "ALL", "所有核心一起压测，与旧版本行为一致"),
+            ("全部核心", "ALL", "所有核心参与压测"),
             ("自定义…", "CUSTOM", "自行勾选参与压测的物理核心"),
         });
         var scopeRow2 = BuildCcdScopeRow();
@@ -586,7 +575,7 @@ internal sealed partial class MainForm : Form
                 $"只压 CCD{c}（物理核 {string.Join(", ", cores)}）\n另一个 CCD 空闲时功耗预算全给被测 CCD，\n频率比全核负载时更高，结论不能直接套用到全核"));
         }
         specs.Add(("逐 CCD", "EACH",
-            "对每个 CCD 各跑一遍完整轮次（CCD0 → CCD1 …）\n中途某个 CCD 没跑完就不再往下走"));
+            "对每个 CCD 各跑一遍完整轮次（CCD0 → CCD1 …）"));
         return BuildScopeRow(specs);
     }
 
@@ -652,7 +641,7 @@ internal sealed partial class MainForm : Form
     private bool PromptCustomCores()
     {
         int slots = _coSlotCount > 0 ? _coSlotCount : RyzenSmu.SlotCount;
-        if (slots <= 0) { ThemedDialog.Show(this, "未能读取核心拓扑，无法自定义测试范围。", "提示", warning: true); return false; }
+        if (slots <= 0) { ThemedDialog.Show(this, "未能读取核心拓扑，无法自定义测试范围。", "提示"); return false; }
 
         using var dlg = new Form
         {
@@ -730,7 +719,7 @@ internal sealed partial class MainForm : Form
 
         if (picked.Count == 0)
         {
-            ThemedDialog.Show(this, "至少要选择一个核心。", "提示", warning: true);
+            ThemedDialog.Show(this, "至少要选择一个核心。", "提示");
             return false;
         }
         _customCores = picked;
@@ -781,11 +770,11 @@ internal sealed partial class MainForm : Form
             : "未指明（y-cruncher 崩溃）";
         Ui(() =>
         {
-            SetStatus($"手动模式：物理核心 [{cores}] 报错，负压未自动调整", Theme.Accent);
+            SetStatus($"手动模式：物理核心 [{cores}] 报错，CO 未自动调整", Theme.Accent);
             ThemedDialog.Show(this,
                 $"检测到报错，已停止测试。\n\n报错物理核心: {cores}\n\n" +
-                "当前为「手动模式」，负压未做任何改动。请在 AMD PBO 页手动调整负压后重新开始测试。",
-                "手动模式 · 检测到报错", warning: true);
+                "当前为「手动模式」，CO 未做任何改动。请在 AMD PBO 页手动调整 CO 后重新开始测试。",
+                "手动模式 · 检测到报错");
         });
     }
 
@@ -944,7 +933,7 @@ internal sealed partial class MainForm : Form
             catch (Exception e)
             {
                 if (manual)
-                    ThemedDialog.Show(Form.ActiveForm ?? this, $"检查更新失败：{e.Message}", "检查更新", warning: true);
+                    ThemedDialog.Show(Form.ActiveForm ?? this, $"检查更新失败：{e.Message}", "检查更新");
                 return;
             }
             if (IsDisposed) return;
@@ -972,7 +961,7 @@ internal sealed partial class MainForm : Form
                 $"{notes}\n\n" +
                 $"下载大小约 {info.Size / 1024.0 / 1024.0:F1} MB。\n" +
                 "更新会关闭程序、覆盖安装目录后自动重启；\n" +
-                "logs 与 profiles 文件夹（负压历史与恢复数据）不会被改动。\n\n" +
+                "logs 与 profiles 文件夹（CO 历史与恢复数据）不会被改动。\n\n" +
                 "现在更新吗？",
                 "发现新版本", "现在更新", "暂不更新");
             if (!update)
@@ -1044,7 +1033,7 @@ internal sealed partial class MainForm : Form
             RefreshUpdateLinkText();
             SetStatus("更新包校验失败", Theme.Accent);
             Log.Write($"更新包解压/校验失败：{e.Message}", "WARN");
-            ThemedDialog.Show(Form.ActiveForm ?? this, $"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新", warning: true);
+            ThemedDialog.Show(Form.ActiveForm ?? this, $"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新");
             return;
         }
 
@@ -1056,7 +1045,7 @@ internal sealed partial class MainForm : Form
         catch (Exception e)
         {
             RefreshUpdateLinkText();
-            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新", warning: true);
+            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新");
             return;
         }
 
@@ -1207,7 +1196,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception e)
         {
-            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法打开链接：{e.Message}\n\n{url}", "提示", warning: true);
+            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法打开链接：{e.Message}\n\n{url}", "提示");
         }
     }
 
@@ -1653,7 +1642,7 @@ internal sealed partial class MainForm : Form
             {
                 // Resume the interrupted stage using the user’s offsets without another backoff.
                 Log.Write("检测到手动应用 CO，测试沿用手动设定续跑", "WARN");
-                SetStatus("已接管中断负压 · 开始后按此值续跑", Theme.Warn);
+                SetStatus("已接管中断 CO · 开始后按此值续跑", Theme.Warn);
                 return;
             }
         }
@@ -2016,7 +2005,7 @@ internal sealed partial class MainForm : Form
             {
                 int n = RyzenSmu.SlotCount;
                 var off = RyzenSmu.ReadOffsets(n);
-                Ui(() => _offsetsLabel.Text = $"当前负压: [{string.Join(", ", off)}]");
+                Ui(() => _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", off)}]");
             }
             catch
             {
@@ -2040,20 +2029,22 @@ internal sealed partial class MainForm : Form
         }
         catch (FileNotFoundException ex)
         {
-            ThemedDialog.Show(this, ex.Message, "缺少 y-cruncher", warning: true);
+            ThemedDialog.Show(this, ex.Message, "缺少 y-cruncher");
             _startBtn.Enabled = true;
             return;
         }
 
         _testMode = SelectedMode();
         _durationSeconds = duration;
-        _singleRounds = singleRounds; // SEQ and COMBO use fixed round counts.
+        _singleRounds = singleRounds; // SEQ and COMBO use their own plan.
+        _runPlan = _multi.Clone();
         _stopRequested = false;
         _cts = new CancellationTokenSource();
 
         SetControlsEnabled(false);
         _stopBtn.Enabled = true;
-        SetStatus($"运行中 · 模式 {_testMode} · 范围 {ScopeLabel(_testScope, _scopeCcd)} · 每轮 {duration} 秒", Theme.Warn);
+        string perRound = _testMode is "SEQ" or "COMBO" ? "" : $" · 每轮 {duration} 秒";
+        SetStatus($"运行中 · 模式 {_testMode} · 范围 {ScopeLabel(_testScope, _scopeCcd)}{perRound}", Theme.Warn);
 
         if (sender == _startBtn) AutoStart.ResetResumeCount();   // manual start resets the auto-resume streak
         _testTask = Task.Run(RunTestThread);
@@ -2125,15 +2116,7 @@ internal sealed partial class MainForm : Form
                 if (prev.ScopeCcd is int pc) _scopeCcd = pc;
                 if (prev.ScopeCores is { Count: > 0 } sc) _customCores = new List<int>(sc);
                 if (prev.DurationSeconds is int d) _durationSeconds = d;
-                if (prev.IterationsMap is { } m)
-                {
-                    _iterations = new Dictionary<string, int>
-                    {
-                        ["VT3"] = m.GetValueOrDefault("VT3", _iterations["VT3"]),
-                        ["BKT"] = m.GetValueOrDefault("BKT", _iterations["BKT"]),
-                        ["SVT"] = m.GetValueOrDefault("SVT", _iterations["SVT"]),
-                    };
-                }
+                _runPlan = prev.MultiTest is { } plan && plan.IsValid(MultiTestNames) ? plan : LegacyPlan(prev);
             }
             else
             {
@@ -2143,18 +2126,23 @@ internal sealed partial class MainForm : Form
             var preRecovery = new List<int>(offsets);
             if (manualTakeover)
             {
-                Log.WriteCo("沿用手动应用的负压：", offsets, level: "WARN");
+                Log.WriteCo("沿用手动应用的 CO：", offsets, level: "WARN");
             }
             else
             {
-                for (int i = 0; i < offsets.Count; i++)
-                    if (!RyzenSmu.IsSlotDisabled(i)) offsets[i] += Config.StepOnError;
-                Log.WriteCo($"死机恢复，所有核心负压 +{Config.StepOnError}：", offsets, preRecovery, "WARN");
+                var enabled = Enumerable.Range(0, offsets.Count).Where(i => !RyzenSmu.IsSlotDisabled(i)).ToList();
+                if (enabled.All(i => offsets[i] >= Config.CoMax))
+                {
+                    Log.Write($"死机恢复：所有核心 CO 已达上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止测试", "ERROR");
+                    return false;
+                }
+                foreach (int i in enabled) offsets[i] = Math.Min(Config.CoMax, offsets[i] + Config.StepOnError);
+                Log.WriteCo($"死机恢复，所有核心 CO +{Config.StepOnError}：", offsets, preRecovery, "WARN");
             }
 
             if (!Tuning.Apply(offsets, _testMode, seqResumePhase, "crash-recovery"))
             {
-                Log.Write("死机恢复设置负压失败", "ERROR");
+                Log.Write("死机恢复设置 CO 失败", "ERROR");
                 return false;
             }
 
@@ -2168,7 +2156,7 @@ internal sealed partial class MainForm : Form
                 SelectMode(_testMode);
                 ApplySettingsToUi();
                 RestyleScopeButtons();
-                _initialOffsetsLabel.Text = $"初始负压: [{string.Join(", ", preRecovery)}]";
+                _initialOffsetsLabel.Text = $"初始 CO: [{string.Join(", ", preRecovery)}]";
             });
         }
         else
@@ -2197,8 +2185,8 @@ internal sealed partial class MainForm : Form
         var initSnapshot = new List<int>(offsets);
         Ui(() =>
         {
-            _initialOffsetsLabel.Text = $"初始负压: [{string.Join(", ", initSnapshot)}]";
-            _offsetsLabel.Text = $"当前负压: [{string.Join(", ", initSnapshot)}]";
+            _initialOffsetsLabel.Text = $"初始 CO: [{string.Join(", ", initSnapshot)}]";
+            _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", initSnapshot)}]";
         });
 
         var token = _cts!.Token;
@@ -2237,24 +2225,21 @@ internal sealed partial class MainForm : Form
             bool passOk = true;
             if (_testMode == "SEQ")
             {
-                (string name, string algo, int iters)[] phases =
-                {
-                    ("VT3", "VSTv3", _iterations["VT3"]),
-                    ("BKT", "BKT", _iterations["BKT"]),
-                    ("SVT", "SVT", _iterations["SVT"]),
-                };
+                // Step names are unique within a plan, so the name identifies the step to resume.
+                var phases = _runPlan.Sequence;
 
                 int startIdx = 0;
                 if (!string.IsNullOrEmpty(seqResumePhase))
                 {
-                    for (int i = 0; i < phases.Length; i++)
-                        if (phases[i].name == seqResumePhase) { startIdx = i; break; }
+                    for (int i = 0; i < phases.Count; i++)
+                        if (phases[i].Test == seqResumePhase) { startIdx = i; break; }
                 }
 
-                for (int pi = startIdx; pi < phases.Length; pi++)
+                for (int pi = startIdx; pi < phases.Count; pi++)
                 {
                     if (_stopRequested) break;
-                    var (name, algo, iters) = phases[pi];
+                    string name = phases[pi].Test;
+                    int iters = phases[pi].Rounds;
 
                     Log.Write($"\n>>> 开始 {name} 测试 ({iters} 轮)");
                     Workspace.SaveState(new TestState
@@ -2267,12 +2252,12 @@ internal sealed partial class MainForm : Form
                         ScopeCcd = _scopeCcd,
                         ScopeCores = _testScope == "CUSTOM" ? new List<int>(_customCores) : null,
                         DurationSeconds = _durationSeconds,
-                        IterationsMap = new Dictionary<string, int>(_iterations),
+                        MultiTest = _runPlan,
                         Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
                     });
 
                     bool ok;
-                    (ok, offsets) = YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
+                    (ok, offsets) = YCruncher.RunStressTest(new[] { AlgoOf(name) }, iters, offsets, phases[pi].Seconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
                     if (!ok)
                     {
                         Log.Write($"{name} 测试未完成", "WARN");
@@ -2281,7 +2266,7 @@ internal sealed partial class MainForm : Form
                     }
                     testRound = 0;
 
-                    if (pi < phases.Length - 1)
+                    if (pi < phases.Count - 1)
                     {
                         Log.Write($">>> {name} 测试完成，清理进程...");
                         YCruncher.Kill();
@@ -2290,7 +2275,7 @@ internal sealed partial class MainForm : Form
             }
             else if (_testMode == "COMBO")
             {
-                Log.Write($"\n>>> 开始组合测试 VT3+BKT+SVT 同跑 ({ComboRounds} 轮)");
+                Log.Write($"\n>>> 开始组合测试 {string.Join("+", _runPlan.ComboTests)} ({_runPlan.ComboRounds} 轮)");
                 Workspace.SaveState(new TestState
                 {
                     Offsets = offsets,
@@ -2300,12 +2285,13 @@ internal sealed partial class MainForm : Form
                     ScopeCcd = _scopeCcd,
                     ScopeCores = _testScope == "CUSTOM" ? new List<int>(_customCores) : null,
                     DurationSeconds = _durationSeconds,
-                    IterationsMap = new Dictionary<string, int>(_iterations),
+                    MultiTest = _runPlan,
                     Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
                 });
 
                 bool ok;
-                (ok, offsets) = YCruncher.RunStressTest(ComboAlgos, ComboRounds, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
+                var comboAlgos = _runPlan.ComboTests.Select(AlgoOf).ToArray();
+                (ok, offsets) = YCruncher.RunStressTest(comboAlgos, _runPlan.ComboRounds, offsets, _runPlan.ComboSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
                 if (ok) Log.Write("组合测试全部完成！");
                 else passOk = false;
             }
@@ -2321,7 +2307,6 @@ internal sealed partial class MainForm : Form
                     ScopeCcd = _scopeCcd,
                     ScopeCores = _testScope == "CUSTOM" ? new List<int>(_customCores) : null,
                     DurationSeconds = _durationSeconds,
-                    IterationsMap = new Dictionary<string, int>(_iterations),
                     Timestamp = DateTimeOffset.Now.ToUnixTimeSeconds(),
                 });
 
@@ -2338,11 +2323,11 @@ internal sealed partial class MainForm : Form
         // An incomplete run must not produce final results unless the user stopped it.
         if (!allPassed && !_stopRequested)
         {
-            Log.WriteCo("测试未完成，未生成最终结果。当前负压：", offsets, level: "WARN");
+            Log.WriteCo("测试未完成，未生成最终结果。当前 CO：", offsets, level: "WARN");
             Workspace.ClearState();
             Workspace.ClearInProgress(); // Clear the marker to avoid a false backoff next run.
             var partialSnapshot = new List<int>(offsets);
-            Ui(() => _offsetsLabel.Text = $"当前负压: [{string.Join(", ", partialSnapshot)}]");
+            Ui(() => _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", partialSnapshot)}]");
             return false;
         }
 
@@ -2369,12 +2354,11 @@ internal sealed partial class MainForm : Form
             sb.AppendLine($"测试模式: {_testMode}");
             sb.AppendLine($"测试范围: {ScopeLabel(_testScope, _scopeCcd)}");
             sb.AppendLine();
-            sb.AppendLine($"每轮时间: {_durationSeconds} 秒");
             sb.AppendLine(_testMode switch
             {
-                "SEQ" => $"测试轮数: 顺序 VT3={_iterations["VT3"]}, BKT={_iterations["BKT"]}, SVT={_iterations["SVT"]}",
-                "COMBO" => $"测试轮数: 组合 {ComboRounds}",
-                _ => $"测试轮数: {_singleRounds}",
+                "SEQ" => "测试项目: 顺序 " + string.Join(" → ", _runPlan.Sequence.Select(st => $"{st.Test} {st.Rounds} 轮 × {st.Seconds} 秒")),
+                "COMBO" => $"测试项目: 组合 {string.Join("+", _runPlan.ComboTests)}，{_runPlan.ComboRounds} 轮，每项每轮 {_runPlan.ComboSeconds} 秒",
+                _ => $"每轮时间: {_durationSeconds} 秒{Environment.NewLine}测试轮数: {_singleRounds}",
             });
             sb.AppendLine();
             for (int i = 0; i < offsets.Count; i++)
@@ -2391,7 +2375,7 @@ internal sealed partial class MainForm : Form
         Workspace.ClearInProgress(); // Normal completion or manual stop clears the marker.
 
         var finalSnapshot = new List<int>(offsets);
-        Ui(() => _offsetsLabel.Text = $"最终负压: [{string.Join(", ", finalSnapshot)}]");
+        Ui(() => _offsetsLabel.Text = $"最终 CO: [{string.Join(", ", finalSnapshot)}]");
         return true;
     }
 
@@ -2408,7 +2392,7 @@ internal sealed partial class MainForm : Form
         if (_testCompletedNormally && !_stopRequested)
             ThemedDialog.Show(this, "测试已完成！", "完成");
         else if (!_stopRequested)
-            ThemedDialog.Show(this, "测试未跑完，未生成最终结果，原因见运行日志。", "测试未完成", warning: true);
+            ThemedDialog.Show(this, "测试未跑完，未生成最终结果，原因见运行日志。", "测试未完成");
         else
             ThemedDialog.Show(this, "测试已停止，进程已清理完成。", "已停止");
     }
@@ -2429,8 +2413,8 @@ internal sealed partial class MainForm : Form
         _scbBtn.Size = _alignBtn.Size = new Size(btnWidth, 32);
         _scbBtn.Margin = new Padding(0, 0, gap, 0);
         _alignBtn.Margin = new Padding(0);
-        _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压\n只是测量，不是压力测试，不修改任何参数");
-        _tips.SetToolTip(_alignBtn, "全部核心 CO 归零后逐核测量频率与电压，各 CCD 以 CPPC 最高核心中同频电压最低者为基准核，逐步降低 CO 对齐电压\n再以 CCD 为单位整体降低 CO 探明单核频率平台，复测全部核心后微调频率偏低的核心");
+        _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压");
+        _tips.SetToolTip(_alignBtn, "全部核心 CO 统一设为起点（默认 0，检测到外频时可自定义）后逐核测量频率与电压，各 CCD 以 CPPC 最高核心中同频电压最低者为基准核，逐步降低 CO 对齐电压\n再以 CCD 为单位整体降低 CO 探明单核频率平台，复测全部核心后微调频率偏低的核心；出现计算错误的核心会回退并停止下调");
         _scbBtn.Click += (_, _) => StartMeasure("Single Core Boost", (win, ct) => SingleCoreBoost.Run(_monitorView, win, ct));
         _alignBtn.Click += (_, _) => OnAlignClick();
         row.Controls.Add(_scbBtn);
@@ -2440,11 +2424,11 @@ internal sealed partial class MainForm : Form
 
     private void OnAlignClick()
     {
-        if (!VoltageAlign.Confirm(this)) return;
+        if (!VoltageAlign.Confirm(this, _monitorView, out int startCo)) return;
         int editorMin = (int)_coCells[0].Minimum;
         StartMeasure("电压对齐", (win, ct) =>
         {
-            var final = VoltageAlign.Run(_monitorView, editorMin, win, ct);
+            var final = VoltageAlign.Run(_monitorView, editorMin, startCo, win, ct);
             if (final == null) return false;
             Ui(() => { for (int i = 0; i < _coSlotCount && i < final.Count; i++) SetCell(i, final[i]); });
             return true;
@@ -2458,7 +2442,7 @@ internal sealed partial class MainForm : Form
         if (_testTask is { IsCompleted: false } || _measureTask is { IsCompleted: false }) return;
         if (!SingleCoreBoost.IsSupported)
         {
-            ThemedDialog.Show(this, "CPU 不支持 AVX2 / FMA，无法运行单核负载。", title, warning: true);
+            ThemedDialog.Show(this, "CPU 不支持 AVX2 / FMA，无法运行单核负载。", title);
             return;
         }
 
@@ -2519,7 +2503,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            ThemedDialog.Show(this, ex.Message, "参数错误", warning: true);
+            ThemedDialog.Show(this, ex.Message, "参数错误");
             return false;
         }
     }
@@ -2592,6 +2576,7 @@ internal sealed partial class MainForm : Form
         _roundsBox.Enabled = enabled;
         if (_seqBtn != null) _seqBtn.Enabled = enabled;
         if (_comboBtn != null) _comboBtn.Enabled = enabled;
+        if (_multiSetBtn != null) _multiSetBtn.Enabled = enabled;
         if (_autoAdjBtn != null) _autoAdjBtn.Enabled = enabled;
         if (_manualAdjBtn != null) _manualAdjBtn.Enabled = enabled;
         foreach (var b in _scopeBtns) b.Enabled = enabled;

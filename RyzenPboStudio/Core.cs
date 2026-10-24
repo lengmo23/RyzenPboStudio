@@ -13,6 +13,7 @@ internal static class Config
     public const int DefaultBkt = 10;
     public const int DefaultSvt = 10;
     public const int StepOnError = 2; // CO backoff per reported error.
+    public const int CoMax = 30;      // highest CO the SMU accepts; backoff stops here.
 }
 
 /// <summary>Writes each session's log to a separate file and streams lines to the UI.</summary>
@@ -83,6 +84,8 @@ internal sealed class TestState
     [JsonPropertyName("seq_phase")] public string? SeqPhase { get; set; }
     [JsonPropertyName("duration_seconds")] public int? DurationSeconds { get; set; }
     [JsonPropertyName("iterations_map")] public Dictionary<string, int>? IterationsMap { get; set; }
+    // Sequential / combined plan of the interrupted run; older state files only have IterationsMap.
+    [JsonPropertyName("multi_test")] public MultiTestSettings? MultiTest { get; set; }
     // Scope values: ALL, one CCD, each CCD in turn, or custom cores.
     // EACH stores the current CCD so crash recovery can resume there.
     [JsonPropertyName("test_scope")] public string? TestScope { get; set; }
@@ -327,7 +330,7 @@ internal static class Journal
         }
         catch (Exception e)
         {
-            Log.Write($"写入负压日志失败: {e.Message}", "WARN");
+            Log.Write($"写入 CO 日志失败: {e.Message}", "WARN");
         }
     }
 
