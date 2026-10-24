@@ -11,7 +11,7 @@
     <AssemblyName>AMD Ryzen PBO Studio</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\ICON.ico</ApplicationIcon>
-    <Version>3.0.0</Version>
+    <Version>3.0.1</Version>
     <!-- Assembly metadata shown in the executable's Details properties. -->
     <Product>AMD Ryzen PBO Studio</Product>
     <Authors>@lengmo23</Authors>
