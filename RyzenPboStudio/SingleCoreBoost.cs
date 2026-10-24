@@ -105,17 +105,25 @@ internal sealed class SingleCoreBoost : IDisposable
             for (int i = 0; i < ranked.Count; i++) ccdRank[ranked[i]] = i + 1;
         }
 
-        double b = monitor?.CoreBclk ?? 0;
-        if (b is not (> 50 and < 200)) b = HwInfoReader.ReadBusClock() ?? 0;
-        if (b is not (> 50 and < 200))
-        {
-            try { lock (RyzenSmu.IoLock) b = cpu.GetBclk() ?? 0; } catch { b = 0; }
-        }
-        bclk = b is > 50 and < 200 ? b : 100;
+        bclk = ResolveBclk(monitor);
 
         tscMHzCache ??= CalibrateTsc();
         refMHz = tscMHzCache > 0 ? tscMHzCache.Value : SystemInfo.GetBaseFrequencyMHz();
     }
+
+    /// <summary>CPU-domain BCLK in MHz: the monitor's value, then the PLL; 100 when none is sane.</summary>
+    public static double ResolveBclk(MonitorView? monitor)
+    {
+        double b = monitor?.CoreBclk ?? 0;
+        if (b is not (> 50 and < 200))
+        {
+            try { lock (RyzenSmu.IoLock) b = RyzenSmu.SharedCpu.GetBclk() ?? 0; } catch { b = 0; }
+        }
+        return b is > 50 and < 200 ? b : 100;
+    }
+
+    /// <summary>CPU-domain BCLK used to scale the PM table's per-core clocks.</summary>
+    public double Bclk => bclk;
 
     /// <summary>Puts the monitor in quiet mode and probes the PM table. Returns null (reason logged) when sampling is impossible.</summary>
     public static SingleCoreBoost? Open(MonitorView? monitor)
@@ -299,8 +307,8 @@ internal sealed class SingleCoreBoost : IDisposable
         return sec > 0 ? (t1 - t0) / sec / 1e6 : 0;
     }
 
-    /// <summary>Samples slot for SampleMs. Frequency follows the main program's priority: HWiNFO Core Clock,
-    /// then PM table CORE_FREQ × BCLK/100, then ΔAPERF/ΔMPERF on the loaded core (already awake, no observer effect).</summary>
+    /// <summary>Samples slot for SampleMs. Frequency follows the main program's priority: PM table CORE_FREQ × BCLK/100,
+    /// then ΔAPERF/ΔMPERF on the loaded core (already awake, no observer effect).</summary>
     private ScbRow Sample(int slot, CancellationToken ct)
     {
         int n = SlotCount, os = slotOs[slot];
@@ -312,7 +320,7 @@ internal sealed class SingleCoreBoost : IDisposable
 
         var vids = new List<double>(); var tels = new List<double>(); var coreVs = new List<double>(); var temps = new List<double>();
         var pows = new List<double>(); var freqs = new List<double>(); var effs = new List<double>();
-        var hwFreqs = new List<double>(); var c0Self = new List<double>();
+        var c0Self = new List<double>();
         var c0Sum = new double[n];
 
         var sw = Stopwatch.StartNew();
@@ -343,7 +351,6 @@ internal sealed class SingleCoreBoost : IDisposable
                     c0Self.Add(t[c0Idx + slot]);
                 }
             }
-            if (os >= 0 && HwInfoReader.ReadCoreClocks() is { } hw && hw.TryGetValue(os, out double mhz)) hwFreqs.Add(mhz);
             ct.WaitHandle.WaitOne(FrameMs);
         }
 
@@ -357,7 +364,7 @@ internal sealed class SingleCoreBoost : IDisposable
                    : (refMHz > 0 && sec > 0 ? Math.Min(100.0, dM / (refMHz * 1e6 * sec) * 100.0) : 0);
         if (dM == 0 && c0Self.Count > 0) occ = Median(c0Self);
 
-        double freq = hwFreqs.Count > 0 ? Median(hwFreqs) : freqs.Count > 0 ? Median(freqs) : counterFreq;
+        double freq = freqs.Count > 0 ? Median(freqs) : counterFreq;
         double eff = effs.Count > 0 ? Median(effs) : (sec > 0 ? dA / sec / 1e6 : 0);
 
         double temp = Median(temps);

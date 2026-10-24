@@ -114,7 +114,6 @@ internal sealed class MonitorView : UserControl
     private readonly double regBaseMHz; // Boot-time registry frequency already includes BCLK.
     private readonly string installedMemory;
     private readonly double p0BaseMHz; // P0 base frequency for the no-TSC FREQ fallback.
-    private readonly TelVoltCalib telCalib;
     // PM Table segment positions vary by CPU and are probed by RyzenSmu.ProbePtLayout.
     // Per-core voltage is post-LDO die voltage, roughly 10 mV below requested VID.
     private RyzenSmu.PtLayout? ptLayout;
@@ -185,10 +184,6 @@ internal sealed class MonitorView : UserControl
         catch { bclkPll = bclk = 0; }
         p0BaseMHz = regBaseMHz > 0 ? regBaseMHz
                   : (p0DefMHz > 0 && bclk > 0 ? p0DefMHz * bclk / 100.0 : 0);
-        uint tv = 0;
-        try { lock (RyzenSmu.IoLock) tv = cpu.GetTableVersion().TableVersion; }
-        catch { /* Calibration remains session-local if table version is unavailable. */ }
-        telCalib = new TelVoltCalib(tv);
 
         BuildUi();
         FillHeader();
@@ -213,7 +208,7 @@ internal sealed class MonitorView : UserControl
     /// <summary>
     /// Returns (PLL BCLK, CPU-domain BCLK). External-clock boards may report 100 MHz from the PLL,
     /// so infer CPU BCLK from registry ~MHz / P0 and round to 0.05 MHz.
-    /// Falls back to HWiNFO Bus Clock, then PLL; caller holds IoLock.
+    /// Falls back to PLL; caller holds IoLock.
     /// </summary>
     private (double Pll, double Core) ResolveBclk()
     {
@@ -227,7 +222,6 @@ internal sealed class MonitorView : UserControl
             double derived = regBaseMHz / p0DefMHz * 100.0;
             if (derived is >= 90 and <= 130) core = Math.Round(Math.Round(derived / 0.05) * 0.05, 2);
         }
-        if (core <= 0 && HwInfoReader.ReadBusClock() is > 50 and < 200 and double hw) core = hw;
         if (core <= 0) core = pll;
 
         return (pll, core);
@@ -572,7 +566,7 @@ internal sealed class MonitorView : UserControl
                                 maxCpuTel = tbl[lay.CpuTelIdx];
                             }
                         }
-                        ptSnap = (float[])tbl.Clone(); // Snapshot for TEL calibration outside the lock.
+                        ptSnap = (float[])tbl.Clone(); // Snapshot for per-core frequency outside the lock.
                     }
                 }
                 Thread.Sleep(40);
@@ -700,15 +694,6 @@ internal sealed class MonitorView : UserControl
                     }
             }
 
-            // Prefer HWiNFO Core Clock when shared memory is available.
-            var hwClocks = HwInfoReader.ReadCoreClocks();
-            if (hwClocks != null)
-                for (int i = 0; i < n; i++)
-                {
-                    int os = slotOs[i];
-                    if (os >= 0 && hwClocks.TryGetValue(os, out double mhz)) busyFreq[i] = mhz;
-                }
-
             int[] co;
             float[] ccdTemp;
             float tctl;
@@ -781,26 +766,15 @@ internal sealed class MonitorView : UserControl
                 uclk = cpu.powerTable?.UCLK ?? 0;
             }
 
-            // Read global requested VID and measured TEL from the PM Table without HWiNFO.
+            // Read global requested VID and measured TEL from the PM Table.
             double peakVid = maxCpuVid is > 0.3 and < 2.0 ? maxCpuVid : 0;
             double telVolt = peakVid > 0 && maxCpuTel is > 0.3 and < 2.0 ? maxCpuTel : 0;
             // Show Vdroop only when VID and TEL come from the same telemetry group.
             bool vdroopValid = peakVid > 0 && telVolt > 0;
 
             // Without global telemetry, approximate VID from per-core peaks.
-            // Feed HWiNFO SVI3 TEL into calibration to locate its PM Table index.
             if (peakVid <= 0)
                 for (int i = 0; i < n; i++) if (maxVolt[i] > peakVid) peakVid = maxVolt[i];
-            if (telVolt <= 0)
-            {
-                double telHw = HwInfoReader.ReadCpuTelemetryVoltage() ?? 0;
-                if (ptSnap != null)
-                {
-                    if (telCalib.Index < 0 && telHw > 0) telCalib.Feed(ptSnap, telHw);
-                    if (telCalib.Index >= 0 && telCalib.Index < ptSnap.Length) telVolt = ptSnap[telCalib.Index];
-                }
-                if (telVolt <= 0) telVolt = telHw;
-            }
 
             var fFreq = busyFreq; var fEff = effFreq; var fVolt = maxVolt; var fCo = co; var fOcc = occ; var fTemp = ccdTemp;
             try

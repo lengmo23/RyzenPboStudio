@@ -44,7 +44,7 @@ internal sealed partial class MainForm
             var profile = CoProfile.Load();
             int slots = RyzenSmu.SlotCount;
             string? problem = profile.Offsets.Count == 0
-                ? "还没有已保存的 CO 配置。\n\n请先在 Curve Optimizer 中调好负压并点「Save」保存，再开启此项。"
+                ? "还没有已保存的 CO 配置。\n\n请先在 Curve Optimizer 中调好 CO 并点「Save」保存，再开启此项。"
                 : profile.Offsets.Count != slots
                     ? $"已保存的 CO 配置有 {profile.Offsets.Count} 个核心，与当前 CPU 的 {slots} 个不符。\n\n请在 Curve Optimizer 中重新点「Save」保存后再开启此项。"
                     : null;
@@ -160,7 +160,7 @@ internal sealed partial class MainForm
                 "上次开机自动应用 CO/CS 后不久系统异常重启，为避免反复死机，本次没有应用已保存的 CO/CS。\n\n" +
                 "「开机自动应用」仍保持开启，下次开机会照常应用。\n" +
                 "如果这组设置不稳定，请调整后重新保存，或关闭「开机自动应用」。",
-                "未自动应用 CO/CS", warning: true);
+                "未自动应用 CO/CS");
             return;
         }
 
@@ -226,9 +226,9 @@ internal sealed partial class MainForm
             SetStatus($"已连续 {resume.Count} 次自动恢复后死机，停止自动恢复，需手动处理", Theme.Accent);
             ThemedDialog.Show(this,
                 $"测试已连续 {resume.Count} 次在自动恢复后死机/重启，已停止自动恢复。\n\n" +
-                "请检查负压设置与硬件状态后手动处理。\n" +
+                "请检查 CO 设置与硬件状态后手动处理。\n" +
                 "确认后点「开始测试」仍会按中断恢复。",
-                "已停止自动恢复", warning: true);
+                "已停止自动恢复");
             return;
         }
 

@@ -173,7 +173,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"读取负压失败: {e.Message}，使用默认值 0", "WARN");
+            Log.Write($"读取 CO 失败: {e.Message}，使用默认值 0", "WARN");
             return Enumerable.Repeat(0, numCores).ToList();
         }
     }
@@ -540,7 +540,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"设置负压异常: {e.Message}", "ERROR");
+            Log.Write($"设置 CO 异常: {e.Message}", "ERROR");
             return false;
         }
     }

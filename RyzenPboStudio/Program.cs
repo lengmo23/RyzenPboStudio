@@ -18,7 +18,7 @@ internal static class Program
         {
             ThemedDialog.Show(null,
                 "Intel 处理器不支持！\n\n本工具仅支持 AMD Ryzen 处理器。",
-                "不支持的处理器", warning: true);
+                "不支持的处理器");
             return;
         }
 
@@ -27,7 +27,7 @@ internal static class Program
         {
             ThemedDialog.Show(null,
                 "请以管理员身份运行此程序！",
-                "错误", warning: true);
+                "错误");
             return;
         }
 
@@ -71,7 +71,7 @@ internal static class Program
         {
             ThemedDialog.Show(null,
                 $"释放或校验测试组件失败：\n\n{e.Message}",
-                "组件准备失败", warning: true);
+                "组件准备失败");
             return;
         }
 
@@ -82,7 +82,7 @@ internal static class Program
                 "未检测到 PawnIO 驱动。\n\n" +
                 "本工具通过 PawnIO 访问 CPU 的 Curve Optimizer，请先安装后再运行：\n" +
                 "https://pawnio.eu",
-                "缺少 PawnIO 驱动", warning: true);
+                "缺少 PawnIO 驱动");
             return;
         }
 
