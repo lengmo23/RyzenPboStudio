@@ -53,8 +53,8 @@ CO 负压断电即丢，重启后 CPU 回到 BIOS 设定，所以死机前的负
 1. 所有状态文件都经 `DurableIO` 写入（`WriteThrough` + `Flush(true)` + 原子替换）。
 2. 每次写负压到 CPU 之前，先追加一行到 `applied_offsets.ndjson`。断电最多损坏最后一行，读取时跳过。
 3. 测试开始时写脏标记 `test_in_progress`，正常结束或用户关闭时删除。下次开始测试时若它还在，
-   就取 `applied_offsets.ndjson` 最后一条有效记录，所有核心 +2 后从中断的阶段继续。
-4. 中断后用户手动应用过 CO（记录原因为 `manual-takeover`），则按用户的值继续，不再 +2。
+   就取 `applied_offsets.ndjson` 最后一条有效记录，所有核心加一个步长（默认 +2）后从中断的阶段继续。
+4. 中断后用户手动应用过 CO（记录原因为 `manual-takeover`），则按用户的值继续，不再回退。
 
 `Workspace.EnsureLayout()` 在 `Program.Main` 最开始创建 `logs\`、`profiles\`，并把旧版本放在
 EXE 同目录的文件迁移进来。它必须早于任何状态读取，否则升级后会读不到恢复点。
@@ -66,6 +66,7 @@ EXE 同目录的文件迁移进来。它必须早于任何状态读取，否则�
 - `test_in_progress`：脏标记
 - `final_offsets.txt`：测试全部通过后的最终负压
 - `co_profile.json`、`cs_state.json`：CO / Curve Shaper 配置
+- `setting.json`：顺序 / 组合测试计划与自动模式 CO 步长
 - `update_skip.txt`：用户选择跳过的版本
 
 ## 在线更新

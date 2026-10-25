@@ -48,6 +48,9 @@
                       LogicalName="RyzenPboStudio.Resources.tool-bundle.zip" />
     <!-- Embed the icon for runtime window and taskbar use. -->
     <EmbeddedResource Include="..\ICON.ico" LogicalName="RyzenPboStudio.ICON.ico" />
+    <!-- Payment QR codes for the sponsor dialog (JPEG data despite the .png name). -->
+    <EmbeddedResource Include="..\Alipay.png" LogicalName="RyzenPboStudio.Alipay.png" />
+    <EmbeddedResource Include="..\Wechat.png" LogicalName="RyzenPboStudio.Wechat.png" />
   </ItemGroup>
 
   <Target Name="GenerateEmbeddedToolBundle"

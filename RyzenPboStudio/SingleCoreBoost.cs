@@ -45,7 +45,7 @@ internal sealed class SingleCoreBoost : IDisposable
     public const int SecondsPerCore = 4;
 
     public static readonly string[] Columns =
-        { "Core", "Freq", "EffFreq", "VID", "TEL", "CoreV", "Temp", "Power" };
+        { "Core", "Freq", "EffFreq", "VID", "TEL", "Core VID", "Temp", "Power" };
 
     private static double? tscMHzCache;
 
@@ -420,7 +420,7 @@ internal sealed class SingleCoreBoost : IDisposable
     public void LogRow(ScbRow r)
     {
         var sb = new StringBuilder($"CCD{r.Ccd} Core {r.Slot,-2} {RankLabel(CcdRank(r.Slot)),-5} " +
-                                   $"FREQ {r.Freq,5:F0}  EFF {r.EffFreq,5:F0}  VID {r.Vid:F3}  TEL {r.Tel:F3}  CORE V {r.CoreVid:F3}  " +
+                                   $"FREQ {r.Freq,5:F0}  EFF {r.EffFreq,5:F0}  VID {r.Vid:F3}  TEL {r.Tel:F3}  CORE VID {r.CoreVid:F3}  " +
                                    $"TEMP {r.Temp,4:F1}  PWR {r.Power,4:F1}W");
         if (r.Errors > 0) sb.Append($"  ERR {r.Errors}");
         if (!r.Valid) sb.Append($"  无效（{InvalidReason(r)}）");
@@ -461,10 +461,13 @@ internal sealed class SingleCoreBoost : IDisposable
         sb.Append($"Single Core Boost {(cancelled ? "已取消" : "完成")}：有效 {valid.Count}/{total} 核");
         foreach (var g in valid.GroupBy(r => r.Ccd).OrderBy(g => g.Key))
         {
-            var lo = g.MinBy(r => r.Vid)!;
-            var hi = g.MaxBy(r => r.Vid)!;
+            // Fall back to the global VID when the per-core voltage segment was not found.
+            bool perCore = g.All(r => r.CoreVid > 0);
+            Func<ScbRow, double> volt = perCore ? r => r.CoreVid : r => r.Vid;
+            var lo = g.MinBy(volt)!;
+            var hi = g.MaxBy(volt)!;
             sb.Append($"\nCCD{g.Key}：频率 {g.Min(r => r.Freq):F0}–{g.Max(r => r.Freq):F0} MHz，" +
-                      $"VID {lo.Vid:F3} V（Core {lo.Slot}）– {hi.Vid:F3} V（Core {hi.Slot}）");
+                      $"{(perCore ? "Core VID" : "VID")} {volt(lo):F3} V（Core {lo.Slot}）– {volt(hi):F3} V（Core {hi.Slot}）");
         }
         var errs = rows.Where(r => r.Errors > 0).ToList();
         if (errs.Count > 0)

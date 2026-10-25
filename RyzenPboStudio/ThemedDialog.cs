@@ -18,6 +18,16 @@ internal static class DarkTitleBar
         }
         catch { /* Dark title bar is optional. */ }
     }
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(IntPtr hwnd, string? appName, string? idList);
+
+    /// <summary>Gives a scrollable control's native scrollbars the dark Explorer theme.</summary>
+    public static void ApplyScrollBars(IntPtr hwnd)
+    {
+        try { SetWindowTheme(hwnd, "DarkMode_Explorer", null); }
+        catch { /* Light scrollbars are acceptable. */ }
+    }
 }
 
 /// <summary>Dark message and confirmation dialog matching the main window.</summary>

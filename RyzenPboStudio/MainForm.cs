@@ -26,10 +26,9 @@ internal sealed partial class MainForm : Form
     private readonly TextBox _logBoxPbo = new(); // Mirrors log content on the AMD PBO page.
     private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 100 };
     private readonly System.Windows.Forms.Timer _offsetTimer = new() { Interval = 1000 };
-    private LinkLabel _updateLink = null!;
     private Form _infoDialog = null!;
     private bool _updateBusy; // Prevent concurrent update attempts.
-    private Version? _knownNewVersion; // Keep a declined update visible in the info dialog.
+    private Version? _knownNewVersion; // Keep a declined update visible on the update button.
 
     // Align test controls and the combined Start/Stop buttons to one width.
     private const int TestRowWidth = 370;
@@ -94,6 +93,7 @@ internal sealed partial class MainForm : Form
     public MainForm(bool autostartLaunch = false)
     {
         _autostartLaunch = autostartLaunch;
+        Config.StepOnError = _multi.BackoffStep; // Before crash recovery reads it.
         Text = "AMD Ryzen PBO Studio";
         ClientSize = new Size(1280, 854);
         FormBorderStyle = FormBorderStyle.None;
@@ -218,6 +218,12 @@ internal sealed partial class MainForm : Form
         Controls.Add(_headerBar); // Later Dock=Top controls claim the top edge first.
         _infoDialog = BuildInfoDialog();
         _headerBar.InfoClicked += (_, _) => _infoDialog.ShowDialog(this);
+        _headerBar.UpdateClicked += (_, _) => _ = RunUpdateFlowAsync(manual: true);
+        _headerBar.SponsorClicked += (_, _) =>
+        {
+            using var dlg = BuildSponsorDialog();
+            dlg.ShowDialog(this);
+        };
 
         ShowPage(Page.Pbo);
     }
@@ -470,7 +476,7 @@ internal sealed partial class MainForm : Form
 
         var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int modeGap = 10;
-        _multiSetBtn = BuildMultiSettingsButton();
+        _multiSetBtn = BuildMenuButton("设置顺序测试与组合测试的项目、轮数和每轮时间", ShowMultiTestDialog);
         int modeBtnWidth = (TestRowWidth - _multiSetBtn.Width - 2 * modeGap) / 2;
         _seqBtn = MakeModeButton("顺序测试", "SEQ", modeBtnWidth, SeqTip());
         _comboBtn = MakeModeButton("组合测试", "COMBO", modeBtnWidth, ComboTip());
@@ -483,17 +489,19 @@ internal sealed partial class MainForm : Form
 
         var adjTitle = new Label { Text = "CO 调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
         const int adjGap = 10;
-        int adjBtnWidth = (TestRowWidth - adjGap) / 2;
-        _autoAdjBtn   = MakeAdjustButton("自动模式", true,
-            $"压测报错时，把出错核心的 CO 自动回退一档（+{Config.StepOnError}）后重跑整轮，\n直到该轮通过或你手动停止。y-cruncher 整体崩溃时，回退本次测试范围内的全部核心。\nCO 最多回退到 +{Config.CoMax}，到达上限即停止测试。");
+        _stepSetBtn = BuildMenuButton("设置自动模式每次回退的 CO 步长", ShowStepDialog);
+        int adjBtnWidth = (TestRowWidth - _stepSetBtn.Width - 2 * adjGap) / 2;
+        _autoAdjBtn   = MakeAdjustButton("自动模式", true, AutoAdjustTip());
         _manualAdjBtn = MakeAdjustButton("手动模式", false,
             "报错仅提示");
         _autoAdjBtn.Width = adjBtnWidth;
         _manualAdjBtn.Width = adjBtnWidth;
         _autoAdjBtn.Margin = new Padding(0, 0, adjGap, 0);
+        _stepSetBtn.Margin = new Padding(0, 0, adjGap, 0);
         _manualAdjBtn.Margin = new Padding(0);
         var adjRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
         adjRow.Controls.Add(_autoAdjBtn);
+        adjRow.Controls.Add(_stepSetBtn);
         adjRow.Controls.Add(_manualAdjBtn);
 
         var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
@@ -814,69 +822,122 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>Builds the version and author dialog opened from the title bar.</summary>
+    /// <summary>Builds the about dialog opened from the title bar.</summary>
     private Form BuildInfoDialog()
     {
-        string buildDate = typeof(MainForm).Assembly
+        var asm = typeof(MainForm).Assembly;
+        string buildDate = asm
             .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
             .Cast<System.Reflection.AssemblyMetadataAttribute>()
             .FirstOrDefault(a => a.Key == "BuildDate")?.Value ?? "?";
-        string version = HeaderBar.DisplayVersion;
+        string copyright = asm.GetCustomAttributes(typeof(System.Reflection.AssemblyCopyrightAttribute), false)
+            .Cast<System.Reflection.AssemblyCopyrightAttribute>().FirstOrDefault()?.Copyright ?? "";
 
         var dialog = new Form
         {
             Text = "关于 AMD Ryzen PBO Studio",
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(480, 160),
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
             BackColor = Theme.Surface,
             ForeColor = Theme.TextHi,
             Font = new Font(Theme.FontFamily, 10F),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
         dialog.HandleCreated += (_, _) => DarkTitleBar.Apply(dialog.Handle);
 
+        const int contentWidth = 480;
         var content = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            RowCount = 4,
             BackColor = Theme.Surface,
-            Padding = new Padding(22, 18, 22, 14),
+            Padding = new Padding(28, 20, 28, 16),
         };
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, contentWidth));
 
-        Label InfoLine(string text, bool title = false) => new()
+        // Anchor None centers each row in the fixed-width column.
+        void Line(string text, float size, Color color, bool bold = false, int top = 0) => content.Controls.Add(new Label
         {
             Text = text,
-            Dock = DockStyle.Fill,
-            ForeColor = title ? Theme.TextHi : Theme.TextLo,
+            AutoSize = true,
+            Anchor = AnchorStyles.None,
+            ForeColor = color,
             BackColor = Theme.Surface,
-            Font = new Font(Theme.FontFamily, title ? 13F : 9.5F,
-                title ? FontStyle.Bold : FontStyle.Regular),
-            TextAlign = ContentAlignment.MiddleLeft,
-        };
-        content.Controls.Add(InfoLine("AMD Ryzen PBO Studio", title: true), 0, 0);
-        content.Controls.Add(InfoLine($"版本 {version} · 构建 {buildDate}"), 0, 1);
-        content.Controls.Add(InfoLine("制作：DY冷漠_OC调试"), 0, 2);
+            Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+            Margin = new Padding(0, top, 0, 2),
+        });
+
+        PillButton LinkButton(string text, string url)
+        {
+            var b = new PillButton
+            {
+                Text = text,
+                Size = new Size(170, 36),
+                Radius = 4,
+                Font = new Font(Theme.FontFamily, 10F),
+                BackColor = Theme.Surface,
+                Normal = Theme.SurfaceAlt,
+                Hover = Theme.Border,
+                Outline = Theme.TextLo,
+                ForeColor = Theme.TextHi,
+                Margin = new Padding(4, 0, 4, 0),
+            };
+            b.Click += (_, _) => OpenUrl(url);
+            return b;
+        }
+
+        Line("AMD Ryzen PBO Studio", 20F, Theme.Accent, bold: true);
+        Line($"{HeaderBar.DisplayVersion} · 构建 {buildDate}", 9.5F, Theme.TextLo);
 
         var links = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
-            BackColor = Theme.Surface,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             WrapContents = false,
-            Margin = new Padding(0, 8, 0, 0),
+            Anchor = AnchorStyles.None,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0, 14, 0, 0),
         };
-        links.Controls.Add(FootLink("项目主页", () => OpenUrl(Updater.HomePage)));
-        links.Controls.Add(FootLink("抖音 冷漠OC", () => OpenUrl(DouyinUrl)));
-        _updateLink = FootLink("检查更新", () => _ = RunUpdateFlowAsync(manual: true));
-        links.Controls.Add(_updateLink);
-        content.Controls.Add(links, 0, 3);
+        links.Controls.Add(LinkButton("项目主页", Updater.HomePage));
+        content.Controls.Add(links);
+
+        content.Controls.Add(new Panel
+        {
+            Size = new Size(contentWidth - 40, 1),
+            Anchor = AnchorStyles.None,
+            BackColor = Theme.Border,
+            Margin = new Padding(0, 20, 0, 4),
+        });
+
+        Line("开发者", 16F, Theme.Accent, bold: true, top: 10);
+        const string devName = "lengmo23 (", devHandle = "@冷漠OC";
+        var dev = new LinkLabel
+        {
+            Text = devName + devHandle + ")",
+            LinkArea = new LinkArea(devName.Length, devHandle.Length),
+            AutoSize = true,
+            Anchor = AnchorStyles.None,
+            ForeColor = Theme.TextHi,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, 10.5F),
+            LinkColor = Theme.AccentHover,
+            ActiveLinkColor = Theme.Accent,
+            VisitedLinkColor = Theme.AccentHover,
+            LinkBehavior = LinkBehavior.HoverUnderline,
+            Margin = new Padding(0, 0, 0, 2),
+        };
+        dev.LinkClicked += (_, _) => OpenUrl(DouyinUrl);
+        content.Controls.Add(dev);
+        Line("特别致谢", 16F, Theme.Accent, bold: true, top: 14);
+        Line("@古腾古腾咕咚咚（思路指导与建议）", 10.5F, Theme.TextHi);
+        Line("@阿肝（新功能建议与测试）", 10.5F, Theme.TextHi);
+        Line("@Yee（核心测试）", 10.5F, Theme.TextHi);
+        Line(copyright, 8.5F, Theme.TextLo, top: 26);
 
         dialog.Controls.Add(content);
         return dialog;
@@ -884,23 +945,88 @@ internal sealed partial class MainForm : Form
 
     private const string DouyinUrl = "https://v.douyin.com/6VGnQBTxwIQ/";
 
-    /// <summary>Creates a small link for the version dialog.</summary>
-    private static LinkLabel FootLink(string text, Action onClick)
+    private const int QrHeight = 420;
+
+    /// <summary>Sponsor dialog: a short thank-you note above the Alipay and WeChat payment codes.</summary>
+    private static Form BuildSponsorDialog()
     {
-        var link = new LinkLabel
+        const int width = 640;   // fits both codes side by side at QrHeight
+        var dlg = NewDialog("赞助作者");
+        var root = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            BackColor = Theme.Surface,
+            Padding = new Padding(24, 20, 24, 18),
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+
+        // Headings are centered; body paragraphs wrap across the full width so the text block fills the dialog.
+        Label Para(string text, float size, Color color, bool bold = false, int top = 0, bool body = false) => new()
         {
             Text = text,
             AutoSize = true,
+            MaximumSize = new Size(width, 0),
+            Anchor = body ? AnchorStyles.Left : AnchorStyles.None,
+            TextAlign = body ? ContentAlignment.TopLeft : ContentAlignment.MiddleCenter,
+            ForeColor = color,
             BackColor = Theme.Surface,
-            Font = new Font(Theme.FontFamily, 9.5F),
-            LinkColor = Theme.Accent,
-            ActiveLinkColor = Theme.AccentHover,
-            VisitedLinkColor = Theme.Accent,
-            LinkBehavior = LinkBehavior.HoverUnderline,
-            Margin = new Padding(0, 0, 18, 0),
+            Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+            Margin = new Padding(0, top, 0, 0),
         };
-        link.LinkClicked += (_, _) => onClick();
-        return link;
+
+        root.Controls.Add(Para("请作者喝杯咖啡", 18F, Theme.Accent, bold: true));
+        root.Controls.Add(Para("Buy Me a Coffee", 9.5F, Theme.TextLo, top: 2));
+        root.Controls.Add(Para(
+            "AMD Ryzen PBO Studio 是我利用业余时间独立开发的开源工具。每一个功能都是经过日夜不断打磨开发迭代的结果。" +
+            "如果它帮你省下了反复调参的时间，获得了更好的电脑性能，欢迎请我喝杯咖啡！\n" +
+            "你的每一份支持，都是我继续维护和更新它的动力，也让更多玩家能用上更好用的调参工具。",
+            10F, Theme.TextHi, top: 18, body: true));
+        root.Controls.Add(Para("赞助完全自愿，不影响任何功能的使用。感谢每一位使用者！", 9F, Theme.TextLo, top: 14));
+
+        var codes = Flow(FlowDirection.LeftToRight);
+        codes.Anchor = AnchorStyles.None;
+        codes.Margin = new Padding(0, 24, 0, 4);
+        foreach (string name in new[] { "Alipay", "Wechat" })
+        {
+            if (LoadQr(name) is not { } img) continue;
+            dlg.Disposed += (_, _) => img.Dispose();
+            codes.Controls.Add(new PictureBox
+            {
+                Image = img,
+                Size = img.Size,
+                Margin = new Padding(10, 0, 10, 0),
+            });
+        }
+        root.Controls.Add(codes);
+
+        dlg.Controls.Add(root);
+        // No close button: the title bar closes it, and Esc does too.
+        dlg.KeyPreview = true;
+        dlg.KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) dlg.Close(); };
+        return dlg;
+    }
+
+    /// <summary>Loads an embedded payment code scaled to QrHeight with smooth resampling, or null if missing.</summary>
+    private static Bitmap? LoadQr(string name)
+    {
+        try
+        {
+            using var stream = typeof(MainForm).Assembly.GetManifestResourceStream($"RyzenPboStudio.{name}.png");
+            if (stream == null) return null;
+            using var src = Image.FromStream(stream);
+            var bmp = new Bitmap(src.Width * QrHeight / src.Height, QrHeight);
+            using var g = Graphics.FromImage(bmp);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            g.DrawImage(src, new Rectangle(Point.Empty, bmp.Size));
+            return bmp;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     // Online updates
@@ -922,7 +1048,7 @@ internal sealed partial class MainForm : Form
         }
 
         _updateBusy = true;
-        _updateLink.Enabled = false;
+        _headerBar.UpdateTip = "正在检查更新...";
         try
         {
             UpdateInfo? info;
@@ -942,7 +1068,7 @@ internal sealed partial class MainForm : Form
             {
                 _knownNewVersion = null;
                 Updater.ClearSkip();
-                RefreshUpdateLinkText();
+                RefreshUpdateTip();
                 if (manual)
                     ThemedDialog.Show(Form.ActiveForm ?? this, $"当前已是最新版本 v{Updater.CurrentVersion}。", "检查更新");
                 return;
@@ -950,20 +1076,14 @@ internal sealed partial class MainForm : Form
 
             Log.Write($"发现新版本 {info.Tag}（当前 v{Updater.CurrentVersion}）");
             _knownNewVersion = info.Version;
-            RefreshUpdateLinkText();
+            RefreshUpdateTip();
 
-            // Keep a skipped version visible in the info dialog without prompting at startup.
+            // Keep a skipped version visible on the update button without prompting at startup.
             if (!manual && Updater.IsSkipped(info.Version)) return;
 
-            string notes = info.Notes.Length > 600 ? info.Notes[..600] + "\n..." : info.Notes;
-            bool update = ThemedDialog.Ask(Form.ActiveForm ?? this,
-                $"发现新版本 {info.Tag}，当前为 v{Updater.CurrentVersion}。\n\n" +
-                $"{notes}\n\n" +
-                $"下载大小约 {info.Size / 1024.0 / 1024.0:F1} MB。\n" +
-                "更新会关闭程序、覆盖安装目录后自动重启；\n" +
-                "logs 与 profiles 文件夹（CO 历史与恢复数据）不会被改动。\n\n" +
-                "现在更新吗？",
-                "发现新版本", "现在更新", "暂不更新");
+            bool update;
+            using (var prompt = BuildUpdatePrompt(info))
+                update = prompt.ShowDialog(Form.ActiveForm ?? this) == DialogResult.Yes;
             if (!update)
             {
                 Updater.SkipVersion(info.Version);
@@ -975,15 +1095,98 @@ internal sealed partial class MainForm : Form
         finally
         {
             _updateBusy = false;
-            if (!IsDisposed) _updateLink.Enabled = true;
+            RefreshUpdateTip();
         }
     }
 
-    /// <summary>Shows the available version in the info link, or the check action otherwise.</summary>
-    private void RefreshUpdateLinkText()
+    private const int MaxNotesHeight = 260; // Longer release notes scroll.
+
+    /// <summary>Update prompt: version headline and download size, one bold line per change with a dim
+    /// explanation, then a restart note. Returns DialogResult.Yes to update.</summary>
+    private static Form BuildUpdatePrompt(UpdateInfo info)
+    {
+        const int width = 480;
+        var dlg = NewDialog("发现新版本");
+        var root = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            BackColor = Theme.Surface,
+            Padding = new Padding(22, 18, 22, 16),
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+
+        Label Para(string text, float size, Color color, int maxWidth, bool bold = false, Padding? margin = null)
+        {
+            var m = margin ?? new Padding(0);
+            return new Label
+            {
+                Text = text,
+                AutoSize = true,
+                MaximumSize = new Size(maxWidth - m.Left, 0),   // indented lines wrap inside the column
+                ForeColor = color,
+                BackColor = Theme.Surface,
+                Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+                Margin = m,
+            };
+        }
+
+        root.Controls.Add(Para($"{info.Tag} 已发布", 16F, Theme.Accent, width, bold: true));
+        root.Controls.Add(Para($"当前版本 v{Updater.CurrentVersion} · 更新包约 {info.Size / 1024.0 / 1024.0:F1} MB",
+            9F, Theme.TextLo, width, margin: new Padding(0, 4, 0, 0)));
+        root.Controls.Add(new Panel { Size = new Size(width, 1), BackColor = Theme.Border, Margin = new Padding(0, 14, 0, 12) });
+
+        // Notes scroll inside a fixed-height area; their width leaves room for the scrollbar.
+        int noteWidth = width - SystemInformation.VerticalScrollBarWidth - 4;
+        var notes = Flow(FlowDirection.TopDown);
+        foreach (var note in info.Notes)
+        {
+            if (note.Title.Length > 0)
+                notes.Controls.Add(Para("●  " + note.Title, 10.5F, Theme.TextHi, noteWidth, bold: true, margin: new Padding(0, 0, 0, 2)));
+            if (note.Detail.Length > 0)
+                notes.Controls.Add(Para(note.Detail, 9.5F, Theme.TextLo, noteWidth,
+                    margin: new Padding(note.Title.Length > 0 ? 18 : 0, 0, 0, 10)));
+        }
+        if (info.Notes.Count == 0)
+            notes.Controls.Add(Para("本次更新未附说明。", 9.5F, Theme.TextLo, noteWidth, margin: new Padding(0, 0, 0, 10)));
+        var scroller = new Panel
+        {
+            AutoScroll = true,
+            Size = new Size(width, Math.Min(notes.GetPreferredSize(Size.Empty).Height, MaxNotesHeight)),
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        scroller.HandleCreated += (_, _) => DarkTitleBar.ApplyScrollBars(scroller.Handle);
+        scroller.Controls.Add(notes);
+        root.Controls.Add(scroller);
+
+        root.Controls.Add(Para("更新时会关闭程序，覆盖安装后自动重启。", 8.5F, Theme.TextLo, width, margin: new Padding(0, 6, 0, 0)));
+
+        var ok = Pill("现在更新", 104, primary: true);
+        var later = Pill("暂不更新", 104);
+        ok.DialogResult = DialogResult.Yes;
+        later.DialogResult = DialogResult.No;
+        later.Margin = new Padding(8, 0, 0, 0);
+        var buttons = Flow(FlowDirection.LeftToRight);
+        buttons.Anchor = AnchorStyles.Right;
+        buttons.Margin = new Padding(0, 16, 0, 0);
+        buttons.Controls.Add(ok);
+        buttons.Controls.Add(later);
+        root.Controls.Add(buttons);
+
+        dlg.Controls.Add(root);
+        dlg.AcceptButton = ok;
+        dlg.CancelButton = later;
+        return dlg;
+    }
+
+    /// <summary>Shows the available version on the update button, or the check action otherwise.</summary>
+    private void RefreshUpdateTip()
     {
         if (IsDisposed) return;
-        _updateLink.Text = _knownNewVersion != null ? $"有新版本 v{_knownNewVersion}" : "检查更新";
+        _headerBar.UpdateTip = _knownNewVersion != null ? $"有新版本 v{_knownNewVersion}" : "检查更新";
+        _headerBar.UpdateAvailable = _knownNewVersion != null;
     }
 
     /// <summary>Downloads and extracts an update before exiting for the replacement script.</summary>
@@ -998,7 +1201,7 @@ internal sealed partial class MainForm : Form
             {
                 if (IsDisposed || p == lastPercent) return;
                 lastPercent = p;
-                _updateLink.Text = $"下载中 {p}%";
+                _headerBar.UpdateTip = $"下载中 {p}%";
                 SetStatus($"正在下载更新 {info.Tag}（{source}） {p}%", Theme.Warn);
             });
             SetStatus($"正在下载更新 {info.Tag}...", Theme.Warn);
@@ -1008,13 +1211,13 @@ internal sealed partial class MainForm : Form
                 stage => Ui(() =>
                 {
                     if (IsDisposed) return;
-                    _updateLink.Text = "下载中...";
+                    _headerBar.UpdateTip = "下载中...";
                     SetStatus($"更新 {info.Tag} · {stage}", Theme.Warn);
                 }));
         }
         catch (Exception e)
         {
-            RefreshUpdateLinkText();
+            RefreshUpdateTip();
             SetStatus("更新下载失败", Theme.Accent);
             Log.Write($"更新下载失败：{e.Message}", "WARN");
             ShowPanFallbackDialog(info.Tag);
@@ -1024,13 +1227,13 @@ internal sealed partial class MainForm : Form
         string newRoot;
         try
         {
-            _updateLink.Text = "解压中...";
+            _headerBar.UpdateTip = "解压中...";
             SetStatus("正在解压更新...", Theme.Warn);
             newRoot = await Task.Run(() => Updater.ExtractAndVerify(zipPath));
         }
         catch (Exception e)
         {
-            RefreshUpdateLinkText();
+            RefreshUpdateTip();
             SetStatus("更新包校验失败", Theme.Accent);
             Log.Write($"更新包解压/校验失败：{e.Message}", "WARN");
             ThemedDialog.Show(Form.ActiveForm ?? this, $"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新");
@@ -1044,7 +1247,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception e)
         {
-            RefreshUpdateLinkText();
+            RefreshUpdateTip();
             ThemedDialog.Show(Form.ActiveForm ?? this, $"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新");
             return;
         }
@@ -2577,6 +2780,7 @@ internal sealed partial class MainForm : Form
         if (_seqBtn != null) _seqBtn.Enabled = enabled;
         if (_comboBtn != null) _comboBtn.Enabled = enabled;
         if (_multiSetBtn != null) _multiSetBtn.Enabled = enabled;
+        if (_stepSetBtn != null) _stepSetBtn.Enabled = enabled;
         if (_autoAdjBtn != null) _autoAdjBtn.Enabled = enabled;
         if (_manualAdjBtn != null) _manualAdjBtn.Enabled = enabled;
         foreach (var b in _scopeBtns) b.Enabled = enabled;

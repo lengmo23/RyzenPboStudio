@@ -12,7 +12,10 @@ internal static class Config
     public const int DefaultVt3 = 20;
     public const int DefaultBkt = 10;
     public const int DefaultSvt = 10;
-    public const int StepOnError = 2; // CO backoff per reported error.
+    public const int DefaultStepOnError = 2;
+    public const int MaxStepOnError = 5;
+    // Auto-mode CO backoff per reported error; loaded from profiles\setting.json.
+    public static int StepOnError { get; set; } = DefaultStepOnError;
     public const int CoMax = 30;      // highest CO the SMU accepts; backoff stops here.
 }
 

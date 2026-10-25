@@ -46,7 +46,7 @@ internal sealed class ResultsPanel : Panel
             ReadOnly = true,
             RowHeadersVisible = false,
             EnableHeadersVisualStyles = false,
-            BackgroundColor = MonTheme.Panel,
+            BackgroundColor = Theme.Surface,   // match the card so an empty table shows no darker block
             BorderStyle = BorderStyle.None,
             GridColor = MonTheme.Grid,
             SelectionMode = DataGridViewSelectionMode.FullRowSelect,
