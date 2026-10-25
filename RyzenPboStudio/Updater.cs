@@ -26,8 +26,11 @@ internal sealed class GhAsset
     [JsonPropertyName("browser_download_url")] public string DownloadUrl { get; set; } = "";
 }
 
+/// <summary>One change from the Release notes: a headline and its one-line explanation.</summary>
+internal sealed record ReleaseNote(string Title, string Detail);
+
 /// <summary>Available update metadata.</summary>
-internal sealed record UpdateInfo(Version Version, string Tag, string Notes, string DownloadUrl, long Size);
+internal sealed record UpdateInfo(Version Version, string Tag, IReadOnlyList<ReleaseNote> Notes, string DownloadUrl, long Size);
 
 /// <summary>
 /// Checks GitHub Releases and applies updates.
@@ -95,38 +98,51 @@ internal static class Updater
                        ?? zips.FirstOrDefault();
         if (zip == null) return null;
 
-        return new UpdateInfo(latest, release.TagName, PlainText(release.Body), zip.DownloadUrl, zip.Size);
+        return new UpdateInfo(latest, release.TagName, ParseNotes(release.Body), zip.DownloadUrl, zip.Size);
     }
 
-    /// <summary>Converts Release Markdown to plain text for the update dialog.</summary>
-    private static string PlainText(string markdown)
+    // Release section that explains which archive to download by hand; meaningless inside the app.
+    private const string DownloadGuideHeading = "下载哪个";
+
+    /// <summary>Splits Release Markdown into one note per heading, dropping the download guide.
+    /// Text before the first heading becomes a note without a title.</summary>
+    internal static List<ReleaseNote> ParseNotes(string markdown)
     {
-        var lines = new List<string>();
+        var notes = new List<ReleaseNote>();
+        string title = "";
+        var detail = new List<string>();
+
+        void Flush()
+        {
+            if (title != DownloadGuideHeading && (title.Length > 0 || detail.Count > 0))
+                notes.Add(new ReleaseNote(title, string.Join("\n", detail)));
+            detail.Clear();
+        }
+
         foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
         {
             string line = raw.Trim();
-            if (line.StartsWith("```")) continue;
-            if (line.Length > 0 && line.All(c => c == '-' || c == '='))
+            if (line.Length == 0 || line.StartsWith("```")) continue;
+            if (line.All(c => c == '-' || c == '=')) continue;
+            if (line.StartsWith('#'))
+            {
+                Flush();
+                title = CleanMarkdown(line.TrimStart('#'));
                 continue;
-            line = line.TrimStart('#', '>').Trim();
+            }
+            line = line.TrimStart('>').Trim();
             if (line.StartsWith("- ") || line.StartsWith("* ") || line.StartsWith("+ "))
                 line = "· " + line[2..].Trim();
-            line = line.Replace("**", "").Replace("__", "").Replace("`", "");
-            line = Regex.Replace(line, @"\[([^\]]*)\]\([^)]*\)", "$1");
-            lines.Add(line);
+            detail.Add(CleanMarkdown(line));
         }
+        Flush();
+        return notes;
+    }
 
-        // Collapse repeated blank lines.
-        var sb = new StringBuilder();
-        bool blank = false;
-        foreach (string line in lines)
-        {
-            if (line.Length == 0) { blank = true; continue; }
-            if (blank && sb.Length > 0) sb.Append('\n');
-            sb.Append(line).Append('\n');
-            blank = false;
-        }
-        return sb.ToString().Trim();
+    private static string CleanMarkdown(string text)
+    {
+        text = text.Replace("**", "").Replace("__", "").Replace("`", "");
+        return Regex.Replace(text, @"\[([^\]]*)\]\([^)]*\)", "$1").Trim();
     }
 
     // Remember skipped updates

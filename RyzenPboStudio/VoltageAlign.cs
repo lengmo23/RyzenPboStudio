@@ -41,7 +41,7 @@ internal static class VoltageAlign
     private static string[] ResultColumns(int startCo)
     {
         string start = startCo == 0 ? "全0" : "起点";
-        return new[] { "CCD", "Core", "排名", "角色", $"CoreV {start}", $"ΔV {start} (mV)", "CoreV 最终", "ΔV 最终 (mV)", "最终 CO", "备注" };
+        return new[] { "CCD", "Core", "排名", "角色", $"Core VID {start}", $"ΔV {start} (mV)", "Core VID 最终", "ΔV 最终 (mV)", "最终 CO", "备注" };
     }
 
     private static bool IsBclkRaised(double bclk) => bclk > OcBclkMHz;
@@ -209,7 +209,7 @@ internal static class VoltageAlign
 
         // Slope from the common-start pass only: once CO differs per core the cross-core fit no longer measures the F/V curve
         double slope = FvAnalysis.Slope(baseline.Values.ToList(), out _);
-        if (baseline.Values.Any(r => r.Valid && r.CoreVid <= 0)) Log.Write("部分核心无每核电压，改用 VID", "WARN");
+        if (baseline.Values.Any(r => r.Valid && r.CoreVid <= 0)) Log.Write("部分核心无 Core VID，改用 VID", "WARN");
 
         var targets = new Dictionary<int, int>();
         foreach (var (ccd, cores) in ccds)

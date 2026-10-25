@@ -11,7 +11,7 @@ internal sealed class SeqStep
     [JsonPropertyName("seconds")] public int Seconds { get; set; }
 }
 
-/// <summary>profiles\setting.json: sequential and combined test plans.</summary>
+/// <summary>profiles\setting.json: sequential and combined test plans, and the auto-mode CO backoff step.</summary>
 internal sealed class MultiTestSettings
 {
     public const int MinSeqSteps = 2;
@@ -22,6 +22,10 @@ internal sealed class MultiTestSettings
     [JsonPropertyName("combo_tests")] public List<string> ComboTests { get; set; } = new();
     [JsonPropertyName("combo_rounds")] public int ComboRounds { get; set; }
     [JsonPropertyName("combo_seconds")] public int ComboSeconds { get; set; }
+    // Files written before the step existed keep the default.
+    [JsonPropertyName("co_backoff_step")] public int BackoffStep { get; set; } = Config.DefaultStepOnError;
+
+    public static bool IsStepValid(int step) => step is >= 1 and <= Config.MaxStepOnError;
 
     private static string FilePath => Path.Combine(Workspace.ProfilesDir, "setting.json");
 
@@ -44,6 +48,7 @@ internal sealed class MultiTestSettings
         ComboTests = new List<string>(ComboTests),
         ComboRounds = ComboRounds,
         ComboSeconds = ComboSeconds,
+        BackoffStep = BackoffStep,
     };
 
     /// <summary>Known, non-repeating tests with positive counts; an empty plan would pass a test without running it.</summary>
@@ -56,15 +61,18 @@ internal sealed class MultiTestSettings
         && ComboTests.Distinct().Count() == ComboTests.Count
         && ComboRounds > 0 && ComboSeconds > 0;
 
-    /// <summary>Saved plan, or the defaults when the file is missing or invalid.</summary>
+    /// <summary>Saved plan and step, each falling back to its default when the file is missing or invalid.</summary>
     public static MultiTestSettings Load(ICollection<string> known)
     {
         try
         {
             if (File.Exists(FilePath)
-                && JsonSerializer.Deserialize<MultiTestSettings>(File.ReadAllText(FilePath)) is { } s
-                && s.IsValid(known))
-                return s;
+                && JsonSerializer.Deserialize<MultiTestSettings>(File.ReadAllText(FilePath)) is { } s)
+            {
+                var r = s.IsValid(known) ? s : Default();
+                r.BackoffStep = IsStepValid(s.BackoffStep) ? s.BackoffStep : Config.DefaultStepOnError;
+                return r;
+            }
         }
         catch { /* Fall back to defaults. */ }
         return Default();
@@ -84,13 +92,14 @@ internal sealed class MultiTestSettings
     }
 }
 
-/// <summary>Settings dialog for the sequential and combined tests.</summary>
+/// <summary>Settings dialogs for the sequential and combined tests and the auto-mode CO step.</summary>
 internal sealed partial class MainForm
 {
     private MultiTestSettings _multi = MultiTestSettings.Load(MultiTestNames);
     // Plan of the running test; on crash recovery it comes from the state file, not the current settings.
     private MultiTestSettings _runPlan = null!;
     private PillButton _multiSetBtn = null!;
+    private PillButton _stepSetBtn = null!;
 
     // The Pi benchmark is memory-bound and always runs on all cores, so it is not offered here.
     private static string[] MultiTestNames =>
@@ -124,7 +133,8 @@ internal sealed partial class MainForm
         _tips.SetToolTip(_comboBtn, ComboTip());
     }
 
-    private PillButton BuildMultiSettingsButton()
+    /// <summary>Square ☰ button that opens a settings dialog.</summary>
+    private PillButton BuildMenuButton(string tip, Action onClick)
     {
         var b = new PillButton
         {
@@ -138,9 +148,66 @@ internal sealed partial class MainForm
             ForeColor = Theme.TextHi,
             Margin = new Padding(0, 0, 0, 2),
         };
-        _tips.SetToolTip(b, "设置顺序测试与组合测试的项目、轮数和每轮时间");
-        b.Click += (_, _) => ShowMultiTestDialog();
+        _tips.SetToolTip(b, tip);
+        b.Click += (_, _) => onClick();
         return b;
+    }
+
+    private static string AutoAdjustTip() =>
+        $"压测报错时，把出错核心的 CO 自动回退一档（+{Config.StepOnError}）后重跑整轮，\n直到该轮通过或你手动停止。y-cruncher 整体崩溃时，回退本次测试范围内的全部核心。\nCO 最多回退到 +{Config.CoMax}，到达上限即停止测试。";
+
+    private void ShowStepDialog()
+    {
+        using var dlg = NewDialog("自动模式步长");
+
+        var pick = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FlatStyle = FlatStyle.Flat,
+            Width = 84,
+            BackColor = Theme.SurfaceAlt,
+            ForeColor = Theme.TextHi,
+            Font = new Font(Theme.FontFamily, 10F),
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        for (int s = 1; s <= Config.MaxStepOnError; s++) pick.Items.Add($"+{s}");
+        pick.SelectedIndex = Config.StepOnError - 1;
+
+        var okBtn = Pill("确定", 96, primary: true);
+        var cancelBtn = Pill("取消", 96);
+        okBtn.DialogResult = DialogResult.OK;
+        cancelBtn.DialogResult = DialogResult.Cancel;
+        cancelBtn.Margin = new Padding(8, 0, 0, 0);
+        var buttons = Flow(FlowDirection.LeftToRight);
+        buttons.Anchor = AnchorStyles.Right;
+        buttons.Margin = new Padding(0, 14, 0, 0);
+        buttons.Controls.Add(okBtn);
+        buttons.Controls.Add(cancelBtn);
+
+        var root = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            BackColor = Theme.Surface,
+            Padding = new Padding(16, 14, 16, 14),
+        };
+        root.Controls.Add(Hint("压测报错时，出错核心的 CO 每次回退的档数"));
+        root.Controls.Add(pick);
+        root.Controls.Add(Hint($"可选 +1～+{Config.MaxStepOnError}，默认 +{Config.DefaultStepOnError}"));
+        root.Controls.Add(buttons);
+        dlg.Controls.Add(root);
+        dlg.AcceptButton = okBtn;
+        dlg.CancelButton = cancelBtn;
+
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        int step = pick.SelectedIndex + 1;
+        if (step == Config.StepOnError) return;
+
+        Config.StepOnError = _multi.BackoffStep = step;
+        _tips.SetToolTip(_autoAdjBtn, AutoAdjustTip());
+        Log.Write($"自动模式 CO 步长：+{step}");
+        if (!_multi.Save()) SetStatus("自动模式步长保存失败，本次运行期间仍然生效", Theme.Accent);
     }
 
     private sealed class StepRow
@@ -154,12 +221,11 @@ internal sealed partial class MainForm
 
     private static string Minutes(long seconds) => $"{Math.Ceiling(seconds / 60.0):F0}";
 
-    private void ShowMultiTestDialog()
+    private static Form NewDialog(string title)
     {
-        string[] names = MultiTestNames;
-        using var dlg = new Form
+        var dlg = new Form
         {
-            Text = "多项测试设置",
+            Text = title,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             MaximizeBox = false,
@@ -172,19 +238,46 @@ internal sealed partial class MainForm
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
         dlg.HandleCreated += (_, _) => DarkTitleBar.Apply(dlg.Handle);
+        return dlg;
+    }
 
-        PillButton Pill(string text, int width, bool primary = false) => new()
-        {
-            Text = text,
-            Size = new Size(width, 30),
-            Radius = 8,
-            Font = new Font(Theme.FontFamily, 9.5F, primary ? FontStyle.Bold : FontStyle.Regular),
-            BackColor = Theme.Surface,
-            Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
-            Hover = primary ? Theme.AccentHover : Theme.Border,
-            ForeColor = primary ? Theme.AccentText : Theme.TextHi,
-            Margin = new Padding(0),
-        };
+    private static PillButton Pill(string text, int width, bool primary = false) => new()
+    {
+        Text = text,
+        Size = new Size(width, 30),
+        Radius = 8,
+        Font = new Font(Theme.FontFamily, 9.5F, primary ? FontStyle.Bold : FontStyle.Regular),
+        BackColor = Theme.Surface,
+        Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
+        Hover = primary ? Theme.AccentHover : Theme.Border,
+        ForeColor = primary ? Theme.AccentText : Theme.TextHi,
+        Margin = new Padding(0),
+    };
+
+    private static Label Hint(string text = "") => new()
+    {
+        Text = text,
+        AutoSize = true,
+        ForeColor = Theme.TextLo,
+        BackColor = Theme.Surface,
+        Margin = new Padding(0, 6, 0, 0),
+    };
+
+    private static FlowLayoutPanel Flow(FlowDirection dir) => new()
+    {
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        FlowDirection = dir,
+        WrapContents = false,
+        BackColor = Theme.Surface,
+        Margin = new Padding(0),
+    };
+
+    private void ShowMultiTestDialog()
+    {
+        string[] names = MultiTestNames;
+        using var dlg = NewDialog("多项测试设置");
+
         PillButton IconButton(string glyph) => new()
         {
             Text = glyph,
@@ -196,23 +289,6 @@ internal sealed partial class MainForm
             Hover = Theme.Border,
             ForeColor = Theme.TextHi,
             Margin = new Padding(4, 1, 0, 0),
-        };
-        Label Hint(string text = "") => new()
-        {
-            Text = text,
-            AutoSize = true,
-            ForeColor = Theme.TextLo,
-            BackColor = Theme.Surface,
-            Margin = new Padding(0, 6, 0, 0),
-        };
-        FlowLayoutPanel Flow(FlowDirection dir) => new()
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = dir,
-            WrapContents = false,
-            BackColor = Theme.Surface,
-            Margin = new Padding(0),
         };
 
         // ── Page switch ──
@@ -448,7 +524,7 @@ internal sealed partial class MainForm
         MultiTestSettings? result = null;
         okBtn.Click += (_, _) =>
         {
-            var plan = new MultiTestSettings();
+            var plan = new MultiTestSettings { BackoffStep = _multi.BackoffStep };
             for (int i = 0; i < rows.Count; i++)
             {
                 if (PositiveInt(rows[i].Rounds) is not int rd || PositiveInt(rows[i].Seconds) is not int sc)

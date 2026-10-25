@@ -115,8 +115,9 @@ internal sealed class MonitorView : UserControl
     private readonly string installedMemory;
     private readonly double p0BaseMHz; // P0 base frequency for the no-TSC FREQ fallback.
     // PM Table segment positions vary by CPU and are probed by RyzenSmu.ProbePtLayout.
-    // Per-core voltage is post-LDO die voltage, roughly 10 mV below requested VID.
+    // The per-core voltage segment is shown as Core VID.
     private RyzenSmu.PtLayout? ptLayout;
+    private const int PtGiveUpWindows = 6; // ~3 s of consecutive 500 ms windows before reporting a PM Table problem.
     /// <summary>Shared grid width keeps CCD panels and the limit strip aligned.</summary>
     private const int StripCols = 8;
 
@@ -488,6 +489,20 @@ internal sealed class MonitorView : UserControl
         catch { return false; }
     }
 
+    /// <summary>Logs a sustained PM Table read failure and asks the user to reinstall PawnIO.</summary>
+    private void ReportPawnIoFault()
+    {
+        Log.Write("无法读取 PM Table，可能是 PawnIO 驱动异常", "ERROR");
+        if (!IsHandleCreated) return;
+        BeginInvoke(() => ThemedDialog.Show(FindForm(),
+            "无法读取 CPU 遥测数据（PM Table），Core VID、频率、TEL 等读数不可用。\n\n" +
+            "可能是 PawnIO 驱动异常，请尝试卸载后重新安装：\n" +
+            "1. 在 Windows「设置 → 应用 → 已安装的应用」中卸载 PawnIO；\n" +
+            "2. 重启电脑；\n" +
+            "3. 从 https://pawnio.eu 下载最新版安装，再重新打开本程序。",
+            "PawnIO 驱动异常"));
+    }
+
     // Prefer PM Table per-core frequency, effective frequency, and C0 activity without waking idle cores.
     // If its frequency segment is absent, use HW P-state or APERF/MPERF for FREQ and APERF/TSC for EFFREQ.
     // Pinned MSR reads wake idle cores, so sample counters only at the window boundaries when needed.
@@ -506,6 +521,9 @@ internal sealed class MonitorView : UserControl
         long tscBaseTick = 0;
         ulong tscBase = 0;
         double tscMHz = 0;
+
+        int ptFails = 0, noVoltWins = 0;
+        bool ptReported = false; // Report once per session.
 
         while (running)
         {
@@ -573,6 +591,20 @@ internal sealed class MonitorView : UserControl
             } while (swWin.ElapsedMilliseconds < 500 && running);
 
             if (!running) break;
+
+            // An unreadable PM Table points to the driver; a readable one without the segment to an unsupported layout.
+            ptFails = ptSnap == null ? ptFails + 1 : 0;
+            noVoltWins = ptSnap != null && ptLayout is not { PerCoreVoltIdx: >= 0 } ? noVoltWins + 1 : 0;
+            if (ptFails == PtGiveUpWindows && !ptReported)
+            {
+                ptReported = true;
+                ReportPawnIoFault();
+            }
+            if (noVoltWins == PtGiveUpWindows && !ptReported)
+            {
+                ptReported = true;
+                Log.Write("未识别到 Core VID 数据，此 CPU 的 PM Table 布局可能不兼容", "WARN");
+            }
 
             // Capture the matching counters at the end of the window.
             if (readCounters)
@@ -897,7 +929,7 @@ internal sealed class CcdView
             dgv.Columns.Add(col);
         }
 
-        string[] rowNames = { "CPPC", "AMD CO", "EFFREQ", "FREQ", "VID" };
+        string[] rowNames = { "CPPC", "AMD CO", "EFFREQ", "FREQ", "Core VID" };
         foreach (var rn in rowNames)
         {
             int r = dgv.Rows.Add();
