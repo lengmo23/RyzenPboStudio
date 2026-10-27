@@ -131,18 +131,16 @@ internal sealed partial class MainForm
         return dialog.ShowDialog(this) == DialogResult.OK;
     }
 
-    /// <summary>Runs once the form is shown and editors are initialised: handles --autostart and syncs the task.</summary>
+    /// <summary>Runs once the form is shown and editors are initialised: offers to resume an interrupted test on any
+    /// launch, boot-applies on --autostart, and syncs the task.</summary>
     private void OnAutostartShown()
     {
-        if (_autostartLaunch)
-        {
-            Log.Write("由开机自启任务启动");
-            // An interrupted test takes priority over boot-apply
-            if (Workspace.WasInterrupted())
-                OfferAutoResume();
-            else if (AutoStart.BootApplyEnabled)
-                BootApplySavedProfile();
-        }
+        if (_autostartLaunch) Log.Write("由开机自启任务启动");
+        // An interrupted test takes priority over boot-apply
+        if (Workspace.WasInterrupted())
+            OfferResume();
+        else if (_autostartLaunch && AutoStart.BootApplyEnabled)
+            BootApplySavedProfile();
         // Also re-registers the task if the app folder was moved
         SyncAutoStartInBackground();
     }
@@ -210,16 +208,16 @@ internal sealed partial class MainForm
             okCo && okCs ? Theme.Success : Theme.Accent);
     }
 
-    /// <summary>Interrupted test on an --autostart launch: after a countdown, start through StartTest so RunTest does the recovery.</summary>
-    private void OfferAutoResume()
+    /// <summary>
+    /// Asks whether to continue an interrupted test and, if so, starts through StartTest so RunTest does the recovery.
+    /// Only an --autostart launch that was not declined counts down and continues on its own; a manual launch or a
+    /// previously declined resume waits for the user.
+    /// </summary>
+    private void OfferResume()
     {
         var resume = AutoStart.LoadResume();
-        if (resume.Declined)
-        {
-            Log.Write("此前已取消自动恢复，等待手动开始测试");
-            return;
-        }
-        if (resume.Count >= AutoStart.MaxAutoResumes)
+        bool countdown = _autostartLaunch && !resume.Declined;
+        if (countdown && resume.Count >= AutoStart.MaxAutoResumes)
         {
             AutoStart.DeclineResume();
             Log.Write($"测试已连续 {resume.Count} 次在自动恢复后死机/重启，停止自动恢复，需手动处理", "WARN");
@@ -234,15 +232,25 @@ internal sealed partial class MainForm
 
         ShowPage(Page.Testing);   // TESTING page shows status and progress
         bool takeover = Journal.ReadLastEntry()?.Reason == Journal.ManualTakeover;
-        using (var dlg = new ResumeCountdownDialog(takeover, resume.Count + 1))
+        var (test, scope) = DescribeInterruptedTest();
+        using (var dlg = new ResumePromptDialog(test, scope, takeover, countdown ? resume.Count + 1 : null))
         {
             if (dlg.ShowDialog(this) != DialogResult.OK)
             {
                 AutoStart.DeclineResume();
-                Log.Write("已取消自动恢复测试：中断记录保留，手动点「开始测试」仍会按中断恢复", "WARN");
-                SetStatus("已取消自动恢复 · 手动开始测试时仍按中断恢复", Theme.Warn);
+                Log.Write("暂不继续中断的测试：中断记录保留，点「开始测试」仍会按中断恢复", "WARN");
+                SetStatus("暂不继续 · 点「开始测试」时仍按中断恢复", Theme.Warn);
                 return;
             }
+        }
+
+        if (!countdown)
+        {
+            // The user chose to continue, like pressing Start: the auto-resume streak starts over.
+            AutoStart.ResetResumeCount();
+            Log.Write("继续中断的测试", "WARN");
+            StartTest(null, EventArgs.Empty);
+            return;
         }
 
         int attempt = AutoStart.IncrementResumeCount();
@@ -254,6 +262,26 @@ internal sealed partial class MainForm
         }
         Log.Write($"自动恢复测试（连续第 {attempt} 次）", "WARN");
         StartTest(null, EventArgs.Empty);
+    }
+
+    /// <summary>Test mode with its resume stage, and the scope, of the interrupted run for the resume prompt.</summary>
+    private (string test, string scope) DescribeInterruptedTest()
+    {
+        var st = Workspace.LoadState();
+        if (st == null) return ("上次未完成的测试", "范围以上次设置为准");
+        string test = st.TestMode switch
+        {
+            "SEQ" => string.IsNullOrEmpty(st.SeqPhase) ? "顺序测试" : $"顺序测试 · 从 {st.SeqPhase} 阶段继续",
+            "COMBO" => "组合测试",
+            _ => $"单项测试 · {st.TestMode}",
+        };
+        string scope = st.TestScope switch
+        {
+            "CUSTOM" when st.ScopeCores is { Count: > 0 } cores => $"自定义核心 [{string.Join(", ", cores)}]",
+            "EACH" => $"逐 CCD，从 CCD{st.ScopeCcd ?? 0} 继续",
+            _ => ScopeLabel(st.TestScope ?? "ALL", st.ScopeCcd ?? 0),
+        };
+        return (test, $"测试范围：{scope}");
     }
 
     /// <summary>Called by RunTest right after MarkInProgress (test thread).</summary>

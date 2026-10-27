@@ -83,15 +83,23 @@ internal static class VoltageAlign
         text.Append("2. 运行 Single Core Boost，逐核采集频率与电压，并为每个 CCD 选定基准核；\n");
         text.Append($"3. 电压对齐：对电压高于基准核的核心逐步降低 CO，使其向基准核收敛（最多 {MaxIterations} 轮）；\n");
         text.Append("4. 频率对齐：以 CCD 为单位整体降低 CO，探明单核频率平台；复测全部核心后，再对频率偏低的核心单独微调。\n");
-        text.Append($"预计耗时最长约 {minutes} 分钟。\n\n");
+        text.Append($"预计耗时最长约 {minutes} 分钟。");
 
-        text.Append("【风险声明】\n");
-        text.Append("· 电压对齐过程中会向 CPU 写入 CO，CPU 电压过低可能导致系统不稳定、冻屏死机，重启后本次写入的 CO 自动失效；\n");
-        text.Append("· 对齐结果仅基于单核负载测量，尚未经过稳定性验证，保存使用前务必完成压力测试；\n");
-        text.Append("· 结果将填入 CO 编辑器，不会自动保存；\n");
-        text.Append("· 降压与超频存在硬件风险，由此造成的数据丢失或硬件损坏由用户自行承担。");
+        // What the result means, set apart in the warning colour between the procedure and the risk statement.
+        var note = new StringBuilder();
+        note.Append("【结果说明】\n");
+        note.Append("· 电压对齐让各核心在单核负载下的电压趋于一致，并非寻找每个核心的极限 CO；\n");
+        note.Append("· 对齐结果对应单核测试负载下的电压，全核负载与日常使用的电压需求会有所不同；\n");
+        note.Append("· 请以对齐结果为基础，根据压力测试结果和实际使用情况，自行整体增加或减少全核 CO。");
+
+        var risk = new StringBuilder();
+        risk.Append("【风险声明】\n");
+        risk.Append("· 电压对齐过程中会向 CPU 写入 CO，CPU 电压过低可能导致系统不稳定、冻屏死机，重启后本次写入的 CO 自动失效；\n");
+        risk.Append("· 对齐结果仅基于单核负载测量，尚未经过稳定性验证，保存使用前务必完成压力测试；\n");
+        risk.Append("· 结果将填入 CO 编辑器，不会自动保存；\n");
+        risk.Append("· 降压与超频存在硬件风险，由此造成的数据丢失或硬件损坏由用户自行承担。");
         if (Workspace.WasInterrupted())
-            text.Append($"\n\n注意：检测到上次压测中断的恢复点。之后开始测试时，将以本次对齐结果为基础，统一回退 {Config.StepOnError} 档后继续。");
+            risk.Append($"\n\n注意：检测到上次压测中断的恢复点。之后开始测试时，将以本次对齐结果为基础，统一回退 {Config.StepOnError} 档后继续。");
 
         using var dlg = new Form
         {
@@ -117,6 +125,8 @@ internal static class VoltageAlign
             BackColor = Theme.Bg,
         };
         body.Controls.Add(new Label { Text = text.ToString(), AutoSize = true, MaximumSize = new Size(560, 0), Margin = new Padding(0, 0, 0, 12) });
+        body.Controls.Add(new Label { Text = note.ToString(), AutoSize = true, MaximumSize = new Size(560, 0), ForeColor = Theme.Warn, Margin = new Padding(0, 0, 0, 12) });
+        body.Controls.Add(new Label { Text = risk.ToString(), AutoSize = true, MaximumSize = new Size(560, 0), Margin = new Padding(0, 0, 0, 12) });
 
         NumericUpDown? startBox = null;
         if (raised)

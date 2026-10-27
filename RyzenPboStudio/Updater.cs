@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -24,13 +25,16 @@ internal sealed class GhAsset
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("size")] public long Size { get; set; }
     [JsonPropertyName("browser_download_url")] public string DownloadUrl { get; set; } = "";
+    // "sha256:<hex>", computed by GitHub on upload; absent on assets uploaded before GitHub added it.
+    [JsonPropertyName("digest")] public string? Digest { get; set; }
 }
 
 /// <summary>One change from the Release notes: a headline and its one-line explanation.</summary>
 internal sealed record ReleaseNote(string Title, string Detail);
 
-/// <summary>Available update metadata.</summary>
-internal sealed record UpdateInfo(Version Version, string Tag, IReadOnlyList<ReleaseNote> Notes, string DownloadUrl, long Size);
+/// <summary>Available update metadata; Sha256 is null when the Release does not publish a digest.</summary>
+internal sealed record UpdateInfo(Version Version, string Tag, IReadOnlyList<ReleaseNote> Notes, string DownloadUrl, long Size,
+    string? Sha256);
 
 /// <summary>
 /// Checks GitHub Releases and applies updates.
@@ -51,11 +55,8 @@ internal static class Updater
     /// <summary>Release page opened from update details.</summary>
     public const string ReleasesPage = $"{HomePage}/releases";
 
-    /// <summary>Manual download URL shown when all sources fail.</summary>
-    public const string PanUrl = "https://wwbnf.lanzoum.com/b01eupfd7c";
-
-    /// <summary>Extraction code for the manual download.</summary>
-    public const string PanCode = "csdf";
+    /// <summary>QQ group where users get the latest version when the in-app update fails.</summary>
+    public const string QqGroup = "1132124359";
 
     /// <summary>Response-header timeout for one source.</summary>
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
@@ -98,7 +99,17 @@ internal static class Updater
                        ?? zips.FirstOrDefault();
         if (zip == null) return null;
 
-        return new UpdateInfo(latest, release.TagName, ParseNotes(release.Body), zip.DownloadUrl, zip.Size);
+        return new UpdateInfo(latest, release.TagName, ParseNotes(release.Body), zip.DownloadUrl, zip.Size,
+            ParseSha256(zip.Digest));
+    }
+
+    /// <summary>Hex SHA-256 from a GitHub asset digest such as "sha256:ab12…"; null for other or missing digests.</summary>
+    private static string? ParseSha256(string? digest)
+    {
+        const string prefix = "sha256:";
+        if (digest == null || !digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        string hex = digest[prefix.Length..].Trim();
+        return hex.Length == 64 && hex.All(Uri.IsHexDigit) ? hex : null;
     }
 
     // Release section that explains which archive to download by hand; meaningless inside the app.
@@ -199,8 +210,8 @@ internal static class Updater
             try
             {
                 await FetchAsync(prefix.Length == 0 ? info.DownloadUrl : prefix + info.DownloadUrl,
-                    zipPath, info.Size, progress, onStage, name, token);
-                Log.Write($"更新包下载完成（{name}）");
+                    zipPath, info.Size, info.Sha256, progress, onStage, name, token);
+                Log.Write(info.Sha256 != null ? $"更新包下载完成（{name}，SHA-256 校验通过）" : $"更新包下载完成（{name}）");
                 return zipPath;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -218,8 +229,9 @@ internal static class Updater
         throw new IOException("所有下载源均失败。\n" + string.Join("\n", errors));
     }
 
-    /// <summary>Checks downloaded size against GitHub metadata to reject mirror error pages.</summary>
-    private static async Task FetchAsync(string url, string zipPath, long expectedSize,
+    /// <summary>Checks the download against GitHub metadata: SHA-256 when the Release publishes a digest, otherwise
+    /// only the size. The digest comes from the GitHub API, so a mirror cannot pass off a different file.</summary>
+    private static async Task FetchAsync(string url, string zipPath, long expectedSize, string? expectedSha256,
         IProgress<int>? progress, Action<string>? onStage, string sourceName, CancellationToken token)
     {
         // Use the system proxy for GitHub.
@@ -280,6 +292,13 @@ internal static class Updater
         long actual = new FileInfo(zipPath).Length;
         if (expectedSize > 0 && actual != expectedSize)
             throw new IOException($"文件大小不符，应为 {expectedSize} 字节、实际 {actual} 字节");
+        if (expectedSha256 != null)
+        {
+            string hash;
+            using (var fs = File.OpenRead(zipPath)) hash = Convert.ToHexString(await SHA256.HashDataAsync(fs, token));
+            if (!hash.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"SHA-256 不符，应为 {expectedSha256.ToLowerInvariant()}、实际 {hash.ToLowerInvariant()}");
+        }
     }
 
     /// <summary>Shortens download errors for the status bar.</summary>
@@ -289,6 +308,7 @@ internal static class Updater
         HttpRequestException { StatusCode: { } code } => $"返回 {(int)code}",
         HttpRequestException => "连接失败",
         IOException => "内容不完整",
+        InvalidDataException => "校验不符",
         _ => "失败",
     };
 
@@ -320,38 +340,64 @@ internal static class Updater
 
     /// <summary>
     /// Writes a replacement script and launches it after download; caller then exits.
-    /// The script preserves logs and profiles and restarts the application.
+    /// The script backs up the installed files, copies the new version over them and restarts the application.
+    /// robocopy replaces file by file, so a failure midway would leave a mix of old and new files; in that case the
+    /// backup is copied back and the old version restarted. logs and profiles are never touched.
     /// </summary>
     public static void LaunchReplacerAndExit(string newVersionRoot)
     {
         string installDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         string exePath = Environment.ProcessPath ?? Path.Combine(installDir, "AMD Ryzen PBO Studio.exe");
         string workDir = Path.GetDirectoryName(newVersionRoot)!;
+        string backupDir = Path.Combine(workDir, "backup");
         string script = Path.Combine(workDir, "apply-update.cmd");
+        // An update package without tools leaves y-cruncher alone, so there is no need to back it up.
+        string excludeDirs = Directory.Exists(Path.Combine(newVersionRoot, "tools")) ? "logs profiles" : "logs profiles tools";
 
-        // /E includes empty directories; /XD excludes runtime data; /R and /W limit retries.
+        // /E includes empty directories; /IS /IT overwrite files robocopy would treat as unchanged; /XD excludes runtime
+        // data; /R and /W limit retries; exit code 8+ is a failure.
         var sb = new StringBuilder();
         sb.AppendLine("@echo off");
         sb.AppendLine("chcp 65001 >nul");
-        sb.AppendLine($"echo 正在等待 AMD Ryzen PBO Studio 退出...");
-        sb.AppendLine($":waitloop");
+        sb.AppendLine("echo 正在等待 AMD Ryzen PBO Studio 退出...");
+        sb.AppendLine(":waitloop");
         sb.AppendLine($"tasklist /FI \"PID eq {Environment.ProcessId}\" 2>nul | find \"{Environment.ProcessId}\" >nul");
         sb.AppendLine("if not errorlevel 1 (");
         sb.AppendLine("  timeout /t 1 /nobreak >nul");
         sb.AppendLine("  goto waitloop");
         sb.AppendLine(")");
-        sb.AppendLine("echo 正在覆盖安装目录...");
-        sb.AppendLine($"robocopy \"{newVersionRoot}\" \"{installDir}\" /E /XD logs profiles /R:5 /W:2 >nul");
+        sb.AppendLine("echo 正在备份当前版本...");
+        sb.AppendLine($"rd /s /q \"{backupDir}\" 2>nul");   // a leftover from an earlier failed update
+        sb.AppendLine($"robocopy \"{installDir}\" \"{backupDir}\" /E /XD {excludeDirs} /R:2 /W:1 >nul");
         sb.AppendLine("if errorlevel 8 (");
-        sb.AppendLine("  echo 更新失败，原有版本未被破坏。按任意键退出。");
-        sb.AppendLine("  pause >nul");
-        sb.AppendLine("  exit /b 1");
+        sb.AppendLine("  echo 备份当前版本失败，已取消更新，原有版本未做任何改动。");
+        sb.AppendLine($"  start \"\" \"{exePath}\"");
+        sb.AppendLine("  goto failed");
+        sb.AppendLine(")");
+        sb.AppendLine("echo 正在覆盖安装目录...");
+        sb.AppendLine($"robocopy \"{newVersionRoot}\" \"{installDir}\" /E /IS /IT /XD logs profiles /R:5 /W:2 >nul");
+        sb.AppendLine("if errorlevel 8 (");
+        sb.AppendLine("  echo 覆盖安装失败，正在还原原有版本...");
+        sb.AppendLine($"  robocopy \"{backupDir}\" \"{installDir}\" /E /IS /IT /XD logs profiles /R:5 /W:2 >nul");
+        sb.AppendLine("  if errorlevel 8 (");
+        sb.AppendLine($"    echo 还原失败。备份保存在 {backupDir}，请手动复制回 {installDir}。");
+        sb.AppendLine("    goto failed");
+        sb.AppendLine("  )");
+        sb.AppendLine("  echo 已还原原有版本。");
+        sb.AppendLine($"  start \"\" \"{exePath}\"");
+        sb.AppendLine("  goto failed");
         sb.AppendLine(")");
         sb.AppendLine($"start \"\" \"{exePath}\"");
-        sb.AppendLine($"cd /d \"%TEMP%\"");
+        sb.AppendLine("cd /d \"%TEMP%\"");
         sb.AppendLine($"rd /s /q \"{workDir}\" 2>nul");
+        sb.AppendLine("exit /b 0");
+        sb.AppendLine(":failed");
+        sb.AppendLine($"echo 如需获取最新版本，请加入 QQ 群 {QqGroup}。按任意键关闭。");
+        sb.AppendLine("pause >nul");
+        sb.AppendLine("exit /b 1");
 
-        File.WriteAllText(script, sb.ToString(), Encoding.UTF8);
+        // No BOM: cmd would read it as part of the first command.
+        File.WriteAllText(script, sb.ToString(), new UTF8Encoding(false));
 
         Process.Start(new ProcessStartInfo
         {

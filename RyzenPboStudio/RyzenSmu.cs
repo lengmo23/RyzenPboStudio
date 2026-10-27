@@ -488,6 +488,30 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return (0, 0, 0); }
     }
 
+    /// <summary>Reads PPT, EDC, and TDC limits live from the PM Table only. Returns null when the table is unavailable
+    /// or reports the unlocked-PBO sentinel, since the fallbacks in ReadPboLimits are not what the CPU is running.</summary>
+    public static (int ppt, int edc, int tdc)? ReadLivePboLimits()
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var cpu = GetCpu();
+                var topo = cpu.info.topology;
+                int coreCount = (int)(topo.physicalCores > 0 ? topo.physicalCores : topo.cores);
+                if (cpu.RefreshPowerTable() != SMU.Status.OK
+                    || cpu.powerTable?.Table is not { } tbl
+                    || ProbePtLayout(tbl, coreCount) is not { } lay || tbl.Length <= lay.EdcLimitIdx)
+                    return null;
+                float ppt = tbl[lay.PptLimitIdx], edc = tbl[lay.EdcLimitIdx], tdc = tbl[lay.TdcLimitIdx];
+                if (ppt <= 0 || edc <= 0 || tdc <= 0) return null;
+                if (ppt >= PtLimitSentinel || edc >= PtLimitSentinel || tdc >= PtLimitSentinel) return null;
+                return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
+            }
+        }
+        catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return null; }
+    }
+
     private const int CoReadbackPolls = 3;          // readbacks after each write
     private const int CoMinWaitMs = 75;             // first wait between readbacks / rewrites
     private const int CoMaxWaitMs = 1000;           // the wait doubles up to this while the SMU stays busy

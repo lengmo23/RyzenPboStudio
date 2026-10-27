@@ -294,22 +294,26 @@ internal static class AutoStart
     }
 }
 
-/// <summary>Accepts on timeout or Start Now; cancels on Cancel or close.</summary>
-internal sealed class ResumeCountdownDialog : Form
+/// <summary>
+/// Asks whether to continue an interrupted test. With a countdown (logon autostart) it continues on its own when the
+/// countdown ends; without one it waits for the user. Continue returns OK; Not now or closing returns Cancel.
+/// </summary>
+internal sealed class ResumePromptDialog : Form
 {
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
-    private readonly Label _message;
-    private readonly string _offsetNote;
+    private readonly PillButton _continueBtn;
     private int _remaining;
 
+    /// <param name="test">Test mode and the stage to resume, shown prominently.</param>
+    /// <param name="scope">Cores the test covers.</param>
     /// <param name="manualTakeover">Offsets were taken over manually; recovery keeps them without +StepOnError.</param>
-    /// <param name="attempt">1-based consecutive auto-resume number.</param>
-    public ResumeCountdownDialog(bool manualTakeover, int attempt)
+    /// <param name="attempt">1-based consecutive auto-resume number; null for no countdown.</param>
+    public ResumePromptDialog(string test, string scope, bool manualTakeover, int? attempt)
     {
-        _remaining = AutoStart.ResumeCountdownSeconds;
-        _offsetNote = manualTakeover ? "沿用手动接管的 CO" : $"所有核心 CO +{Config.StepOnError}";
+        const int width = 440;
+        _remaining = attempt != null ? AutoStart.ResumeCountdownSeconds : 0;
 
-        Text = "自动恢复测试";
+        Text = "检测到中断的测试";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
@@ -318,32 +322,69 @@ internal sealed class ResumeCountdownDialog : Form
         TopMost = true;   // at logon the main window often ends up behind other apps
         BackColor = Theme.Surface;
         ForeColor = Theme.TextHi;
-        Font = new Font(Theme.FontFamily, 9F);
+        Font = new Font(Theme.FontFamily, 9.5F);
 
-        _message = new Label
+        Label Line(string text, float size, Color color, bool bold = false, int bottom = 0, Color? back = null, int max = width) => new()
         {
+            Text = text,
             AutoSize = true,
-            MaximumSize = new Size(440, 0),
-            ForeColor = Theme.TextHi,
-            BackColor = Theme.Surface,
-            Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold),
-            Margin = new Padding(2, 0, 2, 8),
-        };
-        var note = new Label
-        {
-            Text = $"连续第 {attempt}/{AutoStart.MaxAutoResumes} 次自动恢复，达到上限后不再自动开始。\n" +
-                   "完全无人值守的恢复需要在 Windows 中开启自动登录（本程序不会修改系统设置）。",
-            AutoSize = true,
-            MaximumSize = new Size(440, 0),
-            ForeColor = Theme.TextLo,
-            BackColor = Theme.Surface,
-            Margin = new Padding(2, 0, 2, 10),
+            MaximumSize = new Size(max, 0),
+            ForeColor = color,
+            BackColor = back ?? Theme.Surface,
+            Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+            Margin = new Padding(0, 0, 0, bottom),
         };
 
-        var startBtn = NewButton("立即开始", 96, primary: true);
-        startBtn.DialogResult = DialogResult.OK;
-        var cancelBtn = NewButton("取消", 80, primary: false);
-        cancelBtn.DialogResult = DialogResult.Cancel;
+        // The interrupted test sits in an outlined card so it stands out from the question and the notes.
+        const int pad = 16;
+        int inner = width - 2 * pad;
+        var info = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            BackColor = Theme.SurfaceAlt,
+            Location = new Point(pad, pad - 2),
+            Margin = new Padding(0),
+        };
+        info.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, inner));
+        info.Controls.Add(Line("中断的测试", 8.5F, Theme.TextLo, bottom: 4, back: Theme.SurfaceAlt, max: inner));
+        info.Controls.Add(Line(test, 14F, Theme.TextHi, bold: true, bottom: 2, back: Theme.SurfaceAlt, max: inner));
+        info.Controls.Add(Line(scope, 10F, Theme.TextHi, bottom: 10, back: Theme.SurfaceAlt, max: inner));
+        info.Controls.Add(new Panel { Size = new Size(inner, 1), BackColor = Theme.Border, Margin = new Padding(0, 0, 0, 8) });
+        info.Controls.Add(Line(manualTakeover ? "CO 处理：沿用手动应用的 CO 继续"
+                                              : $"CO 处理：所有核心回退 +{Config.StepOnError} 后继续",
+            9.5F, Theme.TextHi, back: Theme.SurfaceAlt, max: inner));
+        var card = new Card
+        {
+            Fill = Theme.SurfaceAlt,
+            Stroke = Theme.Accent,
+            Radius = 8,
+            Width = width,
+            Margin = new Padding(0, 0, 0, 12),
+        };
+        card.Controls.Add(info);
+        card.Height = info.GetPreferredSize(new Size(inner, 0)).Height + 2 * pad - 4;
+
+        var layout = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            BackColor = Theme.Surface,
+            Padding = new Padding(20, 18, 20, 16),
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+        layout.Controls.Add(Line("检测到中断的测试任务，是否继续？", 12F, Theme.TextHi, bold: true, bottom: 12));
+        layout.Controls.Add(card);
+        if (attempt != null)
+            layout.Controls.Add(Line($"连续第 {attempt}/{AutoStart.MaxAutoResumes} 次自动恢复，倒计时结束将自动继续。\n" +
+                                     "完全无人值守需在 Windows 中开启自动登录。", 8.5F, Theme.TextLo, bottom: 4));
+
+        _continueBtn = NewButton("继续测试", 132, primary: true);
+        _continueBtn.DialogResult = DialogResult.OK;
+        var laterBtn = NewButton("暂不继续", 96, primary: false);
+        laterBtn.DialogResult = DialogResult.Cancel;
         var btnRow = new FlowLayoutPanel
         {
             AutoSize = true,
@@ -351,33 +392,19 @@ internal sealed class ResumeCountdownDialog : Form
             Anchor = AnchorStyles.Right,
             FlowDirection = FlowDirection.LeftToRight,
             BackColor = Theme.Surface,
-            Margin = new Padding(0, 4, 0, 0),
+            Margin = new Padding(0, 10, 0, 0),
         };
-        btnRow.Controls.Add(startBtn);
-        btnRow.Controls.Add(cancelBtn);
-
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 3,
-            BackColor = Theme.Surface,
-            Padding = new Padding(16, 14, 16, 12),
-        };
-        for (int i = 0; i < 3; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(_message, 0, 0);
-        layout.Controls.Add(note, 0, 1);
-        layout.Controls.Add(btnRow, 0, 2);
+        btnRow.Controls.Add(_continueBtn);
+        btnRow.Controls.Add(laterBtn);
+        layout.Controls.Add(btnRow);
 
         Controls.Add(layout);
-        AcceptButton = startBtn;
-        CancelButton = cancelBtn;
+        AcceptButton = _continueBtn;
+        CancelButton = laterBtn;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
-        UpdateMessage();
+        UpdateCountdown();
         _timer.Tick += (_, _) =>
         {
             if (--_remaining <= 0)
@@ -386,18 +413,18 @@ internal sealed class ResumeCountdownDialog : Form
                 DialogResult = DialogResult.OK;
                 return;
             }
-            UpdateMessage();
+            UpdateCountdown();
         };
     }
 
-    private void UpdateMessage() =>
-        _message.Text = $"检测到上次测试异常中断，将在 {_remaining} 秒后自动恢复测试（{_offsetNote}）";
+    private void UpdateCountdown() =>
+        _continueBtn.Text = _remaining > 0 ? $"继续测试（{_remaining}）" : "继续测试";
 
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
         Activate();
-        _timer.Start();
+        if (_remaining > 0) _timer.Start();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
