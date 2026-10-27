@@ -1220,7 +1220,8 @@ internal sealed partial class MainForm : Form
             RefreshUpdateTip();
             SetStatus("更新下载失败", Theme.Accent);
             Log.Write($"更新下载失败：{e.Message}", "WARN");
-            ShowPanFallbackDialog(info.Tag);
+            using (var dlg = BuildDownloadFailedDialog(info.Tag))
+                dlg.ShowDialog(Form.ActiveForm ?? this);
             return;
         }
 
@@ -1256,138 +1257,65 @@ internal sealed partial class MainForm : Form
         Close();
     }
 
-    /// <summary>Shows a copyable fallback download link when all sources fail.</summary>
-    private void ShowPanFallbackDialog(string tag)
+    /// <summary>Shown when GitHub and every mirror fail: points users to the QQ group for the latest version.</summary>
+    private static Form BuildDownloadFailedDialog(string tag)
     {
-        using var dlg = new Form
+        const int width = 400;
+        var dlg = NewDialog("下载更新失败");
+        var root = new TableLayoutPanel
         {
-            Text = "下载更新失败",
-            FormBorderStyle = FormBorderStyle.FixedDialog,
-            StartPosition = FormStartPosition.CenterParent,
-            MaximizeBox = false,
-            MinimizeBox = false,
-            BackColor = Theme.Surface,
-            ForeColor = Theme.TextHi,
-            Font = new Font(Theme.FontFamily, 9F),
-        };
-        dlg.HandleCreated += (_, _) => DarkTitleBar.Apply(dlg.Handle);
-
-        var tip = new Label
-        {
-            Text = $"GitHub 与各镜像源均无法下载 {tag}。\n可从网盘手动下载，解压后覆盖到本程序目录（logs 与 profiles 请保留）。",
             AutoSize = true,
-            ForeColor = Theme.TextLo,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
             BackColor = Theme.Surface,
-            Margin = new Padding(2, 0, 2, 10),
+            Padding = new Padding(22, 18, 22, 16),
         };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
 
-        var grid = new TableLayoutPanel
+        Label Line(string text, float size, Color color, bool bold = false, int bottom = 0, bool center = false) => new()
         {
-            ColumnCount = 2,
-            RowCount = 2,
+            Text = text,
             AutoSize = true,
+            MaximumSize = new Size(width, 0),
+            Anchor = center ? AnchorStyles.None : AnchorStyles.Left,
+            ForeColor = color,
             BackColor = Theme.Surface,
-            Margin = new Padding(0),
+            Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+            Margin = new Padding(0, 0, 0, bottom),
         };
-        grid.Controls.Add(NewFieldLabel("网盘链接"), 0, 0);
-        var urlBox = NewCopyableBox(Updater.PanUrl, 300);
-        grid.Controls.Add(urlBox, 1, 0);
-        grid.Controls.Add(NewFieldLabel("提取密码"), 0, 1);
-        var codeBox = NewCopyableBox(Updater.PanCode, 300);
-        grid.Controls.Add(codeBox, 1, 1);
 
-        var copyBtn = NewDialogButton("复制链接和密码", 130);
+        root.Controls.Add(Line($"无法下载 {tag}", 12F, Theme.TextHi, bold: true, bottom: 6));
+        root.Controls.Add(Line("GitHub 与各镜像源均无法连接，当前版本未受影响。\n请加入 QQ 群获取最新版本：", 9.5F, Theme.TextLo, bottom: 14));
+        root.Controls.Add(Line("QQ 群", 9F, Theme.TextLo, bottom: 2, center: true));
+        root.Controls.Add(Line(Updater.QqGroup, 22F, Theme.Accent, bold: true, bottom: 6, center: true));
+
+        var copyBtn = Pill("复制群号", 104, primary: true);
+        var closeBtn = Pill("关闭", 84);
+        closeBtn.DialogResult = DialogResult.Cancel;
+        closeBtn.Margin = new Padding(8, 0, 0, 0);
         copyBtn.Click += (_, _) =>
         {
             try
             {
-                Clipboard.SetText($"{Updater.PanUrl}\n提取密码：{Updater.PanCode}");
+                Clipboard.SetText(Updater.QqGroup);
                 copyBtn.Text = "已复制";
             }
             catch (Exception ex)
             {
-                // Leave the text selectable when the clipboard is busy.
-                Log.Write($"复制网盘地址失败：{ex.Message}", "WARN");
+                Log.Write($"复制 QQ 群号失败：{ex.Message}", "WARN");
                 copyBtn.Text = "复制失败";
             }
         };
-        var openBtn = NewDialogButton("打开网盘", 96);
-        openBtn.Click += (_, _) => OpenUrl(Updater.PanUrl);
-        var closeBtn = NewDialogButton("关闭", 80);
-        closeBtn.DialogResult = DialogResult.Cancel;
+        var buttons = Flow(FlowDirection.LeftToRight);
+        buttons.Anchor = AnchorStyles.Right;
+        buttons.Margin = new Padding(0, 14, 0, 0);
+        buttons.Controls.Add(copyBtn);
+        buttons.Controls.Add(closeBtn);
+        root.Controls.Add(buttons);
 
-        var btnRow = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Anchor = AnchorStyles.Right,
-            FlowDirection = FlowDirection.LeftToRight,
-            BackColor = Theme.Surface,
-            Margin = new Padding(0, 12, 0, 0),
-        };
-        btnRow.Controls.Add(copyBtn);
-        btnRow.Controls.Add(openBtn);
-        btnRow.Controls.Add(closeBtn);
-
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 3,
-            BackColor = Theme.Surface,
-            Padding = new Padding(16, 14, 16, 12),
-        };
-        for (int i = 0; i < 3; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(tip, 0, 0);
-        layout.Controls.Add(grid, 0, 1);
-        layout.Controls.Add(btnRow, 0, 2);
-
-        dlg.Controls.Add(layout);
+        dlg.Controls.Add(root);
         dlg.CancelButton = closeBtn;
-        dlg.AutoSize = true;
-        dlg.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        dlg.ShowDialog(Form.ActiveForm ?? this);
-    }
-
-    private static Label NewFieldLabel(string text) => new()
-    {
-        Text = text,
-        AutoSize = true,
-        ForeColor = Theme.TextLo,
-        BackColor = Theme.Surface,
-        Margin = new Padding(0, 7, 10, 4),
-    };
-
-    /// <summary>Uses a read-only textbox so users can select text without the disabled gray style.
-    /// </summary>
-    private static TextBox NewCopyableBox(string text, int width) => new()
-    {
-        Text = text,
-        ReadOnly = true,
-        Width = width,
-        BackColor = Theme.SurfaceAlt,
-        ForeColor = Theme.TextHi,
-        BorderStyle = BorderStyle.FixedSingle,
-        Font = new Font(Theme.MonoFamily, 9.5F),
-        Margin = new Padding(0, 4, 0, 4),
-    };
-
-    private static Button NewDialogButton(string text, int width)
-    {
-        var b = new Button
-        {
-            Text = text,
-            Width = width,
-            Height = 30,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Theme.SurfaceAlt,
-            ForeColor = Theme.TextHi,
-            Margin = new Padding(8, 0, 0, 0),
-        };
-        b.FlatAppearance.BorderColor = Theme.Border;
-        return b;
+        return dlg;
     }
 
     /// <summary>Opens a link in the default browser.</summary>
@@ -1865,7 +1793,6 @@ internal sealed partial class MainForm : Form
         new CoProfile
         {
             Offsets = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList(),
-            FMax = (uint)_fmaxBox.Value,
         }.Save();
         Log.Write("已保存 CO 配置到 co_profile.json");
         SetStatus("已保存 CO 配置", Theme.Success);
@@ -1875,7 +1802,6 @@ internal sealed partial class MainForm : Form
     {
         var p = CoProfile.Load();
         for (int i = 0; i < _coSlotCount && i < p.Offsets.Count; i++) SetCell(i, p.Offsets[i]);
-        if (p.FMax > 0) _fmaxBox.Value = Math.Clamp(p.FMax, (uint)_fmaxBox.Minimum, (uint)_fmaxBox.Maximum);
         Log.Write("已载入 CO 配置（未应用，确认后点 Apply）");
     }
 
@@ -1896,6 +1822,13 @@ internal sealed partial class MainForm : Form
         bool okS = !writeScalar || RyzenSmu.SetPboScalar(scalar);
         if (writeScalar && okS) _scalarDirty = false;
         bool ok = okF && okP && okE && okT && okS;
+        // Record what was written so crash recovery restores the latest limits, even when changed mid-test.
+        var rec = PboJournal.ReadLast() ?? new PboSnapshot();
+        if (_fmaxWritable && okF) rec.FMax = fmax;
+        if (okP) rec.Ppt = (int)ppt;
+        if (okE) rec.Edc = (int)edc;
+        if (okT) rec.Tdc = (int)tdc;
+        PboJournal.Record(rec, "manual-apply");
         string fmaxPart = _fmaxWritable ? $"FMax {fmax} MHz / " : "FMax 跳过（不支持）/ ";
         string scalarPart = !_scalarWritable ? " / Scalar 跳过（不支持）"
                           : writeScalar ? $" / Scalar {_scalarBox.Text}" : " / Scalar 未改动";
@@ -2237,6 +2170,13 @@ internal sealed partial class MainForm : Form
             return;
         }
 
+        // Only a Start click asks; resuming an interrupted test was already acknowledged when it first started.
+        if (sender == _startBtn && !ConfirmTestRisk())
+        {
+            _startBtn.Enabled = true;
+            return;
+        }
+
         _testMode = SelectedMode();
         _durationSeconds = duration;
         _singleRounds = singleRounds; // SEQ and COMBO use their own plan.
@@ -2260,6 +2200,72 @@ internal sealed partial class MainForm : Form
         _measureCts?.Cancel();
         SetStatus("正在停止...", Theme.Accent);
         _stopBtn.Enabled = false;
+    }
+
+    /// <summary>Reads the FMax and PPT/EDC/TDC limits the CPU is running; values that cannot be read stay null.</summary>
+    private PboSnapshot ReadPboSnapshot()
+    {
+        var snap = new PboSnapshot();
+        if (_fmaxWritable && RyzenSmu.ReadFMax() is var fmax and > 0) snap.FMax = fmax;
+        if (RyzenSmu.ReadLivePboLimits() is { } lim)
+        {
+            snap.Ppt = lim.ppt;
+            snap.Edc = lim.edc;
+            snap.Tdc = lim.tdc;
+        }
+        return snap;
+    }
+
+    private static string DescribePbo(PboSnapshot s)
+    {
+        var parts = new List<string>();
+        if (s.FMax is { } f) parts.Add($"FMax {f} MHz");
+        if (s.Ppt is { } p) parts.Add($"PPT {p} W");
+        if (s.Edc is { } e) parts.Add($"EDC {e} A");
+        if (s.Tdc is { } t) parts.Add($"TDC {t} A");
+        return parts.Count > 0 ? string.Join(" / ", parts) : "未读到";
+    }
+
+    /// <summary>
+    /// After a crash, writes back only the last recorded PBO limits that now differ from the CPU. Writing FMax disturbs
+    /// some power-plan states and board-level core frequency limits (e.g. ASUS), so matching values are left alone, and
+    /// a value that cannot be read now is not written blindly.
+    /// </summary>
+    private void RestorePboAfterCrash(PboSnapshot saved)
+    {
+        if (saved.FMax == null && saved.Ppt == null && saved.Edc == null && saved.Tdc == null)
+        {
+            Log.Write("死机恢复：没有可核对的 PBO 记录，未重新写入");
+            return;
+        }
+        var now = ReadPboSnapshot();
+        var changes = new List<string>();
+        bool compared = false, ok = true;
+
+        if (saved.FMax is uint f && now.FMax is uint nf)
+        {
+            compared = true;
+            if (nf != f) { ok &= RyzenSmu.SetFMax(f); changes.Add($"FMax {nf} → {f} MHz"); }
+        }
+        // PM Table limits are rounded floats; a 1 W / 1 A difference is reading noise.
+        void Limit(string name, string unit, int? want, int? have, Func<uint, bool> set)
+        {
+            if (want is not int w || have is not int h) return;
+            compared = true;
+            if (Math.Abs(h - w) <= 1) return;
+            ok &= set((uint)w);
+            changes.Add($"{name} {h} → {w} {unit}");
+        }
+        Limit("PPT", "W", saved.Ppt, now.Ppt, RyzenSmu.SetPptLimit);
+        Limit("EDC", "A", saved.Edc, now.Edc, RyzenSmu.SetEdcLimit);
+        Limit("TDC", "A", saved.Tdc, now.Tdc, RyzenSmu.SetTdcLimit);
+
+        if (!compared)
+            Log.Write("死机恢复：未能读取当前 PBO 参数，未重新写入", "WARN");
+        else if (changes.Count == 0)
+            Log.Write("死机恢复：PBO 参数与最后一次记录一致，未重新写入");
+        else
+            Log.Write($"死机恢复：PBO 参数已恢复 {string.Join("、", changes)}" + (ok ? "" : "（部分写入失败）"), ok ? "INFO" : "WARN");
     }
 
     private void RunTestThread()
@@ -2348,6 +2354,7 @@ internal sealed partial class MainForm : Form
                 Log.Write("死机恢复设置 CO 失败", "ERROR");
                 return false;
             }
+            if (PboJournal.ReadLast() is { } savedPbo) RestorePboAfterCrash(savedPbo);
 
             if (_testMode == "SEQ" && !string.IsNullOrEmpty(seqResumePhase))
                 Log.Write($"恢复测试模式: 顺序测试，从中断的 {seqResumePhase} 阶段继续");
@@ -2371,6 +2378,9 @@ internal sealed partial class MainForm : Form
             offsets = RyzenSmu.ReadOffsets(numCores);
             testRound = 0;
             Log.WriteCo("当前 CO 值：", offsets);
+            var pbo = ReadPboSnapshot();
+            PboJournal.Record(pbo, "test-start");
+            Log.Write($"当前 PBO 参数：{DescribePbo(pbo)}");
 
             // Persist baseline offsets for recovery before the first test callback.
             Journal.Record(offsets, _testMode, null, "baseline");

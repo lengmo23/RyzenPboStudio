@@ -97,6 +97,17 @@ internal sealed class TestState
     [JsonPropertyName("timestamp")] public double Timestamp { get; set; }
 }
 
+/// <summary>One applied_pbo.ndjson record of the PBO limits in effect; null marks a value that is not known.</summary>
+internal sealed class PboSnapshot
+{
+    [JsonPropertyName("ts")] public string? Ts { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("fmax")] public uint? FMax { get; set; }
+    [JsonPropertyName("ppt")] public int? Ppt { get; set; }
+    [JsonPropertyName("edc")] public int? Edc { get; set; }
+    [JsonPropertyName("tdc")] public int? Tdc { get; set; }
+}
+
 /// <summary>Runs a child process with captured output and a timeout.</summary>
 internal static class ProcUtil
 {
@@ -145,7 +156,7 @@ internal static class Workspace
     /// <summary>Directory for CO history, recovery state, CS settings, and calibration.</summary>
     public static string ProfilesDir => Path.Combine(BaseDir, "profiles");
 
-    public static string StateFile => Path.Combine(ProfilesDir, "undervolt_state.json");
+    public static string StateFile => Path.Combine(ProfilesDir, "test_state.json");
     public static string InProgressFlag => Path.Combine(ProfilesDir, "test_in_progress");
     public static string FinalOffsets => Path.Combine(ProfilesDir, "final_offsets.txt");
 
@@ -175,6 +186,8 @@ internal static class Workspace
             MoveLegacy(Path.Combine(BaseDir, name), Path.Combine(ProfilesDir, name));
         foreach (string name in LegacyLogFiles)
             MoveLegacy(Path.Combine(BaseDir, name), Path.Combine(LogsDir, name));
+        // The recovery state was named undervolt_state.json before 3.0.1.
+        MoveLegacy(Path.Combine(ProfilesDir, "undervolt_state.json"), StateFile);
     }
 
     /// <summary>Migrates a legacy file without replacing newer data at the destination.</summary>
@@ -367,6 +380,57 @@ internal static class Journal
     }
 
     public static List<int>? ReadLastOffsets() => ReadLastEntry()?.Offsets;
+}
+
+/// <summary>
+/// PBO limit history: a record at each test start and after each PBO Apply, including mid-test changes.
+/// Crash recovery restores the last record; CO stays in applied_offsets.ndjson, whose every line needs offsets.
+/// </summary>
+internal static class PboJournal
+{
+    public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_pbo.ndjson");
+
+    public static void Record(PboSnapshot snap, string reason)
+    {
+        try
+        {
+            snap.Ts = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            snap.Reason = reason;
+            DurableIO.AppendLine(FilePath, JsonSerializer.Serialize(snap));
+        }
+        catch (Exception e)
+        {
+            Log.Write($"写入 PBO 日志失败: {e.Message}", "WARN");
+        }
+    }
+
+    /// <summary>Reads the last valid record, skipping a damaged tail line.</summary>
+    public static PboSnapshot? ReadLast()
+    {
+        try
+        {
+            if (!File.Exists(FilePath)) return null;
+            string[] lines = File.ReadAllLines(FilePath);
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                string line = lines[i].Trim();
+                if (line.Length == 0) continue;
+                try
+                {
+                    if (JsonSerializer.Deserialize<PboSnapshot>(line) is { } snap) return snap;
+                }
+                catch
+                {
+                    // Skip a damaged record and continue backward.
+                }
+            }
+        }
+        catch
+        {
+            // Treat a read failure as no history.
+        }
+        return null;
+    }
 }
 
 /// <summary>Persists CO history before applying offsets to the CPU.</summary>

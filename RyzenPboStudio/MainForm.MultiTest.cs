@@ -24,6 +24,8 @@ internal sealed class MultiTestSettings
     [JsonPropertyName("combo_seconds")] public int ComboSeconds { get; set; }
     // Files written before the step existed keep the default.
     [JsonPropertyName("co_backoff_step")] public int BackoffStep { get; set; } = Config.DefaultStepOnError;
+    // Set by "do not show again" in the risk notice shown before a test starts.
+    [JsonPropertyName("risk_notice_dismissed")] public bool RiskNoticeDismissed { get; set; }
 
     public static bool IsStepValid(int step) => step is >= 1 and <= Config.MaxStepOnError;
 
@@ -49,6 +51,7 @@ internal sealed class MultiTestSettings
         ComboRounds = ComboRounds,
         ComboSeconds = ComboSeconds,
         BackoffStep = BackoffStep,
+        RiskNoticeDismissed = RiskNoticeDismissed,
     };
 
     /// <summary>Known, non-repeating tests with positive counts; an empty plan would pass a test without running it.</summary>
@@ -71,6 +74,7 @@ internal sealed class MultiTestSettings
             {
                 var r = s.IsValid(known) ? s : Default();
                 r.BackoffStep = IsStepValid(s.BackoffStep) ? s.BackoffStep : Config.DefaultStepOnError;
+                r.RiskNoticeDismissed = s.RiskNoticeDismissed;
                 return r;
             }
         }
@@ -155,6 +159,109 @@ internal sealed partial class MainForm
 
     private static string AutoAdjustTip() =>
         $"压测报错时，把出错核心的 CO 自动回退一档（+{Config.StepOnError}）后重跑整轮，\n直到该轮通过或你手动停止。y-cruncher 整体崩溃时，回退本次测试范围内的全部核心。\nCO 最多回退到 +{Config.CoMax}，到达上限即停止测试。";
+
+    /// <summary>Risk notice before a test starts; "我已知晓" returns OK. dontShow is the "do not show again" box.</summary>
+    private static Form BuildTestRiskDialog(out CheckBox dontShow)
+    {
+        const int width = 480;
+        var dlg = NewDialog("开始测试前请阅读");
+        var root = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            BackColor = Theme.Surface,
+            Padding = new Padding(22, 18, 22, 16),
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+        root.Controls.Add(new Label
+        {
+            Text = "风险声明",
+            AutoSize = true,
+            ForeColor = Theme.Accent,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, 13F, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 10),
+        });
+        foreach (string item in new[]
+        {
+            "测试会持续向 CPU 写入负 CO 并运行高强度压力测试，电压不足时可能出现运算错误、冻屏、蓝屏或自动重启。",
+            "死机可能导致未保存的数据丢失，请先保存并关闭正在进行的工作。",
+            "测试期间请勿操作电脑，以免干扰测试结果。",
+            "CO 与 CS 都会影响系统稳定性，通过测试不代表日常使用中绝对稳定。",
+            "降压超频存在硬件风险，数据丢失或硬件损坏由用户自行承担。",
+        })
+        {
+            // Bullet and text in separate columns so wrapped lines align with the text, not the bullet.
+            var row = Flow(FlowDirection.LeftToRight);
+            row.Margin = new Padding(0, 0, 0, 8);
+            Label Cell(string t, int maxWidth) => new()
+            {
+                Text = t,
+                AutoSize = true,
+                MaximumSize = new Size(maxWidth, 0),
+                ForeColor = Theme.TextHi,
+                BackColor = Theme.Surface,
+                Font = new Font(Theme.FontFamily, 9.5F),
+                Margin = new Padding(0),
+            };
+            row.Controls.Add(Cell("·", 14));
+            row.Controls.Add(Cell(item, width - 14));
+            root.Controls.Add(row);
+        }
+
+        var check = new CheckBox
+        {
+            Text = "不再提示",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            ForeColor = Theme.TextLo,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        var ok = Pill("我已知晓", 112, primary: true);
+        var cancel = Pill("取消", 84);
+        ok.DialogResult = DialogResult.OK;
+        cancel.DialogResult = DialogResult.Cancel;
+        cancel.Margin = new Padding(8, 0, 0, 0);
+        var buttons = Flow(FlowDirection.LeftToRight);
+        buttons.Controls.Add(ok);
+        buttons.Controls.Add(cancel);
+        var footer = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        footer.Controls.Add(check, 0, 0);
+        footer.Controls.Add(buttons, 1, 0);
+        root.Controls.Add(footer);
+
+        dlg.Controls.Add(root);
+        dlg.AcceptButton = ok;
+        dlg.CancelButton = cancel;
+        dontShow = check;
+        return dlg;
+    }
+
+    /// <summary>Shows the risk notice unless it was dismissed for good; false cancels the start.</summary>
+    private bool ConfirmTestRisk()
+    {
+        if (_multi.RiskNoticeDismissed) return true;
+        using var dlg = BuildTestRiskDialog(out var dontShow);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return false;
+        if (dontShow.Checked)
+        {
+            _multi.RiskNoticeDismissed = true;
+            if (!_multi.Save()) SetStatus("「不再提示」保存失败，本次运行期间仍然生效", Theme.Accent);
+        }
+        return true;
+    }
 
     private void ShowStepDialog()
     {
@@ -524,7 +631,7 @@ internal sealed partial class MainForm
         MultiTestSettings? result = null;
         okBtn.Click += (_, _) =>
         {
-            var plan = new MultiTestSettings { BackoffStep = _multi.BackoffStep };
+            var plan = new MultiTestSettings { BackoffStep = _multi.BackoffStep, RiskNoticeDismissed = _multi.RiskNoticeDismissed };
             for (int i = 0; i < rows.Count; i++)
             {
                 if (PositiveInt(rows[i].Rounds) is not int rd || PositiveInt(rows[i].Seconds) is not int sc)
