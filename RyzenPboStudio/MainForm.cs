@@ -1515,9 +1515,9 @@ internal sealed partial class MainForm : Form
         card.Padding = new Padding(14, 6, 14, 6);
 
         ConfigNumBox(_fmaxBox, 0, 7000, 25, 74);
-        ConfigNumBox(_pptBox, 30, 400, 5, 62);
-        ConfigNumBox(_edcBox, 10, 400, 5, 62);
-        ConfigNumBox(_tdcBox, 10, 300, 5, 62);
+        ConfigNumBox(_pptBox, 30, 999, 5, 62);
+        ConfigNumBox(_edcBox, 10, 999, 5, 62);
+        ConfigNumBox(_tdcBox, 10, 999, 5, 62);
         _pptBox.Value = 142; // Replaced with live CPU limits during initialization.
         _edcBox.Value = 180;
         _tdcBox.Value = 160;

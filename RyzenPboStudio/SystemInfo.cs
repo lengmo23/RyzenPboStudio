@@ -216,6 +216,24 @@ internal static class SystemInfo
         catch { return ""; }
     }
 
+    /// <summary>AGESA version from the raw SMBIOS table ("AGESA!V9 ..." string), or an empty string.</summary>
+    public static string GetAgesaVersion()
+    {
+        try
+        {
+            const uint RSMB = 0x52534D42;
+            uint size = GetSystemFirmwareTable(RSMB, 0, null, 0);
+            if (size == 0) return "";
+            var raw = new byte[size];
+            if (GetSystemFirmwareTable(RSMB, 0, raw, size) != size) return "";
+            return ZenStates.Core.AgesaUtils.ParseVersion(raw);
+        }
+        catch { return ""; }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetSystemFirmwareTable(uint provider, uint tableId, byte[]? buffer, uint bufferSize);
+
     /// <summary>SMBIOS Type 17 memory vendors, joined by "/" for mixed modules.</summary>
     public static string GetMemoryVendor()
     {
