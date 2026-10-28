@@ -291,9 +291,11 @@ internal sealed class MonitorView : UserControl
         _cpuLine = $"{name} Stepping {cpu.info.stepping}";
 
         string bios = SystemInfo.GetBiosVersion();
-        uint smu = cpu.smu.Version;
-        string smuText = smu > 0 ? $"{(smu >> 16) & 0xFF}.{(smu >> 8) & 0xFF}.{smu & 0xFF:00}" : "";
-        string biosPart = bios.Length > 0 ? $"BIOS {bios}" + (smuText.Length > 0 ? $" ({smuText})" : "") : "";
+        string agesa = cpu.systemInfo?.AgesaVersion ?? "";
+        if (agesa.Length == 0) agesa = SystemInfo.GetAgesaVersion();
+        agesa = agesa.Split(' ')[^1];   // ComboAm5PI 1.2.7.0 → 1.2.7.0
+        string agesaText = agesa.Length > 0 ? $"AGESA {agesa}" : "";
+        string biosPart = bios.Length > 0 ? $"BIOS {bios}" + (agesaText.Length > 0 ? $" ({agesaText})" : "") : agesaText;
 
         string gpu = SystemInfo.GetGpuName();
         string driver = gpu == "—" ? "" : SystemInfo.GetGpuDriverVersion(gpu);
