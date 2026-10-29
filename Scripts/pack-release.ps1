@@ -1,15 +1,18 @@
 ﻿<#
 .SYNOPSIS
-    把 bin\ 打包成两个发布用的 zip。
+    Package bin\ into lite, net8contained and update release archives.
 
 .DESCRIPTION
-    full   —— 含 y-cruncher，供新用户首次下载，解压即用。
-    update —— 仅主程序及其依赖，供程序内自动更新使用；y-cruncher 极少变动，
-              没必要每次更新都重下 46MB。Updater 会优先选取名字含 "update" 的资产。
+    lite          includes y-cruncher for first-time installation; needs .NET 8 installed.
+    net8contained is lite with the .NET 8 runtime bundled (self-contained), for machines without .NET 8.
+                  It is published from the same source into a temporary folder, and is also the in-app
+                  update package of such installs.
+    update        contains only the application and dependencies for in-app updates of the lite package.
+    Updater prefers assets whose names contain "update"; a self-contained install takes "net8contained".
 
-    两个包顶层都是同一个版本命名的文件夹，Updater.ExtractAndVerify 靠找到主程序
-    exe 来定位它。包内的 README 与第三方声明取自仓库根目录，而不是构建输出里
-    ZenStates-Core 自带的那份（那是库说明，用户看了会困惑）。
+    All archives use the same fixed top-level folder. Updater.ExtractAndVerify
+    locates it by the main executable. README and notices come from the repository
+    root rather than the ZenStates-Core build output.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File Scripts\pack-release.ps1
@@ -31,16 +34,14 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     throw "找不到 $exePath，请先执行 dotnet publish 输出到 $BinDir。"
 }
 
-# ProductVersion 形如 "2.1+<commit>"。csproj 里版本写两段时这里也只有两段，
-# 补成三段以对上程序内 Updater.CurrentVersion 的显示和 GitHub tag；
-# 解析不出来就直接报错，别让哈希混进 zip 文件名。
+# Normalize ProductVersion to three numeric parts without commit metadata.
 $version = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
 if ($version -match '^([0-9]+\.[0-9]+\.[0-9]+)') { $version = $Matches[1] }
 elseif ($version -match '^([0-9]+\.[0-9]+)') { $version = "$($Matches[1]).0" }
 else { throw "无法从 ProductVersion 解析版本号: $version" }
 Write-Host "版本: $version"
 
-# 运行时产物不属于交付内容
+# Runtime data is not part of the release.
 foreach ($junk in @('logs', 'profiles')) {
     $p = Join-Path $bin $junk
     if (Test-Path -LiteralPath $p) {
@@ -49,20 +50,18 @@ foreach ($junk in @('logs', 'profiles')) {
 }
 
 $stageRoot = Join-Path ([IO.Path]::GetTempPath()) "rps-pack-$(Get-Random)"
-# 包内顶层目录固定不带版本号：手动下载新包解压时能直接盖在既有安装目录上，
-# 而不是留下两个版本各一份的文件夹。自动更新不依赖该名字
-# （Updater.ExtractAndVerify 是靠找到主程序 exe 来定位根目录的）。
+# A fixed folder name lets a manual install replace the existing directory.
 $folderName = 'AMDRyzenPBOStudio'
 
 function New-Package {
-    param([string]$Kind, [bool]$IncludeTools)
+    param([string]$Kind, [bool]$IncludeTools, [string]$AppDir = $bin)
 
     $stage = Join-Path $stageRoot "$Kind\$folderName"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-    # 主程序及依赖：排除运行时目录与 tools（tools 单独按需复制）
-    Get-ChildItem -LiteralPath $bin -File | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $stage -Force
+    # Copy application files; tools always come from the publish folder and only into first-install archives.
+    Get-ChildItem -LiteralPath $AppDir | Where-Object { $_.Name -notin @('logs', 'profiles', 'tools') } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $stage -Recurse -Force
     }
     if ($IncludeTools) {
         $tools = Join-Path $bin 'tools'
@@ -70,17 +69,16 @@ function New-Package {
             Copy-Item -LiteralPath $tools -Destination $stage -Recurse -Force
         }
         else {
-            Write-Warning "bin\tools 不存在，full 包将不含 y-cruncher。"
+            Write-Warning "bin\tools 不存在，$Kind 包将不含 y-cruncher。"
         }
     }
 
-    # 用仓库根目录的 README / 第三方声明覆盖构建输出里 ZenStates-Core 自带的那份
+    # Use repository documentation instead of the dependency's build output.
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $stage 'README.md') -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README_zh_cn.md') -Destination (Join-Path $stage 'README_zh_cn.md') -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Force
 
-    # 注意 Updater.CheckAsync 是靠名字里的 "update" / "full" 关键字挑包的，
-    # 改名时这两个词必须保留，否则自动更新会选错包。
+    # Updater.CheckAsync selects assets by "update", then "lite" / "full" (older releases), or "net8contained".
     $zip = Join-Path $out "AMD-Ryzen-PBO-Studio-v$version-$Kind.zip"
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
@@ -94,8 +92,21 @@ function New-Package {
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 try {
-    $full = New-Package -Kind 'full'   -IncludeTools $true
+    # Self-contained build of the same source, checked against the publish folder before any archive is written.
+    $net8Dir = Join-Path $stageRoot 'publish-net8'
+    $proj = Join-Path $repoRoot 'RyzenPboStudio\RyzenPboStudio.csproj'
+    Write-Host "发布含 .NET 8 的版本..."
+    dotnet publish $proj -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o $net8Dir --nologo -v q
+    if ($LASTEXITCODE -ne 0) { throw "含 .NET 8 的版本发布失败（dotnet publish 返回 $LASTEXITCODE）。" }
+    $net8Version = (Get-Item -LiteralPath (Join-Path $net8Dir $exeName)).VersionInfo.ProductVersion
+    if ($net8Version -notmatch "^$([regex]::Escape($version))(\+|$)") {
+        throw "含 .NET 8 的版本号 $net8Version 与 $BinDir 的 $version 不一致，请先重新发布 $BinDir。"
+    }
+
+    $lite = New-Package -Kind 'lite'   -IncludeTools $true
     $upd  = New-Package -Kind 'update' -IncludeTools $false
+    # "update", "lite" and "full" must stay out of this name: installs without bundled .NET select by them.
+    $net8 = New-Package -Kind 'net8contained' -IncludeTools $true -AppDir $net8Dir
 }
 finally {
     if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }

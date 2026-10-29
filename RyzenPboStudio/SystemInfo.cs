@@ -5,11 +5,11 @@ using Microsoft.Win32;
 namespace RyzenPboStudio;
 
 /// <summary>
-/// CPU / 权限相关查询。一律走注册表 + Win32 API：wmic 已在新版 Windows 11 中移除，不能依赖。
+/// Reads CPU and system details through registry and Win32 APIs without relying on removed wmic.
 /// </summary>
 internal static class SystemInfo
 {
-    /// <summary>处理器完整名称。失败返回 "AMD Ryzen"。</summary>
+    /// <summary>Full CPU name, or "AMD Ryzen" on failure.</summary>
     public static string GetCpuName()
     {
         try
@@ -22,7 +22,7 @@ internal static class SystemInfo
         catch { return "AMD Ryzen"; }
     }
 
-    /// <summary>是否为 Intel 处理器（读注册表 VendorIdentifier / ProcessorNameString）。</summary>
+    /// <summary>Checks registry vendor fields for an Intel CPU.</summary>
     public static bool IsIntel()
     {
         try
@@ -36,7 +36,7 @@ internal static class SystemInfo
         }
         catch
         {
-            // 检测失败时不阻断启动
+            // Do not block startup when vendor detection fails.
             return false;
         }
     }
@@ -54,7 +54,7 @@ internal static class SystemInfo
         }
     }
 
-    /// <summary>物理核心数。失败时回退为 逻辑核心数 / 2。</summary>
+    /// <summary>Physical core count, falling back to half the logical count.</summary>
     public static int GetPhysicalCoreCount()
     {
         try
@@ -64,12 +64,12 @@ internal static class SystemInfo
         }
         catch
         {
-            // 忽略，走下面的回退
+            // Use the fallback below when the native query fails.
         }
         return Math.Max(1, Environment.ProcessorCount / 2);
     }
 
-    /// <summary>处理器标称/基准频率(MHz)，取自注册表 ~MHz（启动时由 HAL 写入，≈ P0 基频 = MPERF/TSC 计数频率）。失败返回 0。</summary>
+    /// <summary>Registry ~MHz written by HAL at boot; returns zero on failure.</summary>
     public static double GetBaseFrequencyMHz()
     {
         try
@@ -77,11 +77,11 @@ internal static class SystemInfo
             using var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
             if (key?.GetValue("~MHz") is int mhz && mhz > 0) return mhz;
         }
-        catch { /* 注册表不可用时回退 0 */ }
+        catch { }
         return 0;
     }
 
-    /// <summary>主板厂商 + 型号（注册表 BIOS 键，不依赖 WMI/wmic）。失败返回 "—"。</summary>
+    /// <summary>Motherboard vendor and model from the BIOS registry key.</summary>
     public static string GetMotherboard()
     {
         try
@@ -100,14 +100,14 @@ internal static class SystemInfo
         catch { return "—"; }
     }
 
-    /// <summary>主显卡型号。先用 EnumDisplayDevices 只枚举当前在用的适配器（换卡后注册表里仍留有旧显卡的
-    /// 驱动键，直接枚举注册表会读到已拆掉的那张卡），拿不到再回退注册表显示类驱动键。失败返回 "—"。</summary>
+    /// <summary>Prefers active display adapters over stale registry driver entries,
+    /// then falls back to the display-class registry key.</summary>
     public static string GetGpuName()
     {
         return GetGpuNameFromDisplayDevices() ?? GetGpuNameFromRegistry() ?? "—";
     }
 
-    /// <summary>枚举当前系统在用的显示适配器（不含已卸载显卡的残留驱动键）。无可用候选返回 null。</summary>
+    /// <summary>Enumerates active display adapters, excluding removed devices.</summary>
     private static string? GetGpuNameFromDisplayDevices()
     {
         try
@@ -122,7 +122,7 @@ internal static class SystemInfo
                 var desc = (dd.DeviceString ?? "").Trim();
                 int score = ScoreAdapter(desc);
                 if (score == int.MinValue) continue;
-                // 同型号多条目时优先主显示器所在的那条
+                // Prefer the entry driving the primary display when descriptions match.
                 if ((dd.StateFlags & DisplayDevicePrimaryDevice) != 0) score += 2;
                 else if ((dd.StateFlags & DisplayDeviceAttachedToDesktop) != 0) score += 1;
 
@@ -137,7 +137,7 @@ internal static class SystemInfo
         catch { return null; }
     }
 
-    /// <summary>回退路径：注册表显示类驱动键（含历史残留，仅在 EnumDisplayDevices 无结果时使用）。</summary>
+    /// <summary>Uses display-class registry drivers only when active enumeration fails.</summary>
     private static string? GetGpuNameFromRegistry()
     {
         try
@@ -150,7 +150,7 @@ internal static class SystemInfo
             int bestScore = int.MinValue;
             foreach (var sub in classKey.GetSubKeyNames())
             {
-                if (sub.Length != 4 || !int.TryParse(sub, out _)) continue;   // 仅 0000/0001… 适配器实例键
+                if (sub.Length != 4 || !int.TryParse(sub, out _)) continue; // Adapter instance keys use four digits.
                 using var dev = classKey.OpenSubKey(sub);
                 var desc = (dev?.GetValue("DriverDesc") as string ?? "").Trim();
                 int score = ScoreAdapter(desc);
@@ -167,14 +167,14 @@ internal static class SystemInfo
         catch { return null; }
     }
 
-    /// <summary>适配器描述打分：多显卡机器优先独显，避免把 Ryzen 核显当成主显卡。
-    /// 虚拟/基础适配器返回 int.MinValue 表示排除。</summary>
+    /// <summary>Scores adapters to prefer discrete GPUs over integrated graphics.
+    /// Excludes virtual and basic adapters with int.MinValue.</summary>
     private static int ScoreAdapter(string desc)
     {
         if (desc.Length == 0) return int.MinValue;
         var u = desc.ToUpperInvariant();
         if (u.Contains("BASIC") || u.Contains("REMOTE") || u.Contains("MIRROR") || u.Contains("VIRTUAL"))
-            return int.MinValue;   // 跳过 Microsoft Basic Display / 远程桌面 / 虚拟显卡
+            return int.MinValue; // Exclude basic, remote, and virtual adapters.
 
         int score = 0;
         if (u.Contains("GEFORCE") || u.Contains("NVIDIA") || u.Contains("RADEON RX")) score = 30;
@@ -184,7 +184,7 @@ internal static class SystemInfo
         return score;
     }
 
-    // ── EnumDisplayDevices 取当前在用的显示适配器 ──────────────────────────
+    // Active adapters from EnumDisplayDevices
 
     private const int DisplayDeviceAttachedToDesktop = 0x1;
     private const int DisplayDevicePrimaryDevice = 0x4;
@@ -205,7 +205,101 @@ internal static class SystemInfo
     private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum,
         ref DisplayDevice lpDisplayDevice, uint dwFlags);
 
-    /// <summary>SMBIOS 报告的物理内存总容量。失败返回 "—"。</summary>
+    /// <summary>BIOS version from the registry, or an empty string.</summary>
+    public static string GetBiosVersion()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\BIOS");
+            return (key?.GetValue("BIOSVersion") as string ?? "").Trim();
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>AGESA version from the raw SMBIOS table ("AGESA!V9 ..." string), or an empty string.</summary>
+    public static string GetAgesaVersion()
+    {
+        try
+        {
+            const uint RSMB = 0x52534D42;
+            uint size = GetSystemFirmwareTable(RSMB, 0, null, 0);
+            if (size == 0) return "";
+            var raw = new byte[size];
+            if (GetSystemFirmwareTable(RSMB, 0, raw, size) != size) return "";
+            return ZenStates.Core.AgesaUtils.ParseVersion(raw);
+        }
+        catch { return ""; }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetSystemFirmwareTable(uint provider, uint tableId, byte[]? buffer, uint bufferSize);
+
+    /// <summary>SMBIOS Type 17 memory vendors, joined by "/" for mixed modules.</summary>
+    public static string GetMemoryVendor()
+    {
+        try
+        {
+            var names = ZenStates.Core.SystemInfo.SMBios.MemoryDevices
+                .Where(d => d.Size > 0)
+                .Select(d => (d.ManufacturerName ?? "").Trim())
+                .Where(n => n.Length > 0 && !n.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return string.Join(" / ", names);
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>Reads display-driver version; converts NVIDIA’s Windows version
+    /// to its public version format and otherwise returns the original value.</summary>
+    public static string GetGpuDriverVersion(string gpuName)
+    {
+        try
+        {
+            using var classKey = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}");
+            if (classKey == null) return "";
+            foreach (var sub in classKey.GetSubKeyNames())
+            {
+                if (sub.Length != 4 || !int.TryParse(sub, out _)) continue;
+                using var dev = classKey.OpenSubKey(sub);
+                if (!string.Equals((dev?.GetValue("DriverDesc") as string ?? "").Trim(), gpuName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                string ver = (dev?.GetValue("DriverVersion") as string ?? "").Trim();
+                var parts = ver.Split('.');
+                if (gpuName.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) && parts.Length == 4)
+                {
+                    string digits = parts[2] + parts[3];
+                    if (digits.Length >= 5)
+                    {
+                        string last5 = digits[^5..];
+                        return $"{last5[..3]}.{last5[3..]}";
+                    }
+                }
+                return ver;
+            }
+        }
+        catch { }
+        return "";
+    }
+
+    /// <summary>Corrects Windows 11 registry ProductName using build 22000 or later.</summary>
+    public static string GetOsVersion()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+            string name = (key?.GetValue("ProductName") as string ?? "").Trim();
+            string display = (key?.GetValue("DisplayVersion") as string ?? "").Trim();
+            if (int.TryParse(key?.GetValue("CurrentBuildNumber") as string, out int build) && build >= 22000)
+                name = name.Replace("Windows 10", "Windows 11");
+            name = name.Replace("Windows ", "Win");
+            return display.Length > 0 ? $"{name} ({display})" : name;
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>Total physical memory reported by SMBIOS, or "—".</summary>
     public static string GetInstalledMemory()
     {
         try
@@ -218,7 +312,7 @@ internal static class SystemInfo
         catch { return "—"; }
     }
 
-    /// <summary>物理内存总字节数；取不到返回 0。</summary>
+    /// <summary>Total physical-memory bytes, or zero on failure.</summary>
     public static ulong TotalPhysicalBytes()
     {
         try
@@ -229,7 +323,7 @@ internal static class SystemInfo
         catch { return 0; }
     }
 
-    // ── GetLogicalProcessorInformation 取物理核心数 ──────────────────────────
+    // Physical cores from GetLogicalProcessorInformation
 
     private const int RelationProcessorCore = 0;
     private const int RelationCache = 2;
@@ -239,9 +333,9 @@ internal static class SystemInfo
     {
         public UIntPtr ProcessorMask;
         public uint Relationship;
-        public uint Padding;       // 对齐到 8 字节，使后面的联合体落在偏移 16
-        // 偏移 16 起是联合体。Relationship==RelationCache 时是 CACHE_DESCRIPTOR：
-        // Level/Associativity/LineSize/Size/Type，其余关系类型下这两个字段无意义。
+        public uint Padding; // Align the union at offset 16.
+        // The union at offset 16 is CACHE_DESCRIPTOR only for RelationCache.
+        // Other relationship types do not define these fields.
         public byte CacheLevel;
         public byte CacheAssociativity;
         public ushort CacheLineSize;
@@ -261,10 +355,9 @@ internal static class SystemInfo
     private static int CountPhysicalCores() => GetProcessorCoreMasks().Count;
 
     /// <summary>
-    /// 逻辑核 → 物理核 映射（下标=逻辑核号，值=物理核序号）。
-    /// 关闭 SMT、或每核线程数不为 2 时同样正确。拿不到拓扑返回 null。
-    /// 基于 GetLogicalProcessorInformation，仅覆盖单个处理器组（≤64 逻辑核），
-    /// 超过 64 逻辑核的平台会回退到调用方的兜底逻辑。
+    /// Maps logical to physical core IDs, including non-SMT topologies.
+    /// Covers one processor group of up to 64 logical cores;
+    /// returns null when topology is unavailable.
     /// </summary>
     public static int[]? GetLogicalToPhysicalMap()
     {
@@ -294,12 +387,12 @@ internal static class SystemInfo
         }
     }
 
-    /// <summary>各物理核的逻辑处理器掩码，按枚举顺序（即物理核序号）。</summary>
+    /// <summary>Logical-processor masks in physical-core enumeration order.</summary>
     private static List<ulong> GetProcessorCoreMasks()
     {
         var masks = new List<ulong>();
         uint length = 0;
-        GetLogicalProcessorInformation(IntPtr.Zero, ref length); // 先取所需长度
+        GetLogicalProcessorInformation(IntPtr.Zero, ref length);
         if (length == 0) return masks;
 
         IntPtr buffer = Marshal.AllocHGlobal((int)length);
@@ -325,10 +418,9 @@ internal static class SystemInfo
     }
 
     /// <summary>
-    /// 各 CCD 的逻辑核掩码，按最低逻辑核号升序（即 CCD0、CCD1…）。
-    /// 依据是共享同一块 L3 的逻辑核集合——Ryzen 上一个 CCD 一块 L3，
-    /// 比按「物理核序号 / 每CCD核数」硬算更可靠，熔丝屏蔽核的型号也能正确分组。
-    /// 拿不到拓扑时返回空表，由调用方回退。
+    /// Groups logical cores by shared L3, ordered by lowest logical ID.
+    /// This handles fused-off cores without assuming a fixed cores-per-CCD count.
+    /// Returns an empty list when topology is unavailable.
     /// </summary>
     public static List<ulong> GetCcdLogicalMasks()
     {
@@ -372,13 +464,13 @@ internal static class SystemInfo
     }
 }
 
-/// <summary>逻辑核→物理核映射的缓存包装，拿不到拓扑时回退到 c/2 假设。</summary>
+/// <summary>Caches logical-to-physical mapping, falling back to c/2.</summary>
 internal static class CoreTopology
 {
     private static int[]? _map;
     private static bool _loaded;
 
-    /// <summary>逻辑核 → OS 物理核序号（连续编号，不含屏蔽核，与 SMU 槽位不是一回事）。</summary>
+    /// <summary>OS physical-core ID, distinct from the SMU slot ID.</summary>
     public static int PhysicalOf(int logical)
     {
         if (!_loaded)
@@ -388,10 +480,10 @@ internal static class CoreTopology
         }
         if (_map != null && logical >= 0 && logical < _map.Length && _map[logical] >= 0)
             return _map[logical];
-        return logical / 2; // 回退：假设每核 2 线程
+        return logical / 2;
     }
 
-    // ── CCD 分组（按共享 L3 划分）──────────────────────────────────────────
+    // CCD groups from shared L3
     private static List<ulong>? _ccdMasks;
 
     private static List<ulong> CcdMasks
@@ -403,10 +495,10 @@ internal static class CoreTopology
         }
     }
 
-    /// <summary>CCD 数；拿不到 L3 拓扑时按 1 处理（UI 据此隐藏 CCD 选项）。</summary>
+    /// <summary>CCD count; defaults to one when L3 topology is unavailable.</summary>
     public static int CcdCount => Math.Max(1, CcdMasks.Count);
 
-    /// <summary>指定 CCD 的逻辑核列表（升序）。越界或拓扑不可用时返回空表。</summary>
+    /// <summary>Logical cores of one CCD, or an empty list when unavailable.</summary>
     public static List<int> LogicalCoresOfCcd(int ccd)
     {
         var result = new List<int>();
@@ -417,11 +509,11 @@ internal static class CoreTopology
         return result;
     }
 
-    /// <summary>指定 CCD 的 OS 物理核序号列表（升序）。索引负压表前需经 RyzenSmu.OsCoreToSlot 转成槽位。</summary>
+    /// <summary>OS core IDs for one CCD; convert them to SMU slots before indexing CO.</summary>
     public static List<int> PhysicalCoresOfCcd(int ccd) =>
         LogicalCoresOfCcd(ccd).Select(PhysicalOf).Distinct().OrderBy(x => x).ToList();
 
-    /// <summary>OS 物理核序号 → 其全部逻辑核（升序）。找不到时回退到 2n / 2n+1。</summary>
+    /// <summary>Logical siblings of an OS core, falling back to 2n and 2n+1.</summary>
     public static List<int> LogicalCoresOfPhysical(IEnumerable<int> physicalCores)
     {
         var want = new HashSet<int>(physicalCores);

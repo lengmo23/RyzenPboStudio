@@ -2,13 +2,14 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace RyzenPboStudio;
 
-/// <summary>GitHub Release 返回体中本程序用得到的字段。</summary>
+/// <summary>GitHub Release fields used by this application.</summary>
 internal sealed class GhRelease
 {
     [JsonPropertyName("tag_name")] public string TagName { get; set; } = "";
@@ -24,18 +25,23 @@ internal sealed class GhAsset
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("size")] public long Size { get; set; }
     [JsonPropertyName("browser_download_url")] public string DownloadUrl { get; set; } = "";
+    // "sha256:<hex>", computed by GitHub on upload; absent on assets uploaded before GitHub added it.
+    [JsonPropertyName("digest")] public string? Digest { get; set; }
 }
 
-/// <summary>检测到的新版本。</summary>
-internal sealed record UpdateInfo(Version Version, string Tag, string Notes, string DownloadUrl, long Size);
+/// <summary>One change from the Release notes: a headline and its one-line explanation.</summary>
+internal sealed record ReleaseNote(string Title, string Detail);
+
+/// <summary>Available update metadata; Sha256 is null when the Release does not publish a digest.</summary>
+internal sealed record UpdateInfo(Version Version, string Tag, IReadOnlyList<ReleaseNote> Notes, string DownloadUrl, long Size,
+    string? Sha256);
 
 /// <summary>
-/// 从 GitHub Release 检查并应用更新。
+/// Checks GitHub Releases and applies updates.
 ///
-/// 更新分两段执行：下载与解压全部在程序还活着时完成，任何失败都能当场报给用户并放弃；
-/// 只有「用新文件覆盖安装目录」这一步必须等程序退出后由外部脚本做——Windows 不允许
-/// 覆盖正在运行的 exe/dll。覆盖时排除 logs 与 profiles：profiles 里存着断电恢复要用的
-/// 负压历史，更新绝不能把它抹掉。
+/// Download and extraction finish while the application can report failures.
+/// File replacement waits until exit because Windows locks running binaries.
+/// Exclude logs and profiles from replacement to preserve recovery history.
 /// </summary>
 internal static class Updater
 {
@@ -43,25 +49,22 @@ internal static class Updater
     private const string Repo = "RyzenPboStudio";
     private const string LatestReleaseApi = $"https://api.github.com/repos/{Owner}/{Repo}/releases/latest";
 
-    /// <summary>项目主页。</summary>
+    /// <summary>Project homepage.</summary>
     public const string HomePage = $"https://github.com/{Owner}/{Repo}";
 
-    /// <summary>发布页地址，供「查看更新内容」等场景打开。</summary>
+    /// <summary>Release page opened from update details.</summary>
     public const string ReleasesPage = $"{HomePage}/releases";
 
-    /// <summary>所有下载源都失败时给出的网盘地址，由用户手动下载后覆盖安装。</summary>
-    public const string PanUrl = "https://wwbnf.lanzoum.com/b01eupfd7c";
+    /// <summary>QQ group where users get the latest version when the in-app update fails.</summary>
+    public const string QqGroup = "1132124359";
 
-    /// <summary>网盘提取码。</summary>
-    public const string PanCode = "csdf";
-
-    /// <summary>单个源等待响应头的上限，超时即换下一个源。</summary>
+    /// <summary>Response-header timeout for one source.</summary>
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>传输空闲上限：连续这么久收不到新数据才判失败，慢速网络不会被误判。</summary>
+    /// <summary>Idle-transfer timeout; slow but active downloads continue.</summary>
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromSeconds(20);
 
-    /// <summary>下载源，按顺序尝试：空前缀直连 GitHub，其余为 GitHub 加速镜像。</summary>
+    /// <summary>Try GitHub directly before mirror sources.</summary>
     private static readonly (string Prefix, string Name)[] DownloadSources =
     {
         ("", "GitHub"),
@@ -73,74 +76,119 @@ internal static class Updater
     public static Version CurrentVersion =>
         typeof(Updater).Assembly.GetName().Version is { } v ? new Version(v.Major, v.Minor, v.Build) : new Version(0, 0, 0);
 
-    /// <summary>查询最新 Release。无更新或查询失败返回 null（由调用方决定是否提示）。</summary>
-    public static async Task<UpdateInfo?> CheckAsync(CancellationToken token = default)
+    // Asset-name marker of the self-contained package; it must never contain "update", "lite" or "full", which installs
+    // without bundled .NET (including older versions) select by.
+    private const string SelfContainedTag = "net8contained";
+
+    /// <summary>True when .NET 8 is bundled next to the executable rather than installed on the system.</summary>
+    private static bool IsSelfContained => File.Exists(Path.Combine(AppContext.BaseDirectory, "coreclr.dll"));
+
+    /// <summary>Returns the latest update, or null when absent or unavailable. currentNotes holds the Release notes of
+    /// the running version when it is the latest release, otherwise null.</summary>
+    public static async Task<(UpdateInfo? update, IReadOnlyList<ReleaseNote>? currentNotes)> CheckAsync(
+        CancellationToken token = default)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        // GitHub API 强制要求 User-Agent，缺失会被 403 拒绝
+        // GitHub API requires User-Agent.
         http.DefaultRequestHeaders.UserAgent.ParseAdd($"RyzenPboStudio/{CurrentVersion}");
         http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
 
         GhRelease? release = await http.GetFromJsonAsync<GhRelease>(LatestReleaseApi, token);
-        if (release == null || release.Draft || release.Prerelease) return null;
+        if (release == null || release.Draft || release.Prerelease) return (null, null);
 
-        if (!TryParseTag(release.TagName, out Version latest)) return null;
-        if (latest <= CurrentVersion) return null;
+        if (!TryParseTag(release.TagName, out Version latest)) return (null, null);
+        if (latest == CurrentVersion) return (null, ParseNotes(release.Body));
+        if (latest < CurrentVersion) return (null, null);
 
-        // 优先取 update 包（不含 y-cruncher），没有时回退到 full 包
         var zips = release.Assets
             .Where(a => a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) && a.DownloadUrl.Length > 0)
             .ToList();
-        GhAsset? zip = zips.FirstOrDefault(a => a.Name.Contains("update", StringComparison.OrdinalIgnoreCase))
-                       ?? zips.FirstOrDefault(a => a.Name.Contains("full", StringComparison.OrdinalIgnoreCase))
-                       ?? zips.FirstOrDefault();
-        if (zip == null) return null;
+        GhAsset? zip;
+        if (IsSelfContained)
+        {
+            // update.zip relies on an installed .NET 8, so a bundled-runtime install takes the self-contained package.
+            zip = zips.FirstOrDefault(a => a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase))
+                  ?? throw new InvalidOperationException($"{release.TagName} 没有内置 .NET 8 的安装包，请到项目主页手动下载。");
+        }
+        else
+        {
+            // Prefer the smaller update archive; use lite (named full before 3.0.3) only when update is absent.
+            var plain = zips.Where(a => !a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase)).ToList();
+            zip = plain.FirstOrDefault(a => a.Name.Contains("update", StringComparison.OrdinalIgnoreCase))
+                  ?? plain.FirstOrDefault(a => a.Name.Contains("lite", StringComparison.OrdinalIgnoreCase)
+                                            || a.Name.Contains("full", StringComparison.OrdinalIgnoreCase))
+                  ?? plain.FirstOrDefault();
+        }
+        if (zip == null) return (null, null);
 
-        return new UpdateInfo(latest, release.TagName, PlainText(release.Body), zip.DownloadUrl, zip.Size);
+        return (new UpdateInfo(latest, release.TagName, ParseNotes(release.Body), zip.DownloadUrl, zip.Size,
+            ParseSha256(zip.Digest)), null);
     }
 
-    /// <summary>把 Release 正文的 Markdown 转成纯文字，供 MessageBox 显示。</summary>
-    private static string PlainText(string markdown)
+    /// <summary>Hex SHA-256 from a GitHub asset digest such as "sha256:ab12…"; null for other or missing digests.</summary>
+    private static string? ParseSha256(string? digest)
     {
-        var lines = new List<string>();
+        const string prefix = "sha256:";
+        if (digest == null || !digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        string hex = digest[prefix.Length..].Trim();
+        return hex.Length == 64 && hex.All(Uri.IsHexDigit) ? hex : null;
+    }
+
+    // Release section that explains which archive to download by hand; meaningless inside the app.
+    private const string DownloadGuideHeading = "下载哪个";
+
+    /// <summary>Splits Release Markdown into one note per heading, dropping the download guide.
+    /// Text before the first heading becomes a note without a title.</summary>
+    internal static List<ReleaseNote> ParseNotes(string markdown)
+    {
+        var notes = new List<ReleaseNote>();
+        string title = "";
+        var detail = new List<string>();
+
+        void Flush()
+        {
+            if (title != DownloadGuideHeading && (title.Length > 0 || detail.Count > 0))
+                notes.Add(new ReleaseNote(title, string.Join("\n", detail)));
+            detail.Clear();
+        }
+
         foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
         {
             string line = raw.Trim();
-            if (line.StartsWith("```")) continue;                        // 代码围栏
-            if (line.Length > 0 && line.All(c => c == '-' || c == '='))
-                continue;                                                // 分隔线 / setext 下划线
-            line = line.TrimStart('#', '>').Trim();                      // 标题、引用前缀
+            if (line.Length == 0 || line.StartsWith("```")) continue;
+            if (line.All(c => c == '-' || c == '=')) continue;
+            if (line.StartsWith('#'))
+            {
+                Flush();
+                title = CleanMarkdown(line.TrimStart('#'));
+                continue;
+            }
+            line = line.TrimStart('>').Trim();
             if (line.StartsWith("- ") || line.StartsWith("* ") || line.StartsWith("+ "))
-                line = "· " + line[2..].Trim();                          // 列表符号统一
-            line = line.Replace("**", "").Replace("__", "").Replace("`", "");
-            line = Regex.Replace(line, @"\[([^\]]*)\]\([^)]*\)", "$1");   // [文字](链接) → 文字
-            lines.Add(line);
+                line = "· " + line[2..].Trim();
+            detail.Add(CleanMarkdown(line));
         }
-
-        // 连续空行折叠成一个
-        var sb = new StringBuilder();
-        bool blank = false;
-        foreach (string line in lines)
-        {
-            if (line.Length == 0) { blank = true; continue; }
-            if (blank && sb.Length > 0) sb.Append('\n');
-            sb.Append(line).Append('\n');
-            blank = false;
-        }
-        return sb.ToString().Trim();
+        Flush();
+        return notes;
     }
 
-    // ── 「暂不更新」的版本记忆 ──────────────────────────────────────────────
+    private static string CleanMarkdown(string text)
+    {
+        text = text.Replace("**", "").Replace("__", "").Replace("`", "");
+        return Regex.Replace(text, @"\[([^\]]*)\]\([^)]*\)", "$1").Trim();
+    }
+
+    // Remember skipped updates
 
     private static string SkipFile => Path.Combine(Workspace.ProfilesDir, "update_skip.txt");
 
-    /// <summary>用户在提示里点了「否」：记下这个版本，之后启动不再弹窗。</summary>
+    /// <summary>Records a declined version so startup does not prompt for it again.</summary>
     public static void SkipVersion(Version version)
     {
-        try { File.WriteAllText(SkipFile, version.ToString()); } catch { /* 记不下最多是下次再弹一次 */ }
+        try { File.WriteAllText(SkipFile, version.ToString()); } catch { /* A failed save only repeats the prompt next time. */ }
     }
 
-    /// <summary>该版本是否已被用户跳过。只用于启动时的静默检查，手动「检查更新」不受影响。</summary>
+    /// <summary>Checks skipped versions only during silent startup checks.</summary>
     public static bool IsSkipped(Version version)
     {
         try
@@ -152,13 +200,13 @@ internal static class Updater
         catch { return false; }
     }
 
-    /// <summary>已经是最新版本时清掉记录，避免旧版本号一直留在 profiles 里。</summary>
+    /// <summary>Clears an obsolete skipped-version record when already current.</summary>
     public static void ClearSkip()
     {
         try { if (File.Exists(SkipFile)) File.Delete(SkipFile); } catch { }
     }
 
-    /// <summary>把 "v2.1.0" / "2.1.0" 解析成 Version。</summary>
+    /// <summary>Parses tags with or without a leading v.</summary>
     private static bool TryParseTag(string tag, out Version version)
     {
         version = new Version(0, 0, 0);
@@ -166,8 +214,8 @@ internal static class Updater
         return Version.TryParse(t, out Version? parsed) && (version = parsed) != null;
     }
 
-    /// <summary>下载 zip 到临时目录，直连失败则依次改用镜像。progress 回调传 0-100，
-    /// onSource 告知当前源名，onStage 推送「正在连接 / 正在换源」等阶段文字。</summary>
+    /// <summary>Downloads an archive through GitHub or mirrors and reports percent
+    /// progress, active source, and connection stage.</summary>
     public static async Task<string> DownloadAsync(UpdateInfo info, IProgress<int>? progress,
         Action<string>? onSource = null, Action<string>? onStage = null, CancellationToken token = default)
     {
@@ -184,13 +232,13 @@ internal static class Updater
             try
             {
                 await FetchAsync(prefix.Length == 0 ? info.DownloadUrl : prefix + info.DownloadUrl,
-                    zipPath, info.Size, progress, onStage, name, token);
-                Log.Write($"更新包下载完成（{name}）");
+                    zipPath, info.Size, info.Sha256, progress, onStage, name, token);
+                Log.Write(info.Sha256 != null ? $"更新包下载完成（{name}，SHA-256 校验通过）" : $"更新包下载完成（{name}）");
                 return zipPath;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                throw;   // 仅用户主动取消走这里；超时由 FetchAsync 转成 TimeoutException，照常换源
+                throw; // Only user cancellation escapes; source timeouts trigger failover.
             }
             catch (Exception e)
             {
@@ -203,18 +251,19 @@ internal static class Updater
         throw new IOException("所有下载源均失败。\n" + string.Join("\n", errors));
     }
 
-    /// <summary>从单个 URL 下载，并与 GitHub API 报告的大小核对（镜像失效时可能返回 200 的错误页）。</summary>
-    private static async Task FetchAsync(string url, string zipPath, long expectedSize,
+    /// <summary>Checks the download against GitHub metadata: SHA-256 when the Release publishes a digest, otherwise
+    /// only the size. The digest comes from the GitHub API, so a mirror cannot pass off a different file.</summary>
+    private static async Task FetchAsync(string url, string zipPath, long expectedSize, string? expectedSha256,
         IProgress<int>? progress, Action<string>? onStage, string sourceName, CancellationToken token)
     {
-        // 走系统代理访问 GitHub
+        // Use the system proxy for GitHub.
         using var handler = new HttpClientHandler
         {
             UseProxy = true,
             Proxy = HttpClient.DefaultProxy,
             UseDefaultCredentials = true,
         };
-        // 不设总超时，连接超时与传输停滞分别由下面两个 CTS 控制
+        // Separate connection and idle-transfer timeouts avoid a total download deadline.
         using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         http.DefaultRequestHeaders.UserAgent.ParseAdd($"RyzenPboStudio/{CurrentVersion}");
 
@@ -255,7 +304,7 @@ internal static class Updater
                     throw new TimeoutException($"传输停滞 {IdleTimeout.TotalSeconds:0} 秒");
                 }
                 if (read <= 0) break;
-                idleCts.CancelAfter(IdleTimeout);   // 收到数据就把空闲计时推后
+                idleCts.CancelAfter(IdleTimeout); // Reset idle timeout after each chunk.
                 await dst.WriteAsync(buffer.AsMemory(0, read), token);
                 done += read;
                 if (total > 0) progress?.Report((int)(done * 100 / total));
@@ -265,21 +314,29 @@ internal static class Updater
         long actual = new FileInfo(zipPath).Length;
         if (expectedSize > 0 && actual != expectedSize)
             throw new IOException($"文件大小不符，应为 {expectedSize} 字节、实际 {actual} 字节");
+        if (expectedSha256 != null)
+        {
+            string hash;
+            using (var fs = File.OpenRead(zipPath)) hash = Convert.ToHexString(await SHA256.HashDataAsync(fs, token));
+            if (!hash.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"SHA-256 不符，应为 {expectedSha256.ToLowerInvariant()}、实际 {hash.ToLowerInvariant()}");
+        }
     }
 
-    /// <summary>把下载失败的原因压成状态条放得下的短语。</summary>
+    /// <summary>Shortens download errors for the status bar.</summary>
     private static string ShortReason(Exception e) => e switch
     {
         TimeoutException => e.Message,
         HttpRequestException { StatusCode: { } code } => $"返回 {(int)code}",
         HttpRequestException => "连接失败",
         IOException => "内容不完整",
+        InvalidDataException => "校验不符",
         _ => "失败",
     };
 
     /// <summary>
-    /// 解压到临时目录并定位新版本的根目录（发布包顶层是一个版本命名的文件夹）。
-    /// 校验其中确有主程序，避免把损坏或结构不符的包拿去覆盖安装目录。
+    /// Extracts the update and finds its root by locating the main executable.
+    /// Rejects packages without the executable before replacing installed files.
     /// </summary>
     public static string ExtractAndVerify(string zipPath)
     {
@@ -293,7 +350,7 @@ internal static class Updater
         string root = extractDir;
         if (!File.Exists(Path.Combine(root, exeName)))
         {
-            // 顶层若是单个文件夹（发布包的常见形态），下沉一层再找
+            // Release archives usually place the executable one directory below the archive root.
             string[] subDirs = Directory.GetDirectories(root);
             string? match = subDirs.FirstOrDefault(d => File.Exists(Path.Combine(d, exeName)));
             if (match == null)
@@ -304,46 +361,73 @@ internal static class Updater
     }
 
     /// <summary>
-    /// 写出并启动替换脚本，然后由调用方退出程序。脚本等待本进程结束后用新文件覆盖安装目录，
-    /// 再重新启动程序。logs 与 profiles 被排除在覆盖之外——profiles 里是断电恢复所需的负压历史。
+    /// Writes a replacement script and launches it after download; caller then exits.
+    /// The script backs up the installed files, copies the new version over them and restarts the application.
+    /// robocopy replaces file by file, so a failure midway would leave a mix of old and new files; in that case the
+    /// backup is copied back and the old version restarted. logs and profiles are never touched.
     /// </summary>
     public static void LaunchReplacerAndExit(string newVersionRoot)
     {
         string installDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         string exePath = Environment.ProcessPath ?? Path.Combine(installDir, "AMD Ryzen PBO Studio.exe");
         string workDir = Path.GetDirectoryName(newVersionRoot)!;
+        string backupDir = Path.Combine(workDir, "backup");
         string script = Path.Combine(workDir, "apply-update.cmd");
+        // An update package without tools leaves y-cruncher alone, so there is no need to back it up.
+        string excludeDirs = Directory.Exists(Path.Combine(newVersionRoot, "tools")) ? "logs profiles" : "logs profiles tools";
 
-        // /E 含空目录，/XD 排除运行时数据目录，/R /W 缩短重试以免卡住
+        // /E includes empty directories; /IS /IT overwrite files robocopy would treat as unchanged; /XD excludes runtime
+        // data; /R and /W limit retries; exit code 8+ is a failure.
         var sb = new StringBuilder();
         sb.AppendLine("@echo off");
         sb.AppendLine("chcp 65001 >nul");
-        sb.AppendLine($"echo 正在等待 AMD Ryzen PBO Studio 退出...");
-        sb.AppendLine($":waitloop");
+        sb.AppendLine("echo 正在等待 AMD Ryzen PBO Studio 退出...");
+        sb.AppendLine(":waitloop");
         sb.AppendLine($"tasklist /FI \"PID eq {Environment.ProcessId}\" 2>nul | find \"{Environment.ProcessId}\" >nul");
         sb.AppendLine("if not errorlevel 1 (");
         sb.AppendLine("  timeout /t 1 /nobreak >nul");
         sb.AppendLine("  goto waitloop");
         sb.AppendLine(")");
-        sb.AppendLine("echo 正在覆盖安装目录...");
-        sb.AppendLine($"robocopy \"{newVersionRoot}\" \"{installDir}\" /E /XD logs profiles /R:5 /W:2 >nul");
+        sb.AppendLine("echo 正在备份当前版本...");
+        sb.AppendLine($"rd /s /q \"{backupDir}\" 2>nul");   // a leftover from an earlier failed update
+        sb.AppendLine($"robocopy \"{installDir}\" \"{backupDir}\" /E /XD {excludeDirs} /R:2 /W:1 >nul");
         sb.AppendLine("if errorlevel 8 (");
-        sb.AppendLine("  echo 更新失败，原有版本未被破坏。按任意键退出。");
-        sb.AppendLine("  pause >nul");
-        sb.AppendLine("  exit /b 1");
+        sb.AppendLine("  echo 备份当前版本失败，已取消更新，原有版本未做任何改动。");
+        sb.AppendLine($"  start \"\" \"{exePath}\"");
+        sb.AppendLine("  goto failed");
+        sb.AppendLine(")");
+        sb.AppendLine("echo 正在覆盖安装目录...");
+        sb.AppendLine($"robocopy \"{newVersionRoot}\" \"{installDir}\" /E /IS /IT /XD logs profiles /R:5 /W:2 >nul");
+        sb.AppendLine("if errorlevel 8 (");
+        sb.AppendLine("  echo 覆盖安装失败，正在还原原有版本...");
+        sb.AppendLine($"  robocopy \"{backupDir}\" \"{installDir}\" /E /IS /IT /XD logs profiles /R:5 /W:2 >nul");
+        sb.AppendLine("  if errorlevel 8 (");
+        // Quoted: a ")" in an unquoted path, e.g. "Program Files (x86)", would end the if block early.
+        sb.AppendLine($"    echo 还原失败。备份保存在 \"{backupDir}\"，请手动复制回 \"{installDir}\"。");
+        sb.AppendLine("    goto failed");
+        sb.AppendLine("  )");
+        sb.AppendLine("  echo 已还原原有版本。");
+        sb.AppendLine($"  start \"\" \"{exePath}\"");
+        sb.AppendLine("  goto failed");
         sb.AppendLine(")");
         sb.AppendLine($"start \"\" \"{exePath}\"");
-        sb.AppendLine($"cd /d \"%TEMP%\"");
+        sb.AppendLine("cd /d \"%TEMP%\"");
         sb.AppendLine($"rd /s /q \"{workDir}\" 2>nul");
+        sb.AppendLine("exit /b 0");
+        sb.AppendLine(":failed");
+        sb.AppendLine($"echo 如需获取最新版本，请加入 QQ 群 {QqGroup}。按任意键关闭。");
+        sb.AppendLine("pause >nul");
+        sb.AppendLine("exit /b 1");
 
-        File.WriteAllText(script, sb.ToString(), Encoding.UTF8);
+        // No BOM: cmd would read it as part of the first command.
+        File.WriteAllText(script, sb.ToString(), new UTF8Encoding(false));
 
         Process.Start(new ProcessStartInfo
         {
             FileName = script,
             WorkingDirectory = workDir,
             UseShellExecute = true,
-            CreateNoWindow = false,   // 保留窗口，覆盖失败时用户能看到提示
+            CreateNoWindow = false, // Keep the console visible if replacement fails.
         });
     }
 }

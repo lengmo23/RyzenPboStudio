@@ -21,7 +21,7 @@ internal sealed class ToolBundleFile
     [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
 }
 
-/// <summary>把内嵌的第三方组件包（inpoutx64.dll）释放到 %ProgramData% 下的受保护目录，使用前逐文件校验 SHA-256。</summary>
+/// <summary>Extracts inpoutx64.dll into a protected ProgramData directory and verifies SHA-256 before use.</summary>
 internal static class ToolBundle
 {
     private const string ResourceName = "RyzenPboStudio.Resources.tool-bundle.zip";
@@ -169,7 +169,7 @@ internal static class ToolBundle
             }
             catch
             {
-                // 主错误优先，临时目录残留不额外报错
+                // Preserve the primary error instead of reporting temporary cleanup failure.
             }
         }
     }

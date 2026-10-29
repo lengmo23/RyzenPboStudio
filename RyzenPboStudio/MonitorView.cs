@@ -1,10 +1,11 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using OpenHardwareMonitor.Hardware;   // GroupAffinity
 using ZenStates.Core;
 
 namespace RyzenPboStudio;
 
-// 监控界面专用深色配色（与主程序 Theme 区分，保留 ZenStates 监控原始观感）
+// Monitor palette is separate from the main UI theme.
 internal static class MonTheme
 {
     public static readonly Color Bg     = Color.FromArgb(24, 26, 30);
@@ -16,7 +17,7 @@ internal static class MonTheme
     public static readonly Color Silver = Color.FromArgb(190, 196, 206);
 }
 
-/// <summary>双缓冲 + 1px 边框的面板，用作 CCD 容器，区分相邻面板并消除刷新闪烁。</summary>
+/// <summary>Double-buffered CCD panel with a one-pixel border.</summary>
 internal sealed class MonBox : Panel
 {
     public MonBox()
@@ -34,19 +35,19 @@ internal sealed class MonBox : Panel
     }
 }
 
-/// <summary>双缓冲 Label，避免文字频繁更新（占用/HOT 每 500ms 刷新）时闪烁。</summary>
+/// <summary>Double-buffered label to avoid flicker during frequent updates.</summary>
 internal sealed class DbLabel : Label
 {
     public DbLabel() => DoubleBuffered = true;
 }
 
-/// <summary>直接绘制标题和数值，避免嵌套 Label 在紧凑 TableLayout 中被压成零高度。</summary>
+/// <summary>Draws text directly so compact layouts cannot collapse nested labels.</summary>
 internal sealed class StatCellControl : Control
 {
     private string title;
     private readonly bool center;
 
-    /// <summary>格子标题。异步外频时 BCLK 格要改标成 "BCLK/BCLK2"，故可写。</summary>
+    /// <summary>Writable title for switching between BCLK and BCLK/BCLK2.</summary>
     public string Title
     {
         get => title;
@@ -99,37 +100,58 @@ internal sealed class StatCellControl : Control
     }
 }
 
-/// <summary>每核监控面板：复用 RyzenSmu 的共享 Cpu，仅在可见时后台轮询，
-/// 所有 Cpu 访问在 RyzenSmu.IoLock 下串行，避免与负压读写抢占 SMU。</summary>
+/// <summary>Polls the shared CPU only while visible.
+/// Serializes CPU access under RyzenSmu.IoLock to avoid SMU mailbox contention.</summary>
 internal sealed class MonitorView : UserControl
 {
     private readonly Cpu cpu;
     private readonly uint cores, ccds, coresPerCcd;
-    private readonly int[] slotOs;        // 槽位 → OS 物理核序号（屏蔽槽 -1）
-    private readonly bool[] slotDisabled; // 槽位是否熔丝屏蔽
-    private double bclk;                 // CPU 时钟域外频：异步外频时即 BCLK2，核心频率按它换算
-    private double bclkPll;              // CG PLL 里的基准外频（BCLK1）；与 bclk 不等即为异步外频
-    private readonly double p0DefMHz;    // P0 定义频率（P-state 0 寄存器，按 BCLK=100 参考），用于反推真实外频
-    private readonly double regBaseMHz;  // 注册表 ~MHz：HAL 启动时实测写入，已含外频
+    private readonly int[] slotOs; // SMU slot to OS physical-core ID; -1 if disabled.
+    private readonly bool[] slotDisabled; // Fused-off SMU slots.
+    private double bclk; // CPU-domain BCLK; equals BCLK2 on asynchronous systems.
+    private double bclkPll; // PLL reference BCLK; a mismatch indicates asynchronous clocking.
+    private readonly double p0DefMHz; // P0 frequency at a 100 MHz reference BCLK.
+    private readonly double regBaseMHz; // Boot-time registry frequency already includes BCLK.
     private readonly string installedMemory;
-    private readonly double p0BaseMHz;   // P0 标称基频，用于 ΔAPERF/ΔMPERF×P0 算忙时频率（本机 TSC 不可读）
-    private readonly TelVoltCalib telCalib;
-    // PM Table 布局（全局 VDDCR_CPU 遥测组、PPT/TDC/THM、每核电压与频率段）逐型号浮动，
-    // 由 RyzenSmu.ProbePtLayout 探测。每核电压是 LDO 后的 die 电压，比请求 VID 低约 10mV。
+    private readonly double p0BaseMHz; // P0 base frequency for the no-TSC FREQ fallback.
+    // PM Table segment positions vary by CPU and are probed by RyzenSmu.ProbePtLayout.
+    // The per-core voltage segment is shown as Core VID.
     private RyzenSmu.PtLayout? ptLayout;
-    /// <summary>身份条／CCD 行／限制条共用的栅格列数，取限制条格数；三条共用同一次取整才能逐条对齐。</summary>
+    private const int PtGiveUpWindows = 6; // ~3 s of consecutive 500 ms windows before reporting a PM Table problem.
+    /// <summary>Shared grid width keeps CCD panels and the limit strip aligned.</summary>
     private const int StripCols = 8;
 
     private Thread? worker;
     private volatile bool running;
+    private volatile bool quiet, quietAck;
 
-    // 身份条（CPU / 主板 / 内存 / 显卡）与限制条（BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax）数值标签
-    private StatCellControl _cpuVal = null!, _moboVal = null!, _memVal = null!, _gpuVal = null!;
+    /// <summary>CPPC MaximumPerformancePercent per slot; all zero when CPPC cannot rank cores.</summary>
+    public uint[] CppcPerf { get; private set; } = Array.Empty<uint>();
+
+    /// <summary>Latest resolved CPU-domain BCLK (MHz); 0 when unknown.</summary>
+    public double CoreBclk => bclk;
+
+    /// <summary>Quiet mode for Single Core Boost: the poll loop keeps updating but skips the core-bound APERF/MPERF
+    /// reads that wake idle cores; EFFREQ and occupancy come from the PM table instead. Returns once a poll round has
+    /// started in quiet mode (no core-bound read still in flight) or the timeout passes.</summary>
+    public void BeginQuiet(int timeoutMs = 3000)
+    {
+        quietAck = false;
+        quiet = true;
+        var sw = Stopwatch.StartNew();
+        while (!quietAck && worker is { IsAlive: true } && sw.ElapsedMilliseconds < timeoutMs) Thread.Sleep(20);
+    }
+
+    public void EndQuiet() => quiet = false;
+
+    private readonly HeaderBar? _header;
+    private string _cpuLine = "", _gpuOsLine = "";
     private StatCellControl _bclkVal = null!, _telVidVal = null!, _vdroopVal = null!, _thmVal = null!, _tdcVal = null!, _edcVal = null!, _pptVal = null!, _fmaxVal = null!;
     private CcdView[] ccdViews = null!;
 
-    public MonitorView()
+    public MonitorView(HeaderBar? header = null)
     {
+        _header = header;
         cpu = RyzenSmu.SharedCpu;
 
         var topo = cpu.info.topology;
@@ -149,9 +171,11 @@ internal sealed class MonitorView : UserControl
                 p0DefMHz = ReadP0DefMHz();
         }
         catch { p0DefMHz = 0; }
-        installedMemory = SystemInfo.GetInstalledMemory();
+        string memVendor = SystemInfo.GetMemoryVendor();
+        string memSize = SystemInfo.GetInstalledMemory();
+        installedMemory = memVendor.Length > 0 && memSize != "—" ? $"{memVendor} {memSize}" : memSize;
 
-        // 注册表 ~MHz 已含外频，除以 P0 定义频率（按 BCLK=100）即真实外频，见 ResolveBclk()
+        // Registry ~MHz includes BCLK; divide by the P0 frequency at 100 MHz to infer actual BCLK.
         regBaseMHz = SystemInfo.GetBaseFrequencyMHz();
         try
         {
@@ -161,20 +185,16 @@ internal sealed class MonitorView : UserControl
         catch { bclkPll = bclk = 0; }
         p0BaseMHz = regBaseMHz > 0 ? regBaseMHz
                   : (p0DefMHz > 0 && bclk > 0 ? p0DefMHz * bclk / 100.0 : 0);
-        uint tv = 0;
-        try { lock (RyzenSmu.IoLock) tv = cpu.GetTableVersion().TableVersion; }
-        catch { /* 版本读不到则校准仅本次会话内有效 */ }
-        telCalib = new TelVoltCalib(tv);
 
         BuildUi();
-        FillIdentityStrip();
+        FillHeader();
     }
 
     private const uint P0DefMsr = 0xC0010064;   // P-State 0 Definition
 
-    /// <summary>P-state 0 定义寄存器里的标称频率（按 BCLK=100MHz 参考）。Zen5(家族1Ah+) 为
-    /// fid[11:0]×5MHz，更早代际用 fid/dfs 算倍频×100。读不到或该 P-state 未使能返回 0。
-    /// 调用方需持有 IoLock。</summary>
+    /// <summary>Reads P-state 0 frequency at a 100 MHz reference BCLK.
+    /// Zen5 uses fid[11:0] * 5 MHz; earlier generations use fid/dfs * 100 MHz.
+    /// Returns zero when unavailable; caller holds IoLock.</summary>
     private double ReadP0DefMHz()
     {
         uint eax = 0, edx = 0;
@@ -187,9 +207,9 @@ internal sealed class MonitorView : UserControl
     }
 
     /// <summary>
-    /// 取 (BCLK1, CPU 时钟域外频)。cpu.GetBclk() 读 CG PLL 寄存器，外置时钟发生器 / 异步外频下恒为 100，
-    /// 故 CPU 域外频用 注册表~MHz ÷ P0定义频率 反推，并吸附到 0.05MHz 档位；
-    /// 反推失败时依次退回 HWiNFO 的 Bus Clock 与 PLL 读数。调用方需持有 IoLock。
+    /// Returns (PLL BCLK, CPU-domain BCLK). External-clock boards may report 100 MHz from the PLL,
+    /// so infer CPU BCLK from registry ~MHz / P0 and round to 0.05 MHz.
+    /// Falls back to PLL; caller holds IoLock.
     /// </summary>
     private (double Pll, double Core) ResolveBclk()
     {
@@ -200,11 +220,9 @@ internal sealed class MonitorView : UserControl
         double core = 0;
         if (regBaseMHz > 0 && p0DefMHz > 0)
         {
-            // 超出合理外频区间视为反推无效，交给下面的回退
             double derived = regBaseMHz / p0DefMHz * 100.0;
             if (derived is >= 90 and <= 130) core = Math.Round(Math.Round(derived / 0.05) * 0.05, 2);
         }
-        if (core <= 0 && HwInfoReader.ReadBusClock() is > 50 and < 200 and double hw) core = hw;
         if (core <= 0) core = pll;
 
         return (pll, core);
@@ -214,41 +232,26 @@ internal sealed class MonitorView : UserControl
     {
         BackColor = MonTheme.Bg;
         Font = new Font("Consolas", 9f);
-        AutoScroll = false;   // 不做左右滚动，窗口宽度直接容纳监控
+        AutoScroll = false;
 
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             BackColor = MonTheme.Bg,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             Margin = new Padding(0),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));   // 身份条：CPU|主板 / 内存|显卡（两行）
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // CCD 每核监控
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));   // 限制条
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
 
-        root.Controls.Add(BuildIdentityStrip(), 0, 0);
-        root.Controls.Add(BuildCcdRow(), 0, 1);
-        root.Controls.Add(BuildLimitStrip(), 0, 2);
+        root.Controls.Add(BuildCcdRow(), 0, 0);
+        root.Controls.Add(BuildLimitStrip(), 0, 1);
         Controls.Add(root);
     }
 
-    /// <summary>顶部身份条：2×2 两行（CPU|主板 / 内存|显卡），主板等长型号可完整显示。
-    /// 每格跨半条栅格，左右分界与 CCD 面板、限制条对齐。</summary>
-    private Control BuildIdentityStrip()
-    {
-        var t = NewStripGrid(rows: 2, bottomMargin: 4);
-        int half = StripCols / 2;
-        _cpuVal  = StatCellAt(t, 0,    0, "AMD CPU", center: false, span: half);
-        _moboVal = StatCellAt(t, half, 0, "主板",    center: false, span: half);
-        _memVal  = StatCellAt(t, 0,    1, "内存",    center: false, span: half);
-        _gpuVal  = StatCellAt(t, half, 1, "显卡",    center: false, span: half);
-        return t;
-    }
-
-    /// <summary>底部限制条：BCLK / TEL/VID / Vdroop / THM / TDC / EDC / PPT / Fmax 八格，
-    /// 即 StripCols 栅格的一格一列。身份条与 CCD 行跨 4 列，三条共用同一套取整，竖缝逐条对齐。</summary>
+    /// <summary>Builds the limit strip on the same grid used by the CCD panels.
+    /// Shared column rounding keeps vertical borders aligned.</summary>
     private Control BuildLimitStrip()
     {
         var t = NewStripGrid(rows: 1, topMargin: 4);
@@ -263,7 +266,7 @@ internal sealed class MonitorView : UserControl
         return t;
     }
 
-    /// <summary>建一条 StripCols 列的等宽栅格。三条横条共用它，竖缝才能逐像素对齐。</summary>
+    /// <summary>Creates the equal-width grid shared by CCD panels and limits.</summary>
     private static TableLayoutPanel NewStripGrid(int rows, int topMargin = 0, int bottomMargin = 0)
     {
         var t = new TableLayoutPanel
@@ -279,20 +282,33 @@ internal sealed class MonitorView : UserControl
         return t;
     }
 
-    /// <summary>静态身份信息不依赖监控线程，界面建立后立即显示。</summary>
-    private void FillIdentityStrip()
+    /// <summary>Builds the hardware header before monitor polling starts.
+    /// Polling later supplies memory clock and time values.</summary>
+    private void FillHeader()
     {
-        _cpuVal.Text = string.IsNullOrWhiteSpace(cpu.info.cpuName)
-            ? SystemInfo.GetCpuName()
-            : cpu.info.cpuName.Trim();
-        _moboVal.Text = SystemInfo.GetMotherboard();
-        _memVal.Text = installedMemory;
-        _gpuVal.Text = SystemInfo.GetGpuName();
+        string name = string.IsNullOrWhiteSpace(cpu.info.cpuName) ? SystemInfo.GetCpuName() : cpu.info.cpuName.Trim();
+        name = Regex.Replace(name, @"\s+\d+-Core Processor$", "");   // AMD Ryzen 9 9950X 16-Core Processor → AMD Ryzen 9 9950X
+        _cpuLine = $"{name} Stepping {cpu.info.stepping}";
+
+        string bios = SystemInfo.GetBiosVersion();
+        string agesa = cpu.systemInfo?.AgesaVersion ?? "";
+        if (agesa.Length == 0) agesa = SystemInfo.GetAgesaVersion();
+        agesa = agesa.Split(' ')[^1];   // ComboAm5PI 1.2.7.0 → 1.2.7.0
+        string agesaText = agesa.Length > 0 ? $"AGESA {agesa}" : "";
+        string biosPart = bios.Length > 0 ? $"BIOS {bios}" + (agesaText.Length > 0 ? $" ({agesaText})" : "") : agesaText;
+
+        string gpu = SystemInfo.GetGpuName();
+        string driver = gpu == "—" ? "" : SystemInfo.GetGpuDriverVersion(gpu);
+        _gpuOsLine = $"{gpu}{(driver.Length > 0 ? $" ({driver})" : "")}   {SystemInfo.GetOsVersion()}";
+
+        _header?.SetLine(0, $"{_cpuLine}   {installedMemory}");
+        _header?.SetLine(1, $"{SystemInfo.GetMotherboard()}   {biosPart}");
+        _header?.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
         UpdateBclkCell();
     }
 
-    /// <summary>BCLK 格：同步外频只显示一个值；异步外频（CPU 域与 PLL 基准不一致）时
-    /// 标题改成 BCLK/BCLK2，值显示 "基准/CPU 域"。</summary>
+    /// <summary>Shows one BCLK on synchronous systems, or BCLK/BCLK2 for separate PLL
+    /// and CPU clock domains.</summary>
     private void UpdateBclkCell()
     {
         bool async = bclkPll > 0 && bclk > 0 && Math.Abs(bclk - bclkPll) >= 0.05;
@@ -310,7 +326,7 @@ internal sealed class MonitorView : UserControl
         return clocks.Length > 0 ? $"{installedMemory} · {clocks}" : installedMemory;
     }
 
-    /// <summary>单元格：上方暗色标题 + 下方数值。center 时居中（限制条），否则左对齐（身份条）。返回数值标签供刷新。</summary>
+    /// <summary>Builds a labeled value cell and returns its value label for updates.</summary>
     private static StatCellControl StatCell(TableLayoutPanel parent, int col, string title, bool center) => StatCellAt(parent, col, 0, title, center);
 
     private static StatCellControl StatCellAt(TableLayoutPanel parent, int col, int row, string title, bool center, int span = 1)
@@ -326,12 +342,11 @@ internal sealed class MonitorView : UserControl
         return cell;
     }
 
-    /// <summary>CCD 行：金银核排名（CPPC）+ 各 CCD 面板横向并排。</summary>
+    /// <summary>Builds CCD panels and CPPC-based core ranking.</summary>
     private Control BuildCcdRow()
     {
-        // CPPC（金银核排名）：MSR 0xC00102B0 (CPPC_CAP1)
-        //   bits[31:24]=Highest, bits[23:16]=Nominal。换算成与事件查看器事件 55
-        //   一致的 MaximumPerformancePercent = Highest / Nominal × 100
+        // CPPC_CAP1 MSR 0xC00102B0 encodes Highest in bits 31:24 and Nominal in bits 23:16.
+        // Highest / Nominal * 100 matches Event 55 MaximumPerformancePercent.
         uint[] perf = new uint[cores];
         lock (RyzenSmu.IoLock)
         {
@@ -340,26 +355,26 @@ internal sealed class MonitorView : UserControl
                 ulong cap1 = ReadMsr(i, 0xC00102B0);
                 uint highest = (uint)((cap1 >> 24) & 0xFF);
                 uint nominal = (uint)((cap1 >> 16) & 0xFF);
-                // 截断（整数除法），与事件 55 MaximumPerformancePercent 逐核一致；四舍五入会多 1
+                // Truncate to match Event 55; rounding can differ by one.
                 perf[i] = nominal > 0 ? highest * 100 / nominal : highest;
             }
         }
 
-        // Zen3 没有 MSR CPPC（CPUID Fn8000_0008_EBX[27]=0，三个 MSR 均读回全 0），
-        // 退到取自 ACPI _CPC 的事件 55，两条路径同刻度。
+        // Zen3 lacks CPPC MSRs, so use ACPI _CPC values recorded in Event 55.
         if (perf.All(v => v == 0))
         {
             int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
             if (CppcReader.Read((int)cores, tpc) is { } fromLog) perf = fromLog;
         }
 
-        // BIOS 关掉 CPPC 时每核同值，无法排名：归零按读不到处理，显示 "-" 且不标金银核
+        // Equal CPPC values cannot rank cores; show "-" instead of assigning gold/silver markers.
         var livePerf = Enumerable.Range(0, (int)cores)
             .Where(i => slotDisabled.Length <= i || !slotDisabled[i])
             .Select(i => perf[i]).ToArray();
         if (livePerf.Distinct().Count() <= 1) Array.Clear(perf);
+        CppcPerf = perf;
 
-        // 金银核：CPPC 排名第一标银(✦)、第二标金(★)，同分按核号升序；按核索引定位，同分时不会标出多个
+        // Rank ties by core index so exactly one silver and one gold marker are shown.
         int goldCore = -1, silverCore = -1;
         var ranked = Enumerable.Range(0, (int)cores)
             .Where(i => (slotDisabled.Length <= i || !slotDisabled[i]) && perf[i] > 0)
@@ -368,7 +383,6 @@ internal sealed class MonitorView : UserControl
         if (ranked.Count > 0) silverCore = ranked[0];
         if (ranked.Count > 1) goldCore = ranked[1];
 
-        // 始终显示两栏，单 CCD 机型的 CCD#1 显示空表；与身份条／限制条共用 StripCols 栅格
         int displayCcds = (int)Math.Max(2u, ccds);
         var grid = NewStripGrid(rows: 1);
         int span = Math.Max(1, StripCols / displayCcds);
@@ -397,9 +411,9 @@ internal sealed class MonitorView : UserControl
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        // 控件加入尚未显示的 Form 时不一定触发 VisibleChanged；
-        // 句柄创建是监控真正可用的可靠时点。
-        FillIdentityStrip();
+        // VisibleChanged may not fire before the parent form is shown.
+        // Handle creation is the reliable point to begin monitoring.
+        FillHeader();
         if (Visible) StartWorker();
     }
 
@@ -431,14 +445,14 @@ internal sealed class MonitorView : UserControl
         try { w?.Join(800); } catch { /* ignore */ }
     }
 
-    /// <summary>读物理核槽位 i 的第 thread 个 SMT 线程的 MSR（thread 默认 0）。
-    /// APERF/MPERF/TSC 是每逻辑线程独立计数的，负载只跑在第二个线程时必须读到它才不会漏。</summary>
+    /// <summary>Reads one SMT thread’s MSR from a physical core slot.
+    /// APERF, MPERF, and TSC are thread-local, so both siblings may need sampling.</summary>
     private ulong ReadMsr(int i, uint msr, int thread = 0)
     {
         try
         {
             int os = i >= 0 && i < slotOs.Length ? slotOs[i] : i;
-            if (os < 0) return 0;   // 熔丝屏蔽槽无 OS 逻辑核
+            if (os < 0) return 0; // Fused-off slots have no OS thread.
             int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
             if (thread < 0 || thread >= tpc) return 0;
             int logicalIndex = os * tpc + thread;
@@ -450,15 +464,15 @@ internal sealed class MonitorView : UserControl
         catch { return 0; }
     }
 
-    /// <summary>在一次亲和性绑定内连读该逻辑线程的 APERF / MPERF / TSC，使三者近似同一时刻的快照，
-    /// 减少满载核上切换亲和性带来的采样错位。</summary>
+    /// <summary>Reads APERF, MPERF, and TSC under one affinity binding
+    /// to keep their snapshots aligned.</summary>
     private bool ReadCounters(int i, int thread, out ulong aperf, out ulong mperf, out ulong tsc)
     {
         aperf = mperf = tsc = 0;
         try
         {
             int os = i >= 0 && i < slotOs.Length ? slotOs[i] : i;
-            if (os < 0) return false;   // 熔丝屏蔽槽无 OS 逻辑核
+            if (os < 0) return false; // Fused-off slots have no OS thread.
             int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
             if (thread < 0 || thread >= tpc) return false;
 
@@ -477,29 +491,50 @@ internal sealed class MonitorView : UserControl
         catch { return false; }
     }
 
-    // 后台采样：每秒一窗。FREQ 取 PM Table 的每核频率，PM Table 不可用时回退 HW P-state 档位快照
-    // (0xC0010293)，再不行用 ΔAPERF/ΔMPERF×TSC频率；EFFREQ = ΔAPERF/ΔTSC×TSC频率，TSC 不可读时回退墙钟。
-    // APERF/MPERF/TSC 逐 SMT 线程采样，每核取最忙线程；只在窗口首尾各采一次，
-    // 避免高频 affinity 读 MSR 反复唤醒空闲核、把它们拉到 boost 污染频率读数。
+    /// <summary>Logs a sustained PM Table read failure and asks the user to reinstall PawnIO.</summary>
+    private void ReportPawnIoFault()
+    {
+        Log.Write("无法读取 PM Table，可能是 PawnIO 驱动异常", "ERROR");
+        if (!IsHandleCreated) return;
+        BeginInvoke(() => ThemedDialog.Show(FindForm(),
+            "无法读取 CPU 遥测数据（PM Table），Core VID、频率、TEL 等读数不可用。\n\n" +
+            "可能是 PawnIO 驱动异常，请尝试卸载后重新安装：\n" +
+            "1. 在 Windows「设置 → 应用 → 已安装的应用」中卸载 PawnIO；\n" +
+            "2. 重启电脑；\n" +
+            "3. 从 https://pawnio.eu 下载最新版安装，再重新打开本程序。",
+            "PawnIO 驱动异常"));
+    }
+
+    // Prefer PM Table per-core frequency, effective frequency, and C0 activity without waking idle cores.
+    // If its frequency segment is absent, use HW P-state or APERF/MPERF for FREQ and APERF/TSC for EFFREQ.
+    // Pinned MSR reads wake idle cores, so sample counters only at the window boundaries when needed.
     private void Worker()
     {
         int n = (int)cores;
         int tpc = (int)Math.Max(1u, cpu.info.topology.threadsPerCore);
 
-        // CO 是设定值，每 2s 读一次即可，减少与其他软件争用 SMU 邮箱；读失败时沿用缓存值
+        // Refresh CO every two seconds to reduce SMU contention; retain cached values on read failure.
         var coCache = new int[n];
         var coClock = Stopwatch.StartNew();
         long coNextMs = 0;
 
-        // TSC 频率自校准：用一个参考线程跨轮累积长窗口算 ΔTSC/Δt。注册表 ~MHz 只在开机时写入，
-        // 开机后改 BCLK 会失准，故标定成功后优先用标定值。
+        // Calibrate TSC over a long window because registry ~MHz becomes stale after a BCLK change.
         int tscRefSlot = -1;
         long tscBaseTick = 0;
         ulong tscBase = 0;
         double tscMHz = 0;
 
+        int ptFails = 0, noVoltWins = 0;
+        bool ptReported = false; // Report once per session.
+
         while (running)
         {
+            // Latched once per round so a round never mixes core-bound and PM-table-only readings
+            bool q = quiet;
+            if (q) quietAck = true;
+            // Avoid pinned counter reads during Single Core Boost or when PM Table frequency is available.
+            bool readCounters = !q && ptLayout is not { PerCoreFreqIdx: >= 0 };
+
             int lp = n * tpc;
             var startA = new ulong[lp]; var startM = new ulong[lp]; var startT = new ulong[lp];
             var lastA  = new ulong[lp]; var lastM  = new ulong[lp]; var lastT  = new ulong[lp];
@@ -507,9 +542,10 @@ internal sealed class MonitorView : UserControl
             var maxVolt = new double[n];
             var psSnap = new ulong[n];
             float[]? ptSnap = null;
-            double maxCpuVid = 0, maxCpuTel = 0;   // 全局 VDDCR_CPU：VID 窗口峰值 + 同帧配对的实测电压
+            double maxCpuVid = 0, maxCpuTel = 0; // Peak VID paired with TEL from the same frame.
 
-            // 窗口起点：各核每个 SMT 线程的 APERF / MPERF / TSC 累计计数
+            // Capture each SMT thread's counters at the start of the window.
+            if (readCounters)
             lock (RyzenSmu.IoLock)
             {
                 for (int i = 0; i < n; i++)
@@ -521,7 +557,7 @@ internal sealed class MonitorView : UserControl
                     }
             }
 
-            // 窗口内：仅采 PM Table 每核电压峰值（一次 SMU 调用，不逐核唤醒核心）
+            // One PM Table sample covers per-core voltage peaks without waking each core.
             var swWin = Stopwatch.StartNew();
             do
             {
@@ -529,11 +565,10 @@ internal sealed class MonitorView : UserControl
                 {
                     bool pmRefreshed = false;
                     try { pmRefreshed = cpu.RefreshPowerTable() == SMU.Status.OK; }
-                    catch { /* 本轮 PM Table 不可用 */ }
+                    catch { /* PM Table unavailable in this window. */ }
                     if (pmRefreshed && cpu.powerTable?.Table is { } tbl)
                     {
-                        // 每核电压段或频率段探不中时不锁定这份残缺布局：屏蔽槽/深度空闲会让某一帧匹配不上，
-                        // 下一帧还有机会。探到完整布局后才停止重试。
+                        // Keep probing incomplete PM Table layouts; fused-off or sleeping cores can hide a segment for one frame.
                         if (ptLayout is not { PerCoreVoltIdx: >= 0, PerCoreFreqIdx: >= 0 })
                             ptLayout = RyzenSmu.ProbePtLayout(tbl, n) ?? ptLayout;
                         if (ptLayout is { } lay)
@@ -544,26 +579,40 @@ internal sealed class MonitorView : UserControl
                                     double v = tbl[lay.PerCoreVoltIdx + i];
                                     if (v > maxVolt[i]) maxVolt[i] = v;
                                 }
-                            // TEL 取 VID 峰值那一帧的配对值：两者各自取峰会落在不同帧，
-                            // 噪声放大后会出现 TEL > VID 的倒挂（Vdroop 为负）。
+                            // Pair TEL with the frame containing peak VID; independent peaks can invert Vdroop.
                             if (tbl[lay.CpuVidIdx] > maxCpuVid)
                             {
                                 maxCpuVid = tbl[lay.CpuVidIdx];
                                 maxCpuTel = tbl[lay.CpuTelIdx];
                             }
                         }
-                        ptSnap = (float[])tbl.Clone();   // 供 TEL 校准/本地读取（lock 外使用）
+                        ptSnap = (float[])tbl.Clone(); // Snapshot for per-core frequency outside the lock.
                     }
                 }
                 Thread.Sleep(40);
-            } while (swWin.ElapsedMilliseconds < 500 && running);   // 贴近 HWiNFO ~500ms 刷新节奏
+            } while (swWin.ElapsedMilliseconds < 500 && running);
 
             if (!running) break;
 
-            // 窗口终点：各核每个 SMT 线程的 APERF / MPERF / TSC
+            // An unreadable PM Table points to the driver; a readable one without the segment to an unsupported layout.
+            ptFails = ptSnap == null ? ptFails + 1 : 0;
+            noVoltWins = ptSnap != null && ptLayout is not { PerCoreVoltIdx: >= 0 } ? noVoltWins + 1 : 0;
+            if (ptFails == PtGiveUpWindows && !ptReported)
+            {
+                ptReported = true;
+                ReportPawnIoFault();
+            }
+            if (noVoltWins == PtGiveUpWindows && !ptReported)
+            {
+                ptReported = true;
+                Log.Write("未识别到 Core VID 数据，此 CPU 的 PM Table 布局可能不兼容", "WARN");
+            }
+
+            // Capture the matching counters at the end of the window.
+            if (readCounters)
             lock (RyzenSmu.IoLock)
             {
-                // PM Table 能给出每核频率时就不读这个 MSR：读 per-core MSR 必须绑核，绑核会唤醒空闲核
+                // Skip pinned per-core MSR reads when PM Table provides frequency; pinning wakes idle cores.
                 bool needMsrFreq = ptLayout is not { PerCoreFreqIdx: >= 0 };
                 for (int i = 0; i < n; i++)
                 {
@@ -573,12 +622,11 @@ internal sealed class MonitorView : UserControl
                         lastTick[x] = Stopwatch.GetTimestamp();
                         ReadCounters(i, t, out lastA[x], out lastM[x], out lastT[x]);
                     }
-                    if (needMsrFreq) psSnap[i] = ReadMsr(i, 0xC0010293);   // HW P-state 为物理核共享，读线程 0 即可
+                    if (needMsrFreq) psSnap[i] = ReadMsr(i, 0xC0010293); // HW P-state is shared by the physical core.
                 }
             }
 
-            // TSC 频率标定：参考线程首轮定基准，之后累积到 2 秒以上才出值。TSC 回退（睡眠唤醒后
-            // 计数器重置）或标定值偏离注册表 ~MHz 超过 10% 均视为跳变，弃值重设基准。
+            // Restart TSC calibration after a counter reset or a >10% registry mismatch.
             if (tscRefSlot < 0)
                 for (int i = 0; i < n; i++)
                     if (startT[i * tpc] > 0 && lastT[i * tpc] > 0) { tscRefSlot = i; break; }
@@ -601,34 +649,30 @@ internal sealed class MonitorView : UserControl
             var busyFreq = new double[n];
             var effFreq  = new double[n];
             var occ      = new double[n];
-            // APERF/MPERF 都以 TSC 频率为基准计数，故三者共用同一个频率基准
+            // APERF and MPERF use the TSC frequency reference.
             double tscFreqMHz = tscMHz > 0 ? tscMHz : p0BaseMHz;
             double p0Hz = tscFreqMHz * 1e6;
             for (int i = 0; i < n; i++)
             {
-                // 物理核的读数取各 SMT 线程中最忙的那个：单线程负载时另一线程处于 halt、计数几乎不涨，
-                // 若只看线程 0 会把「负载跑在第二线程」的核误判为空闲（有效频率≈0、占用≈0、不着色）。
+                // Use the busiest SMT sibling or a load on the second thread appears idle.
                 double bestEff = 0, bestOcc = 0;
                 ulong bestA = 0, bestM = 0;
                 for (int t = 0; t < tpc; t++)
                 {
                     int x = i * tpc + t;
-                    // 单个 MSR 读失败会返回 0，无符号相减会下溢成天文数字（ΔAPERF 下溢就是一个
-                    // 上千万 MHz 的假读数），故增量必须单调才采用，否则按不可用处理显示 "-"。
+                    // Reject non-monotonic counters to avoid unsigned underflow and bogus MHz readings.
                     ulong dA = lastA[x] >= startA[x] ? lastA[x] - startA[x] : 0;
                     ulong dM = lastM[x] >= startM[x] ? lastM[x] - startM[x] : 0;
                     ulong dT = lastT[x] >= startT[x] ? lastT[x] - startT[x] : 0;
-                    // 用该线程自己的首尾间隔当分母：首尾快照逐核串行读，满载时一轮要几百毫秒到一秒多，
-                    // 统一用窗口时长会让越靠后读到的核虚高越多。
+                    // Use each thread’s own sample interval; serial per-core reads skew a shared interval.
                     double sec = (lastTick[x] - startTick[x]) / (double)Stopwatch.Frequency;
 
-                    // EFFREQ 有效频率（含空闲）：ΔAPERF/ΔTSC×TSC频率。TSC 与 APERF 在同一次绑定内读出，
-                    // 读得慢会让两者同比例变大、比值不变，分母不受采样耗时影响；
-                    // TSC 不可读(=0) 时才退回墙钟 ΔAPERF/Δt，那条路仍会被采样延迟污染。
+                    // EFFREQ = delta APERF / delta TSC * TSC frequency, including idle time.
+                    // Use wall time only when TSC is unavailable; that fallback is sensitive to sampling delay.
                     double eff = dT > 0 && tscFreqMHz > 0 ? (double)dA / dT * tscFreqMHz
                                : (sec > 0 ? dA / sec / 1e6 : 0);
 
-                    // 占用率：ΔMPERF/ΔTSC；本机 TSC 不可读(=0) 时用 ΔMPERF/(P0基频×Δt)
+                    // Activity = delta MPERF / delta TSC; use P0 frequency and wall time if TSC is unavailable.
                     double oc = dT > 0 ? Math.Min(100.0, (double)dM / dT * 100.0)
                               : (p0Hz > 0 && sec > 0 ? Math.Min(100.0, dM / (p0Hz * sec) * 100.0) : 0);
 
@@ -637,16 +681,17 @@ internal sealed class MonitorView : UserControl
                     if (dM > bestM) { bestM = dM; bestA = dA; }
                 }
 
-                effFreq[i] = bestEff;
+                // Unknown counter values display as "-"; a PM Table zero is a valid idle reading.
+                effFreq[i] = bestEff > 0 ? bestEff : double.NaN;
                 occ[i] = bestOcc;
 
-                // FREQ 忙时频率(≈ HWiNFO Core Clock)：ΔAPERF/ΔMPERF × TSC频率（活动时平均实频）。
-                // MPERF 或频率基准不可用时回退有效频率，避免显示为空。
-                busyFreq[i] = (bestM > 0 && tscFreqMHz > 0) ? (double)bestA / bestM * tscFreqMHz : effFreq[i];
+                // FREQ = delta APERF / delta MPERF * TSC frequency while active.
+                // Fall back to EFFREQ if MPERF or the reference frequency is unavailable.
+                busyFreq[i] = (bestM > 0 && tscFreqMHz > 0) ? (double)bestA / bestM * tscFreqMHz : bestEff;
             }
 
-            // PM Table 不可用时的回退：HW P-state 档位快照。Zen5(家族1Ah+) 频率 = fid[11:0]×5MHz，
-            // 更早代际用 fid/dfs 算倍频×100。读它要绑核、会唤醒空闲核把频率拉到满档，只能当兜底。
+            // HW P-state is the last fallback: Zen5 uses fid * 5 MHz, earlier CPUs use fid/dfs * 100 MHz.
+            // Its pinned read wakes idle cores, so it must not be the primary source.
             double bclkCorr = bclk > 0 ? bclk / 100.0 : 1.0;
             for (int i = 0; i < n; i++)
             {
@@ -663,23 +708,25 @@ internal sealed class MonitorView : UserControl
                 if (snapMHz > 0) busyFreq[i] = snapMHz;
             }
 
-            // FREQ 首选 PM Table 的每核频率：读表不绑核，不会唤醒空闲核。
-            // SMU 按 100MHz 外频报这份频率，需按 BCLK 换算。
+            // PM Table frequency does not require pinning or waking idle cores.
+            // The SMU reports it at 100 MHz BCLK; scale by actual BCLK.
             if (ptLayout is { PerCoreFreqIdx: >= 0 } ptl && ptSnap is { } pts && pts.Length > ptl.PerCoreFreqIdx + n)
+            {
                 for (int i = 0; i < n; i++)
                 {
                     double mhz = pts[ptl.PerCoreFreqIdx + i] * 1000.0 * bclkCorr;
                     if (mhz > 0) busyFreq[i] = mhz;
                 }
 
-            // 若 HWiNFO 在运行并开启共享内存，FREQ 直接采用其 Core Clock 原值，与 HWiNFO 完全一致；否则保留自算忙时频率
-            var hwClocks = HwInfoReader.ReadCoreClocks();
-            if (hwClocks != null)
-                for (int i = 0; i < n; i++)
-                {
-                    int os = slotOs[i];
-                    if (os >= 0 && hwClocks.TryGetValue(os, out double mhz)) busyFreq[i] = mhz;
-                }
+                // Without counters, read EFFREQ and C0 activity from the adjacent PM Table segments.
+                if (!readCounters && pts.Length > ptl.PerCoreFreqIdx + 3 * n)
+                    for (int i = 0; i < n; i++)
+                    {
+                        effFreq[i] = pts[ptl.PerCoreFreqIdx + n + i] * 1000.0 * bclkCorr;
+                        float c0 = pts[ptl.PerCoreFreqIdx + 2 * n + i];
+                        if (c0 is >= 0f and <= 100f) occ[i] = c0;
+                    }
+            }
 
             int[] co;
             float[] ccdTemp;
@@ -690,26 +737,25 @@ internal sealed class MonitorView : UserControl
             double fclk, uclk;
             lock (RyzenSmu.IoLock)
             {
-                // AMD CO（设定值，每 2s 全核读一次；其余轮次直接用缓存）
+                // CO is a set value, so reuse its cached reading between two-second refreshes.
                 if (coClock.ElapsedMilliseconds >= coNextMs)
                 {
                     for (int i = 0; i < n; i++)
                     {
-                        if (slotDisabled[i]) continue;   // 熔丝屏蔽槽读不出 CO，白发请求只会加重邮箱争用
+                        if (slotDisabled[i]) continue; // Avoid mailbox reads for disabled slots.
                         uint ccd = (uint)i / coresPerCcd, core = (uint)i % coresPerCcd;
                         try
                         {
-                            // 读失败保留上一次有效值：写 0 会让界面在真值与 0 之间乱跳。
+                            // Preserve the last valid CO reading instead of flashing zero on read failure.
                             int? margin = RyzenSmu.TryReadMargin(cpu, ccd, core);
                             if (margin.HasValue) coCache[i] = margin.Value;
                         }
-                        catch { /* 保留上一次有效值 */ }
+                        catch { /* Keep the last valid value. */ }
                     }
                     coNextMs = coClock.ElapsedMilliseconds + 2000;
                 }
                 co = (int[])coCache.Clone();
 
-                // 温度
                 ccdTemp = new float[ccds];
                 for (uint c = 0; c < ccds; c++)
                 {
@@ -748,32 +794,21 @@ internal sealed class MonitorView : UserControl
                     if (liveCore is > 50 and < 200) bclk = liveCore;
                     if (livePll is > 50 and < 200) bclkPll = livePll;
                 }
-                catch { /* 保留最近一次有效 BCLK */ }
+                catch { /* Keep the last valid BCLK. */ }
 
                 fclk = cpu.powerTable?.FCLK ?? 0;
                 uclk = cpu.powerTable?.UCLK ?? 0;
             }
 
-            // TEL/VID：直读 PM Table 的全局 VDDCR_CPU 遥测（请求 VID / 实测电压），不依赖 HWiNFO
+            // Read global requested VID and measured TEL from the PM Table.
             double peakVid = maxCpuVid is > 0.3 and < 2.0 ? maxCpuVid : 0;
             double telVolt = peakVid > 0 && maxCpuTel is > 0.3 and < 2.0 ? maxCpuTel : 0;
-            // 只有 VID 与 TEL 同源于全局遥测四元组时 Vdroop 才有意义；走回退路径时两者口径不同，不显示。
+            // Show Vdroop only when VID and TEL come from the same telemetry group.
             bool vdroopValid = peakVid > 0 && telVolt > 0;
 
-            // 回退：表里读不到全局遥测时，VID 用各核峰值近似，
-            // TEL 用 HWiNFO 的 SVI3 读数并喂给校准器收敛出本地索引。
+            // Without global telemetry, approximate VID from per-core peaks.
             if (peakVid <= 0)
                 for (int i = 0; i < n; i++) if (maxVolt[i] > peakVid) peakVid = maxVolt[i];
-            if (telVolt <= 0)
-            {
-                double telHw = HwInfoReader.ReadCpuTelemetryVoltage() ?? 0;
-                if (ptSnap != null)
-                {
-                    if (telCalib.Index < 0 && telHw > 0) telCalib.Feed(ptSnap, telHw);
-                    if (telCalib.Index >= 0 && telCalib.Index < ptSnap.Length) telVolt = ptSnap[telCalib.Index];
-                }
-                if (telVolt <= 0) telVolt = telHw;
-            }
 
             var fFreq = busyFreq; var fEff = effFreq; var fVolt = maxVolt; var fCo = co; var fOcc = occ; var fTemp = ccdTemp;
             try
@@ -781,7 +816,8 @@ internal sealed class MonitorView : UserControl
                 if (!IsHandleCreated) continue;
                 BeginInvoke(() =>
                 {
-                    _memVal.Text    = FormatMemory(fclk, uclk);
+                    _header?.SetLine(0, $"{_cpuLine}   {FormatMemory(fclk, uclk)}");
+                    _header?.SetLine(2, $"{_gpuOsLine}   {DateTime.Now:yyyy/MM/dd HH:mm}");
                     UpdateBclkCell();
                     _telVidVal.Text = $"{(telVolt > 0 ? telVolt.ToString("F3") : "--")} / {(peakVid > 0 ? peakVid.ToString("F3") : "--")} V";
                     _vdroopVal.Text = vdroopValid ? $"{(peakVid - telVolt) / peakVid * 100.0:F1} %" : "--";
@@ -806,8 +842,8 @@ internal sealed class MonitorView : UserControl
     }
 }
 
-// 单个 CCD 面板：标题 + 表格（行=CPPC/AMD CO/EFFREQ/FREQ/VID，列=各核）。
-// 表格列用 Fill 模式填满半幅面板，使左右边缘与上方身份条/下方限制条对齐。
+// One CCD panel contains per-core CPPC, CO, EFFREQ, FREQ, and VID rows.
+// Fill the panel width so its edges align with the limit strip.
 internal sealed class CcdView
 {
     private const int RowCppc = 0, RowCo = 1, RowEff = 2, RowFreq = 3, RowVid = 4;
@@ -832,10 +868,10 @@ internal sealed class CcdView
 
         dgv = new DataGridView
         {
-            Dock = DockStyle.Fill,   // 纵向填满面板；行高在 LayoutRows 里按可用高度分配，避免 2K 屏下方留白
+            Dock = DockStyle.Fill,
             ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
             ColumnHeadersHeight = HeaderH,
-            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,   // 列按权重填满面板宽度
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
             AllowUserToResizeRows = false,
@@ -869,7 +905,7 @@ internal sealed class CcdView
             },
             RowTemplate = { Height = RowH },
         };
-        // 开启 DataGridView 内部双缓冲，避免每 500ms 刷新单元格时闪烁
+        // Double-buffer the grid to avoid flicker during frequent refreshes.
         typeof(DataGridView).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.SetValue(dgv, true);
 
         var sensorCol = NewCol("Sensor", "Sensor");
@@ -895,7 +931,7 @@ internal sealed class CcdView
             dgv.Columns.Add(col);
         }
 
-        string[] rowNames = { "CPPC", "AMD CO", "EFFREQ", "FREQ", "VID" };
+        string[] rowNames = { "CPPC", "AMD CO", "EFFREQ", "FREQ", "Core VID" };
         foreach (var rn in rowNames)
         {
             int r = dgv.Rows.Add();
@@ -905,13 +941,12 @@ internal sealed class CcdView
             c0.Style.Alignment = DataGridViewContentAlignment.MiddleLeft;
         }
 
-        // CPPC 行为静态硬件值，填一次（空 CCD 不填，保持空白）
         if (exists)
             for (int k = 0; k < coreCount; k++)
             {
                 int gc = baseCore + k;
-                // 0 表示这颗核没有 CPPC 读数（Zen3 无 MSR 且事件日志也没有，或 BIOS 关了 CPPC），
-                // 显示 "-"；填 0 会被当成"排名垫底"读错。
+                // Zero means CPPC is unavailable, not that this core ranks last.
+                // Display "-" for missing rankings.
                 bool noData = slotDisabled.Length > gc && slotDisabled[gc];
                 uint v = perf.Length > gc ? perf[gc] : 0;
                 dgv.Rows[RowCppc].Cells[k + 1].Value = noData || v == 0 ? "-" : v.ToString();
@@ -929,19 +964,18 @@ internal sealed class CcdView
             Text = $"CCD#{ccd}",
         };
 
-        // 先加 Dock=Fill 再加 Dock=Top，表格才占标题下方的剩余空间
         Container.Controls.Add(dgv);
         Container.Controls.Add(title);
 
-        dgv.SizeChanged += (_, _) => LayoutRows();   // 面板高度变化（含 2K/DPI 缩放）时重分配行高
-        // SizeChanged 早于 handle 创建，那一次 LayoutRows 会直接返回；尺寸不再变就不会有第二次，
-        // 故 handle 就绪与面板显示时各补算一次，否则行高停在默认值、面板下方留白。
+        dgv.SizeChanged += (_, _) => LayoutRows();
+        // SizeChanged can fire before handle creation and never repeat.
+        // Recalculate row heights when the handle exists and the panel becomes visible.
         dgv.HandleCreated += (_, _) => LayoutRows();
         dgv.VisibleChanged += (_, _) => { if (dgv.Visible) LayoutRows(); };
     }
 
-    /// <summary>把表头以外的可用高度平均分给各数据行，使表格纵向填满面板、消除下方留白。
-    /// 极小窗口下不低于原始行高（宁可裁剪也不重叠）。</summary>
+    /// <summary>Distributes available height across data rows without overlapping them.
+    /// Very small windows retain the minimum row height.</summary>
     private bool layingOut;
     private void LayoutRows()
     {
@@ -992,18 +1026,17 @@ internal sealed class CcdView
                 continue;
             }
             dgv.Rows[RowCo].Cells[col].Value   = co[gc].ToString();
-            dgv.Rows[RowEff].Cells[col].Value  = eff[gc]  > 0 ? eff[gc].ToString("F0")  : "-";
+            dgv.Rows[RowEff].Cells[col].Value  = double.IsNaN(eff[gc]) ? "-" : eff[gc].ToString("F0"); // NaN means unavailable; zero means asleep.
             dgv.Rows[RowFreq].Cells[col].Value = freq[gc] > 0 ? freq[gc].ToString("F0") : "-";
             dgv.Rows[RowVid].Cells[col].Value  = volt[gc] > 0 ? volt[gc].ToString("F3") : "-";
 
-            // 该核有负载即把列头染红，占用越高越红（全核满载=整片红，单核负载=只有那一列红）
             var hc = dgv.Columns[col].HeaderCell;
             Color lc = LoadHeaderColor(gc < occ.Length ? occ[gc] : 0);
             if (hc.Style.BackColor != lc) hc.Style.BackColor = lc;
         }
     }
 
-    /// <summary>按占用率(0-100)把列头底色由默认灰渐变到红。低于 8% 视为空闲，保持原色避免轻微波动泛红。</summary>
+    /// <summary>Blends the header from gray to red above 8% activity.</summary>
     private static Color LoadHeaderColor(double occ)
     {
         double t = Math.Clamp(occ / 100.0, 0, 1);
