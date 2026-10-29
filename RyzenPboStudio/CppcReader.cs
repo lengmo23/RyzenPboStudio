@@ -3,19 +3,19 @@ using System.Xml.Linq;
 
 namespace RyzenPboStudio;
 
-/// <summary>CPPC 每核性能排名的备用来源：Windows 内核电源事件 55。
-/// Zen3 没有 CPPC MSR（CPUID Fn8000_0008_EBX[27]=0），Windows 经 ACPI _CPC 在开机时逐逻辑核记入事件 55，
-/// 其 MaximumPerformancePercent 与 MSR 路径的 Highest×100/Nominal 同刻度。</summary>
+/// <summary>Uses Windows Kernel-Processor-Power Event 55 as a CPPC ranking fallback.
+/// Zen3 lacks CPPC MSRs, but ACPI _CPC values are logged at boot.
+/// MaximumPerformancePercent uses the same scale as Highest * 100 / Nominal.</summary>
 internal static class CppcReader
 {
     private const string Provider = "Microsoft-Windows-Kernel-Processor-Power";
-    private const int ScanLimit = 512;      // 每次开机只记 logicalCores 条，扫这么多足够翻到最近一轮
-    private const int TimeoutMs = 2000;     // 日志过大时查询会拖慢启动，超时就放弃
-    // 只收与最新一条同一批（同次开机）的记录
+    private const int ScanLimit = 512; // Enough records to cover the latest boot batch.
+    private const int TimeoutMs = 2000; // Avoid delaying startup on large event logs.
+    // Only collect records from the latest boot batch.
     private static readonly TimeSpan BatchWindow = TimeSpan.FromMinutes(5);
 
-    /// <summary>按物理核返回 MaximumPerformancePercent；读不到返回 null。
-    /// tpc 为每核线程数，事件按逻辑处理器记录，物理核取其首个线程那条。</summary>
+    /// <summary>Returns MaximumPerformancePercent per physical core, or null.
+    /// Event records are per logical processor; use the first sibling.</summary>
     public static uint[]? Read(int cores, int tpc)
     {
         if (cores <= 0 || tpc <= 0) return null;
@@ -36,7 +36,7 @@ internal static class CppcReader
         var query = new EventLogQuery("System", PathType.LogName,
             $"*[System[Provider[@Name='{Provider}'] and (EventID=55)]]")
         {
-            ReverseDirection = true,   // 从最新往回读，每个逻辑核首次出现的就是本次开机那条
+            ReverseDirection = true,
         };
 
         var perf = new uint[cores];
@@ -52,10 +52,10 @@ internal static class CppcReader
             {
                 scanned++;
                 if (rec.TimeCreated is not { } ts) continue;
-                batchNewest ??= ts;                     // 倒序读，第一条即最新
-                if (batchNewest - ts > BatchWindow) break;   // 已翻到上一批，不再往回
+                batchNewest ??= ts;
+                if (batchNewest - ts > BatchWindow) break;
                 if (!TryParse(rec, out int lp, out uint pct)) continue;
-                if (lp % tpc != 0) continue;            // 只取每个物理核的首线程
+                if (lp % tpc != 0) continue; // Use the first thread of each physical core.
                 int core = lp / tpc;
                 if (core < 0 || core >= cores || perf[core] != 0) continue;
                 perf[core] = pct;
@@ -66,7 +66,7 @@ internal static class CppcReader
         return filled > 0 ? perf : null;
     }
 
-    /// <summary>按字段名取值而非按位置，避免 Windows 版本间字段顺序变化导致读错列。</summary>
+    /// <summary>Reads event fields by name to tolerate Windows field-order changes.</summary>
     private static bool TryParse(EventRecord rec, out int lp, out uint pct)
     {
         lp = -1; pct = 0;

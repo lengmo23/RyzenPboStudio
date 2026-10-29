@@ -15,9 +15,7 @@
 | `Updater.cs`      | 从 GitHub Release 检查和安装更新                                    |
 | `ToolBundle.cs`   | 释放并校验内嵌的 `inpoutx64.dll`                                    |
 | `SystemInfo.cs`   | CPU / 主板 / 显卡 / 内存信息，逻辑核与物理核、CCD 的映射            |
-| `HwInfoReader.cs` | 读 HWiNFO 共享内存（每核频率、SVI3 电压、Bus Clock）                |
 | `CppcReader.cs`   | 5000 系从内核电源事件 55 读 CPPC                                    |
-| `TelVoltCalib.cs` | 借助 HWiNFO 校准 TEL 电压在 PM Table 中的偏移                       |
 
 ## 硬件访问
 
@@ -55,8 +53,12 @@ CO 负压断电即丢，重启后 CPU 回到 BIOS 设定，所以死机前的负
 1. 所有状态文件都经 `DurableIO` 写入（`WriteThrough` + `Flush(true)` + 原子替换）。
 2. 每次写负压到 CPU 之前，先追加一行到 `applied_offsets.ndjson`。断电最多损坏最后一行，读取时跳过。
 3. 测试开始时写脏标记 `test_in_progress`，正常结束或用户关闭时删除。下次开始测试时若它还在，
-   就取 `applied_offsets.ndjson` 最后一条有效记录，所有核心 +2 后从中断的阶段继续。
-4. 中断后用户手动应用过 CO（记录原因为 `manual-takeover`），则按用户的值继续，不再 +2。
+   就取 `applied_offsets.ndjson` 最后一条有效记录，所有核心加一个步长（默认 +2）后从中断的阶段继续。
+4. 中断后用户手动应用过 CO（记录原因为 `manual-takeover`），则按用户的值继续，不再回退。
+5. 测试开始时从 CPU 读取 FMax 与 PM Table 中的 PPT / EDC / TDC，追加一行到 `applied_pbo.ndjson`；之后每次点 PBO 栏的
+   Apply（包括测试中途）再追加一行。续跑时取最后一条记录，逐项与当前值比较，
+   只写回被 BIOS 改掉的项；一致的项不写（写 FMax 会扰乱电源计划状态和部分主板的核心频率限制），
+   当前读不到的项也不写。
 
 `Workspace.EnsureLayout()` 在 `Program.Main` 最开始创建 `logs\`、`profiles\`，并把旧版本放在
 EXE 同目录的文件迁移进来。它必须早于任何状态读取，否则升级后会读不到恢复点。
@@ -64,17 +66,19 @@ EXE 同目录的文件迁移进来。它必须早于任何状态读取，否则�
 `profiles\` 下的文件：
 
 - `applied_offsets.ndjson`：负压历史
-- `undervolt_state.json`：恢复用的测试配置
+- `test_state.json`：恢复用的测试配置
+- `applied_pbo.ndjson`：FMax / PPT / EDC / TDC 历史
 - `test_in_progress`：脏标记
 - `final_offsets.txt`：测试全部通过后的最终负压
 - `co_profile.json`、`cs_state.json`：CO / Curve Shaper 配置
-- `tel_calib.json`：TEL 电压偏移校准
+- `setting.json`：顺序 / 组合测试计划与自动模式 CO 步长
 - `update_skip.txt`：用户选择跳过的版本
 
 ## 在线更新
 
 `Updater` 读 `releases/latest`，优先下载 `-update.zip`，没有则用 `-full.zip`。下载按
-GitHub 直连 → 几个加速镜像的顺序尝试，并与 API 报告的大小核对。解压校验通过后写一个
-`apply-update.cmd`，等程序退出后用 `robocopy` 覆盖安装目录（排除 `logs`、`profiles`），再重新启动。
+GitHub 直连 → 几个加速镜像的顺序尝试，下载后用 API 给出的 SHA-256 校验（Release 没有 digest 时只核对大小），不符就换下一个源。解压校验通过后写一个
+`apply-update.cmd`，等程序退出后先把安装目录备份一份，再用 `robocopy` 覆盖（排除 `logs`、`profiles`），
+然后重新启动。覆盖中途失败时用备份还原并启动旧版本；所有下载源都失败时提示加入 QQ 群获取最新版本。
 
 Release 正文会转成纯文字显示在更新提示里，只写用户能看懂的更新内容。

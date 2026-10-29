@@ -4,15 +4,15 @@ using System.Text.Json.Serialization;
 namespace RyzenPboStudio;
 
 /// <summary>
-/// Curve Shaper 备用模式状态。旧 BIOS 无 CS 读取接口（读回全 0，但写入已生效），
-/// 此时保存用户最后应用的 CS margin，刷新时回填，避免编辑器被读回的 0 重置。
+/// Stores last applied CS margins when old BIOS versions return all-zero readback
+/// despite successful writes, so refresh does not clear the editor.
 /// </summary>
 internal sealed class CsState
 {
-    /// <summary>该机 CS 读取接口是否失效（读回 raw args 全 0）。</summary>
+    /// <summary>Whether CS readback is unavailable on this BIOS.</summary>
     [JsonPropertyName("read_broken")] public bool ReadBroken { get; set; }
 
-    /// <summary>最后一次成功应用的 CS margin，按 [tier*3 + col] 扁平存储（col: 0=低温 1=中温 2=高温）。</summary>
+    /// <summary>Last applied margins flattened as tier * 3 + temperature column.</summary>
     [JsonPropertyName("margins")] public List<int> Margins { get; set; } = new();
 
     private static string FilePath => Path.Combine(Workspace.ProfilesDir, "cs_state.json");
@@ -28,7 +28,7 @@ internal sealed class CsState
         }
         catch (JsonException e)
         {
-            // 断电常把文件留成一串 0x00，内容已无从恢复，删掉以免每次启动重复报错
+            // A power loss can leave an all-zero file; delete it to avoid repeated parse failures.
             Log.Write($"CS 备用状态已损坏，丢弃: {e.Message}", "WARN");
             try { File.Delete(FilePath); } catch { }
         }
@@ -51,7 +51,7 @@ internal sealed class CsState
         }
     }
 
-    /// <summary>把扁平 margin 还原成 [5,3] grid（不足 15 个时余下为 0）。</summary>
+    /// <summary>Expands saved margins to a 5-by-3 grid, padding missing values with zero.</summary>
     public int[,] ToGrid()
     {
         var g = new int[5, 3];
@@ -64,7 +64,7 @@ internal sealed class CsState
         return g;
     }
 
-    /// <summary>用 [5,3] grid 覆盖保存的 margin。</summary>
+    /// <summary>Stores a 5-by-3 margin grid in flat order.</summary>
     public void FromGrid(int[,] g)
     {
         var list = new List<int>(15);

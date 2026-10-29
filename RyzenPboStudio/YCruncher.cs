@@ -6,20 +6,20 @@ using System.Text.RegularExpressions;
 
 namespace RyzenPboStudio;
 
-/// <summary>调用 y-cruncher 跑压力测试，解析报错核心并自动调压。</summary>
-internal static class YCruncher
+/// <summary>Runs y-cruncher stress tests, maps error cores, and adjusts CO in automatic mode.</summary>
+internal static partial class YCruncher
 {
-    /// <summary>y-cruncher 不内嵌在程序里，随发布目录放在 tools\y-cruncher\。
-    /// 开源仓库不分发它时，用户按同样结构自行放置即可；另接受几种常见的放法。</summary>
+    /// <summary>Finds the external y-cruncher under tools/y-cruncher or supported fallback paths.
+    /// The open-source repository does not include its binaries.</summary>
     public static string FindExe()
     {
         string appDir = AppContext.BaseDirectory;
         string[] candidates =
         {
-            Path.Combine(appDir, "tools", "y-cruncher", "y-cruncher.exe"),   // 标准位置
+            Path.Combine(appDir, "tools", "y-cruncher", "y-cruncher.exe"),
             Path.Combine(appDir, "tools", "y-cruncher v0.8.7.9547b", "y-cruncher.exe"),
-            Path.Combine(appDir, "tools", "y-cruncher.exe"),                 // 直接解压进 tools
-            Path.Combine(appDir, "y-cruncher", "y-cruncher.exe"),            // 放在 EXE 同级
+            Path.Combine(appDir, "tools", "y-cruncher.exe"),
+            Path.Combine(appDir, "y-cruncher", "y-cruncher.exe"),
             Path.Combine(appDir, "y-cruncher v0.8.7.9547b", "y-cruncher.exe"),
         };
         foreach (var c in candidates)
@@ -35,8 +35,8 @@ internal static class YCruncher
     }
 
     /// <summary>
-    /// 写一份限定逻辑核心的 stress 配置。数组元素用空格分隔；v0.8.7 要求下列字段齐全，缺一个即报错。
-    /// 内存按「选中核心数 / 全部逻辑核数」等比缩放，使每线程内存量与全核时一致。
+    /// Writes a core-limited stress config with all fields required by y-cruncher v0.8.7.
+    /// Scales memory by selected logical cores to keep memory per thread constant.
     /// </summary>
     private static string WriteStressConfig(
         IReadOnlyList<string> algorithms, int durationSeconds, int iterations, IReadOnlyList<int> logicalCores)
@@ -46,12 +46,12 @@ internal static class YCruncher
         if (totalRam <= 0) totalRam = 8L * 1024 * 1024 * 1024;
 
         int allLogical = Math.Max(1, Environment.ProcessorCount);
-        // 0.72 对齐 y-cruncher 自己的默认内存取用比例
+        // Match y-cruncher’s default memory-use ratio.
         long mem = (long)(totalRam * 0.72 * logicalCores.Count / allLogical);
-        long minMem = 256L * 1024 * 1024 * logicalCores.Count;   // 每线程至少 256 MB
+        long minMem = 256L * 1024 * 1024 * logicalCores.Count; // At least 256 MB per selected thread.
         if (mem < minMem) mem = minMem;
 
-        // SecondsTotal 留足余量：轮数由 stdout 的 Iteration 计数控制，别让 y-cruncher 先自行收工
+        // stdout iteration counts control rounds; allow enough time to avoid premature self-termination.
         long secondsTotal = (long)durationSeconds * Math.Max(1, iterations) * algorithms.Count + 3600;
 
         var sb = new StringBuilder();
@@ -87,6 +87,10 @@ internal static class YCruncher
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryInformationJobObject(IntPtr hJob, int infoClass, out JobBasicAccounting info, int size, IntPtr retLen);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -119,10 +123,22 @@ internal static class YCruncher
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
 
-    // 只收纳本程序启动的 y-cruncher，其架构子进程（如 "24-ZN5 ~ Komari"）自动加入，
-    // Kill() 因此不会波及用户单独打开的 y-cruncher。句柄不主动关闭：程序退出（含被强制结束）时
-    // 由系统关闭，KILL_ON_JOB_CLOSE 随之结束作业内全部进程。
-    private static readonly Lazy<IntPtr> Job = new(CreateJob);
+    // The job contains only y-cruncher processes launched here, including architecture children.
+    // Closing the job kills them without affecting a user-launched y-cruncher.
+    // KILL_ON_JOB_CLOSE also handles forced application termination.
+    private static readonly object JobLock = new();
+    private static IntPtr _job;
+
+    // A terminated job rejects new processes (ERROR_ACCESS_DENIED) for a while,
+    // so Kill() closes it and the next launch gets a fresh one.
+    private static IntPtr GetJob()
+    {
+        lock (JobLock)
+        {
+            if (_job == IntPtr.Zero) _job = CreateJob();
+            return _job;
+        }
+    }
 
     private static IntPtr CreateJob()
     {
@@ -134,16 +150,16 @@ internal static class YCruncher
         return job;
     }
 
-    /// <summary>强制结束本程序启动的 y-cruncher 及其架构子进程。</summary>
+    /// <summary>Stops this application’s y-cruncher and its child processes.</summary>
     public static void Kill()
     {
-        IntPtr job = Job.Value;
+        IntPtr job;
+        lock (JobLock) { job = _job; _job = IntPtr.Zero; }
         if (job == IntPtr.Zero) return;
 
-        Log.Write("正在强制结束 y-cruncher 进程...");
         TerminateJobObject(job, 1);
 
-        // 终止是异步的，等进程真正退出（释放内存）后再开下一阶段
+        // Wait for asynchronous termination and memory release before the next stage.
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < 3000
                && QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out var info,
@@ -151,15 +167,15 @@ internal static class YCruncher
                && info.ActiveProcesses > 0)
             Thread.Sleep(50);
 
-        Log.Write("y-cruncher 进程清理完成");
+        CloseHandle(job);
     }
 
     /// <summary>
-    /// 跑 iterations 轮压测（algorithms 可为一个或多个 y-cruncher 组件，多个即「和项」一起测）：
-    /// 自动模式下报错则对应物理核心 +StepOnError 后重跑整轮，直到通过或被取消；
-    /// 手动模式(autoAdjust=false)下报错只提醒并停止，不改动任何负压。返回 (是否通过, 最终负压)。
-    /// logicalCores 非空时只压这些逻辑核（走 config 文件，命令行的 stress 不支持指定核心），
-    /// scopeCores（槽位口径）则限定 y-cruncher 整体崩溃时的负压回退范围，避免误伤未参与本次测试的核心。
+    /// Runs the requested algorithms for the requested iterations.
+    /// Automatic errors back off the mapped physical core and restart the round;
+    /// manual mode reports and stops without changing CO. Returns pass status and offsets.
+    /// logicalCores restricts the stress config; scopeCores restricts crash backoff
+    /// to participating SMU slots.
     /// </summary>
     public static (bool ok, List<int> offsets) RunStressTest(
         IReadOnlyList<string> algorithms, int iterations, List<int> offsets,
@@ -171,7 +187,7 @@ internal static class YCruncher
         string yc = FindExe();
         string ycDir = Path.GetDirectoryName(yc)!;
         var current = new List<int>(offsets);
-        string algoLabel = string.Join("+", algorithms);   // 落盘/日志用
+        string algoLabel = string.Join("+", algorithms); // Used in durable history and logs.
 
         while (true)
         {
@@ -182,8 +198,8 @@ internal static class YCruncher
             List<string> args;
             if (logicalCores is { Count: > 0 })
             {
-                // 限定核心：只能用配置文件，命令行的 stress 不接受任何核心/线程相关参数。
-                // 轮数仍由下面的 Iteration 计数控制，SecondsTotal 给足以免 y-cruncher 先超时收工。
+                // A core-limited stress run requires a config file, not command-line arguments.
+                // stdout iteration counts control rounds; allow enough runtime.
                 string cfgPath = WriteStressConfig(algorithms, durationSeconds, iterations, logicalCores);
                 args = new List<string> { "skip-warnings", "config", cfgPath };
             }
@@ -220,7 +236,8 @@ internal static class YCruncher
                 proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lines.Add(e.Data); };
 
                 proc.Start();
-                if (Job.Value == IntPtr.Zero || !AssignProcessToJobObject(Job.Value, proc.Handle))
+                IntPtr job = GetJob();
+                if (job == IntPtr.Zero || !AssignProcessToJobObject(job, proc.Handle))
                     Log.Write($"y-cruncher 加入进程作业失败 (错误 {Marshal.GetLastWin32Error()})，结束测试时可能无法清理其子进程", "WARN");
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
@@ -251,7 +268,7 @@ internal static class YCruncher
                     if (line.Contains("Test Finished") || line.Contains("Test finished"))
                         testFinished = true;
 
-                    // y-cruncher 自身崩溃（非指定核心报错）：视为不稳定，跳出后按整机回退处理
+                    // Treat a process crash without a named core as whole-run instability.
                     if (line.Contains("has crashed", StringComparison.OrdinalIgnoreCase))
                     {
                         crashed = true;
@@ -260,7 +277,7 @@ internal static class YCruncher
                         break;
                     }
 
-                    // 实时检测报错核心
+                    // Detect a reported error core as output arrives.
                     var mErr = Regex.Match(line, @"logical\s+core\s+(\d+)", RegexOptions.IgnoreCase);
                     if (mErr.Success)
                     {
@@ -270,7 +287,7 @@ internal static class YCruncher
                         break;
                     }
 
-                    // 检测迭代轮数，达到目标即终止
+                    // Stop after the requested iteration count.
                     var mIter = Regex.Match(line, @"Iteration:\s*(\d+)", RegexOptions.IgnoreCase);
                     if (mIter.Success)
                     {
@@ -302,94 +319,21 @@ internal static class YCruncher
 
             if (failed.Count > 0)
             {
-                var crashedLogical = failed.ToList();
-                // 逻辑核 → OS 物理核 → 槽位。负压表按槽位索引，少了后一步会写到屏蔽槽上
-                var crashedSlots = crashedLogical
-                    .Select(CoreTopology.PhysicalOf)
-                    .Select(RyzenSmu.OsCoreToSlot)
-                    .Distinct().OrderBy(x => x).ToList();
-
-                Log.Write($"报错逻辑核心: [{string.Join(", ", crashedLogical)}]", "WARN");
-                Log.Write($"对应物理核心: [{string.Join(", ", crashedSlots)}]", "WARN");
-
-                if (!autoAdjust)
-                {
-                    // 手动模式：只提醒，不动负压，交由用户自行判断如何调整
-                    Log.Write("手动模式：检测到报错核心，未调整负压，测试停止", "WARN");
-                    onManualError?.Invoke(crashedSlots);
+                if (!BackoffFailedCores(failed, current, mode, algoLabel, autoAdjust, onManualError))
                     return (false, current);
-                }
 
-                RefreshBaselineFromCpu(current);
-
-                foreach (int slot in crashedSlots)
-                {
-                    if (slot >= 0 && slot < current.Count)
-                    {
-                        int old = current[slot];
-                        current[slot] = old + Config.StepOnError;
-                        Log.Write($"  物理核心 {slot}: {old} → {current[slot]} (+{Config.StepOnError})");
-                    }
-                }
-
-                Log.Write($"新负压: [{string.Join(", ", current)}]");
-
-                // 先落盘再下发：万一应用后立刻死机，这组负压已在磁盘上
-                if (!Tuning.Apply(current, mode, algoLabel, "backoff"))
-                {
-                    Log.Write("应用负压失败", "ERROR");
-                    return (false, current);
-                }
-
-                Log.Write($"负压已调整，3 秒后重新开始 {iterations} 轮测试...");
+                Log.Write($"CO 已调整，3 秒后重新开始 {iterations} 轮测试...");
                 if (token.WaitHandle.WaitOne(3000))
-                    return (false, current); // 等待期间被取消
+                    return (false, current); // Cancelled while waiting.
                 continue;
             }
 
-            // y-cruncher 自身崩溃（未指明报错核心）：视为整机不稳定，把仍在负压的物理核心各回退一档后重试。
-            // 钳到 0（不过冲成正压）；若所有核心已回到 0 仍崩溃，说明大概率非负压问题，停止本阶段避免空转。
             if (crashed)
             {
-                if (!autoAdjust)
-                {
-                    // 手动模式：y-cruncher 崩溃同样只提醒，不动负压
-                    Log.Write("手动模式：y-cruncher 崩溃（视为负压不稳定），未调整负压，测试停止", "WARN");
-                    onManualError?.Invoke(new List<int>());
+                if (!BackoffAfterCrash(current, scopeCores, mode, algoLabel, autoAdjust, onManualError))
                     return (false, current);
-                }
 
-                RefreshBaselineFromCpu(current);
-                bool anyReduced = false;
-                for (int i = 0; i < current.Count; i++)
-                {
-                    // 限定了测试范围时只回退参与本次测试的核心，不动没测过的那些
-                    if (scopeCores is { Count: > 0 } && !scopeCores.Contains(i)) continue;
-                    if (current[i] < 0)
-                    {
-                        int old = current[i];
-                        current[i] = Math.Min(0, current[i] + Config.StepOnError);
-                        anyReduced = true;
-                        Log.Write($"  物理核心 {i}: {old} → {current[i]} (+{Config.StepOnError})");
-                    }
-                }
-
-                if (!anyReduced)
-                {
-                    Log.Write(scopeCores is { Count: > 0 }
-                        ? "y-cruncher 崩溃，但本次测试范围内的核心负压已全为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试"
-                        : "y-cruncher 崩溃，但所有核心负压已为 0（无可回退空间），大概率非负压不稳定导致，停止本阶段测试", "ERROR");
-                    return (false, current);
-                }
-
-                Log.Write($"检测到 y-cruncher 崩溃，视为不稳定：相关物理核心负压各 +{Config.StepOnError} → [{string.Join(", ", current)}]", "WARN");
-                if (!Tuning.Apply(current, mode, algoLabel, "yc-crash-backoff"))
-                {
-                    Log.Write("应用负压失败", "ERROR");
-                    return (false, current);
-                }
-
-                Log.Write($"负压已调整，3 秒后重新开始 {iterations} 轮测试...");
+                Log.Write($"CO 已调整，3 秒后重新开始 {iterations} 轮测试...");
                 if (token.WaitHandle.WaitOne(3000))
                     return (false, current);
                 continue;
@@ -423,13 +367,110 @@ internal static class YCruncher
         }
     }
 
-    /// <summary>报错回退前，用 CPU 当前实际负压刷新基准，使自动调整跟随用户测试中途的手动调压。
-    /// 整体读为全 0 而内存基准非全 0 时视为读取异常，保留内存基准，避免误把负压清零。屏蔽槽不动。</summary>
+    /// <summary>Error on specific logical cores: in auto mode back off their physical cores by StepOnError and apply,
+    /// returning true so the caller reruns. Returns false (caller stops) in manual mode or if applying fails.</summary>
+    private static bool BackoffFailedCores(
+        SortedSet<int> failedLogical, List<int> current, string mode, string phase,
+        bool autoAdjust, Action<List<int>>? onManualError)
+    {
+        var crashedLogical = failedLogical.ToList();
+        // Map logical core to OS core and then SMU slot before indexing CO offsets.
+        var crashedSlots = crashedLogical
+            .Select(CoreTopology.PhysicalOf)
+            .Select(RyzenSmu.OsCoreToSlot)
+            .Distinct().OrderBy(x => x).ToList();
+
+        Log.Write($"报错逻辑核心: [{string.Join(", ", crashedLogical)}]", "WARN");
+        Log.Write($"对应物理核心: [{string.Join(", ", crashedSlots)}]", "WARN");
+
+        if (!autoAdjust)
+        {
+            // Manual mode reports an error without changing offsets.
+            Log.Write("手动模式：检测到报错核心，未调整 CO，测试停止", "WARN");
+            onManualError?.Invoke(crashedSlots);
+            return false;
+        }
+
+        RefreshBaselineFromCpu(current);
+
+        // A core already at the CO ceiling has no backoff left, so its error is likely not CO-related
+        var atMax = crashedSlots.Where(s => s >= 0 && s < current.Count && current[s] >= Config.CoMax).ToList();
+        if (atMax.Count > 0)
+        {
+            Log.Write($"报错核心 [{string.Join(", ", atMax)}] 的 CO 已达上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止本阶段测试", "ERROR");
+            return false;
+        }
+
+        var before = new List<int>(current);
+        foreach (int slot in crashedSlots)
+            if (slot >= 0 && slot < current.Count) current[slot] = Math.Min(Config.CoMax, current[slot] + Config.StepOnError);
+        Log.WriteCo($"报错核心 CO +{Config.StepOnError}：", current, before);
+
+        // Persist offsets before applying them so crash recovery can recover the write.
+        if (!Tuning.Apply(current, mode, phase, "backoff"))
+        {
+            Log.Write("应用 CO 失败", "ERROR");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// A y-cruncher crash without a named core backs off every participating core below the CO ceiling.
+    /// Stop if another crash occurs with every participating core already at the ceiling.
+    /// Manual mode only notifies and returns false.
+    /// </summary>
+    private static bool BackoffAfterCrash(
+        List<int> current, IReadOnlyList<int>? scopeCores, string mode, string phase,
+        bool autoAdjust, Action<List<int>>? onManualError)
+    {
+        if (!autoAdjust)
+        {
+            // A process crash in manual mode also leaves CO unchanged.
+            Log.Write("手动模式：y-cruncher 崩溃（视为 CO 不稳定），未调整 CO，测试停止", "WARN");
+            onManualError?.Invoke(new List<int>());
+            return false;
+        }
+
+        RefreshBaselineFromCpu(current);
+        var before = new List<int>(current);
+        bool anyRaised = false;
+        for (int i = 0; i < current.Count; i++)
+        {
+            // Back off only cores included in the selected test scope.
+            if (RyzenSmu.IsSlotDisabled(i)) continue;
+            if (scopeCores is { Count: > 0 } && !scopeCores.Contains(i)) continue;
+            if (current[i] < Config.CoMax)
+            {
+                current[i] = Math.Min(Config.CoMax, current[i] + Config.StepOnError);
+                anyRaised = true;
+            }
+        }
+
+        if (!anyRaised)
+        {
+            Log.Write(scopeCores is { Count: > 0 }
+                ? $"y-cruncher 崩溃，但本次测试范围内的核心 CO 已全部达到上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止本阶段测试"
+                : $"y-cruncher 崩溃，但所有核心 CO 已达上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止本阶段测试", "ERROR");
+            return false;
+        }
+
+        Log.WriteCo($"y-cruncher 崩溃，相关核心 CO +{Config.StepOnError}：", current, before, "WARN");
+        if (!Tuning.Apply(current, mode, phase, "yc-crash-backoff"))
+        {
+            Log.Write("应用 CO 失败", "ERROR");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>Refreshes offsets from CPU before backoff to include manual changes during the test.
+    /// Rejects an all-zero readback against nonzero cached offsets and leaves fused-off slots alone.</summary>
     private static void RefreshBaselineFromCpu(List<int> current)
     {
         var live = RyzenSmu.ReadOffsets(current.Count);
         if (live.Count != current.Count) return;
-        if (live.All(v => v == 0) && current.Any(v => v != 0)) return;   // 读取异常保护
+        if (live.All(v => v == 0) && current.Any(v => v != 0)) return; // Reject an anomalous all-zero readback.
 
         bool changed = false;
         for (int i = 0; i < current.Count; i++)
@@ -438,7 +479,7 @@ internal static class YCruncher
             if (current[i] != live[i]) { current[i] = live[i]; changed = true; }
         }
         if (changed)
-            Log.Write($"CPU 当前负压: [{string.Join(", ", current)}]", "WARN");
+            Log.WriteCo("CPU 当前 CO：", current, level: "WARN");
     }
 
     private static void TryKill(Process proc)

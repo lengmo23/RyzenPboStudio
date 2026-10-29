@@ -4,7 +4,7 @@ using ZenStates.Core;
 
 namespace RyzenPboStudio;
 
-/// <summary>通过 ZenStates-Core 直接经 SMU 邮箱读写物理核心 Curve Optimizer 负压。</summary>
+/// <summary>Reads and writes per-core Curve Optimizer offsets through the SMU mailbox.</summary>
 internal static class RyzenSmu
 {
     [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -14,16 +14,16 @@ internal static class RyzenSmu
     private static readonly object Sync = new();
     private static Cpu? _cpu;
 
-    /// <summary>PawnIO 驱动是否已安装（ZenStates-Core 的硬性前置）。</summary>
+    /// <summary>Whether the PawnIO driver required by ZenStates-Core is installed.</summary>
     public static bool IsPawnIoInstalled => PawnIo.IsInstalled;
 
-    /// <summary>访问共享 Cpu 的运行期串行锁：监控轮询与负压读写共用同一 Cpu/SMU 邮箱，必须互斥，避免并发损坏邮箱事务。</summary>
+    /// <summary>Serializes monitor and CO access to the shared CPU and SMU mailbox.</summary>
     public static object IoLock { get; } = new();
 
-    /// <summary>取得进程内共享的 Cpu 实例（供监控界面复用，避免重复加载驱动与并发抢占 SMU）。调用方在 IoLock 下使用。</summary>
+    /// <summary>Returns the shared CPU instance; callers must hold IoLock.</summary>
     public static Cpu SharedCpu => GetCpu();
 
-    /// <summary>惰性创建并复用单个 Cpu 实例：加载驱动 + 握手 SMU 开销大，且 IODriver 为进程级单例。</summary>
+    /// <summary>Creates one CPU instance because driver initialization is costly and IODriver is process-wide.</summary>
     private static Cpu GetCpu()
     {
         lock (Sync)
@@ -33,8 +33,8 @@ internal static class RyzenSmu
             if (!PawnIo.IsInstalled)
                 throw new InvalidOperationException("未检测到 PawnIO 驱动。");
 
-            // ZenStates-Core 的 IODriver 用裸名 LoadLibrary("inpoutx64.dll")，
-            // 把工具包目录临时加入 DLL 搜索路径，让它能找到随包释放的 inpoutx64.dll。
+            // IODriver loads inpoutx64.dll by bare name, so include the protected bundle directory
+            // in the DLL search path while initializing ZenStates-Core.
             string dllDir = Path.Combine(ToolBundle.RootDirectory, "ryzen-smu-cli-0.1.3");
             SetDllDirectory(dllDir);
             try
@@ -43,13 +43,13 @@ internal static class RyzenSmu
             }
             finally
             {
-                SetDllDirectory(null); // 复位，避免影响后续 DLL 解析
+                SetDllDirectory(null); // Restore the DLL search path.
             }
             return _cpu;
         }
     }
 
-    /// <summary>线性物理核心索引 → (ccd, core)。按 ccd-major 连续排列。</summary>
+    /// <summary>Maps a linear physical-core index to its CCD and core index.</summary>
     private static (uint ccd, uint core) MapIndex(Cpu cpu, int index)
     {
         var topo = cpu.info.topology;
@@ -60,11 +60,11 @@ internal static class RyzenSmu
         return ((uint)index / coresPerCcd, (uint)index % coresPerCcd);
     }
 
-    // ── 槽位模型：槽位 = CCD×每CCD槽数+槽内序号（含熔丝屏蔽核，与 SMU MakeCoreMask 寻址一致）──
-    private static bool[]? _slotDisabled;   // 各槽位是否被熔丝屏蔽
-    private static int[]? _slotOsCore;      // 槽位 → OS 物理核序号（屏蔽槽 = -1）
+    // SMU slots include fused-off cores and follow CCD-major MakeCoreMask addressing.
+    private static bool[]? _slotDisabled; // Fused-off status by SMU slot.
+    private static int[]? _slotOsCore; // SMU slot to OS core; -1 when disabled.
 
-    /// <summary>按 coreDisableMap 建槽位表（一次缓存）。调用方需持有 IoLock。</summary>
+    /// <summary>Builds and caches SMU slots from coreDisableMap; caller holds IoLock.</summary>
     private static void EnsureSlotMap(Cpu cpu)
     {
         if (_slotDisabled != null) return;
@@ -87,7 +87,7 @@ internal static class RyzenSmu
         _slotOsCore = os;
     }
 
-    /// <summary>核心槽位总数（含屏蔽核）；拓扑不可用时回退 OS 物理核数。</summary>
+    /// <summary>Counts SMU slots including disabled cores; falls back to OS core count.</summary>
     public static int SlotCount
     {
         get
@@ -97,23 +97,23 @@ internal static class RyzenSmu
         }
     }
 
-    /// <summary>槽位是否被熔丝屏蔽（越界/拓扑不可用返回 false）。</summary>
+    /// <summary>Returns whether a slot is fused off; false when topology is unavailable.</summary>
     public static bool IsSlotDisabled(int slot)
     {
         try { lock (IoLock) { EnsureSlotMap(GetCpu()); return slot >= 0 && slot < _slotDisabled!.Length && _slotDisabled[slot]; } }
         catch { return false; }
     }
 
-    /// <summary>槽位 → OS 物理核序号（屏蔽槽返回 -1；拓扑不可用时原样返回）。</summary>
+    /// <summary>Maps an SMU slot to an OS core; disabled slots return -1.</summary>
     public static int SlotToOsCore(int slot)
     {
         try { lock (IoLock) { EnsureSlotMap(GetCpu()); return slot >= 0 && slot < _slotOsCore!.Length ? _slotOsCore[slot] : slot; } }
         catch { return slot; }
     }
 
-    /// <summary>OS 物理核序号 → 槽位。屏蔽核使 OS 编号与槽位错位（如 9600X 屏蔽槽 4/5 时
-    /// OS 核 4/5 实为槽位 6/7），凡是拿 OS 编号索引负压表的地方都要先过这里。
-    /// 查不到时原样返回，至少不会指向别的核。</summary>
+    /// <summary>Maps an OS core to its SMU slot; fused-off cores make these indices differ.
+    /// Use this mapping before indexing CO arrays by OS core number.
+    /// Falls back to the input index when topology is unavailable.</summary>
     public static int OsCoreToSlot(int osCore)
     {
         try
@@ -135,12 +135,12 @@ internal static class RyzenSmu
         return slot >= 0 && slot < _slotDisabled!.Length && _slotDisabled[slot];
     }
 
-    // SetPsmMargin 编码的逆：CO 负压存于返回值低 16 位补码。
+    // CO is encoded as a signed 16-bit value in the SMU response.
     private static int DecodeMargin(uint raw) => (short)(raw & 0xffff);
 
     /// <summary>
-    /// 读单核 CO 负压；失败返回 null。SMU 邮箱被其他软件占用时事务会失败并返回全 0，故重试几次。
-    /// 调用方需持有 <see cref="IoLock"/>。
+    /// Reads one core’s CO offset, retrying transient mailbox failures; returns null on failure.
+    /// Caller holds <see cref="IoLock"/>.
     /// </summary>
     public static int? TryReadMargin(Cpu cpu, uint ccd, uint core)
     {
@@ -153,7 +153,7 @@ internal static class RyzenSmu
         return null;
     }
 
-    /// <summary>读取当前各物理核心负压值；读取失败的核心返回 0。</summary>
+    /// <summary>Reads all physical-core CO offsets; failed reads produce zero.</summary>
     public static List<int> ReadOffsets(int numCores)
     {
         try
@@ -173,12 +173,12 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"读取负压失败: {e.Message}，使用默认值 0", "WARN");
+            Log.Write($"读取 CO 失败: {e.Message}，使用默认值 0", "WARN");
             return Enumerable.Repeat(0, numCores).ToList();
         }
     }
 
-    /// <summary>读取当前 FMax（最大频率，MHz）；失败返回 0。</summary>
+    /// <summary>Reads FMax in MHz; returns zero on failure.</summary>
     public static uint ReadFMax()
     {
         try { lock (IoLock) return GetCpu().GetFMax(); }
@@ -189,7 +189,7 @@ internal static class RyzenSmu
         }
     }
 
-    /// <summary>设置 FMax（最大频率，MHz）。</summary>
+    /// <summary>Sets FMax in MHz.</summary>
     public static bool SetFMax(uint frequency)
     {
         try { lock (IoLock) return GetCpu().SetFMax(frequency); }
@@ -200,15 +200,60 @@ internal static class RyzenSmu
         }
     }
 
-    // 上次手动应用的 TDC/EDC 限制（A）：SMU 无对应读取接口，缓存供监控显示「上限」。
+    /// <summary>Reads PBO Scalar (1–10); zero means OC mode or an unavailable value.</summary>
+    public static float ReadPboScalar()
+    {
+        try { lock (IoLock) return GetCpu().GetPBOScalar(); }
+        catch (Exception e)
+        {
+            Log.Write($"读取 PBO Scalar 失败: {e.Message}", "WARN");
+            return 0;
+        }
+    }
+
+    /// <summary>Sets PBO Scalar; Zen2/Zen3 first enable PBO through MP1 SetPBO_EN.</summary>
+    public static bool SetPboScalar(uint scalar)
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var status = GetCpu().SetPBOScalar(scalar);
+                if (status != SMU.Status.OK) Log.Write($"设置 PBO Scalar 返回 {status}", "WARN");
+                return status == SMU.Status.OK;
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Write($"设置 PBO Scalar 异常: {e.Message}", "ERROR");
+            return false;
+        }
+    }
+
+    /// <summary>Checks for a nonzero RSMU or MP1 Scalar write message before enabling the UI.</summary>
+    public static bool IsPboScalarWriteSupported()
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var smu = GetCpu().smu;
+                return smu.Rsmu.SMU_MSG_SetPBOScalar != 0 || smu.Mp1Smu.SMU_MSG_SetPBOScalar != 0;
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Write($"检测 PBO Scalar 写入支持失败: {e.Message}", "WARN");
+            return false;
+        }
+    }
+
+    // Cache manually applied TDC/EDC limits because the SMU has no readback command.
     public static int? LastTdcLimit { get; private set; }
     public static int? LastEdcLimit { get; private set; }
 
-    // PBO 解锁时 SMU 把表头的 PPT / TDC / EDC 上限报成 999 哨兵，那不是可写回参数框的有效值。
-    private const float PtLimitSentinel = 999f;
-
-    /// <summary>PM Table 中逐世代、逐型号浮动的偏移。PPT / TDC / THM 分 Zen4/Zen5 与 Zen3 两套表头；
-    /// EDC、每核电压段与 VDDCR_CPU 遥测组逐型号浮动（如遥测组起点 0xB8 / 0xBC / 0xC0），需运行时探测。</summary>
+    /// <summary>PM Table offsets vary by generation and model.
+    /// Probe EDC, per-core segments, and VDDCR_CPU telemetry at runtime.</summary>
     internal sealed class PtLayout
     {
         public int PptLimitIdx;
@@ -218,23 +263,23 @@ internal static class RyzenSmu
         public int ThmLimitIdx;
         public int EdcLimitIdx;
         public int EdcCurrentIdx;
-        public int CpuVidIdx;        // 遥测组 {VID, TEL, I, P} 的起点
-        public int CpuTelIdx;        // 组内第 2 项，实测电压：TEL × I = P 恒成立
-        public int PerCoreVoltIdx;   // 每核电压段起点；-1 表示未探到，此时每核 VID 不显示
-        public int PerCoreFreqIdx;   // 每核频率段起点(GHz)；-1 表示未探到，此时频率回退 MSR 档位快照
+        public int CpuVidIdx; // Start of {VID, TEL, I, P} telemetry group.
+        public int CpuTelIdx; // TEL is measured voltage and satisfies TEL * I = P.
+        public int PerCoreVoltIdx; // Per-core voltage segment; -1 when absent.
+        public int PerCoreFreqIdx; // Per-core frequency segment; -1 triggers MSR fallback.
     }
 
     private static bool IsPtVolt(float v) => v is >= 0.20f and <= 1.60f;
     private static bool IsPtTemp(float v) => v is >= 15f and <= 115f;
 
-    /// <summary>该槽位是否被熔丝屏蔽。每核段按槽位排列、屏蔽槽填 0，探测时需跳过。
-    /// 槽位表尚未建立时按全部有效处理。</summary>
+    /// <summary>Skips fused-off slots, whose PM Table per-core entries are zero.
+    /// Treats all slots as valid until the slot map exists.</summary>
     private static bool IsSlotMaskedNoLock(int slot) =>
         _slotDisabled is { } d && slot >= 0 && slot < d.Length && d[slot];
 
-    /// <summary>探测 PM Table 布局，探不中返回 null（调用方走回退路径）。
-    /// 先按 Zen4/Zen5 表头认，不中再按 Zen3 表头认。
-    /// 每核段探不中时 PerCoreVoltIdx 为 -1，调用方应继续重试而不是锁定这份残缺布局。</summary>
+    /// <summary>Probes Zen4/Zen5 and then Zen3 PM Table layouts; returns null on failure.
+    /// An incomplete per-core layout retains a negative index so callers can retry.
+    /// </summary>
     internal static PtLayout? ProbePtLayout(float[]? t, int cores)
     {
         if (t == null || cores <= 0 || t.Length < 70) return null;
@@ -247,8 +292,8 @@ internal static class RyzenSmu
         return lay;
     }
 
-    /// <summary>Zen4 / Zen5 表头：PPT / TDC / THM 在固定绝对索引，EDC 与遥测组随型号浮动。
-    /// 遥测组用表头镜像值定位：idx19 等于组内 VID、idx20 等于组内功率（逐位相等）。</summary>
+    /// <summary>Finds Zen4/Zen5 telemetry by matching header mirrors for VID and power.
+    /// PPT, TDC, and THM use fixed header indices; EDC varies by model.</summary>
     private static PtLayout? ProbeZen4Header(float[] t)
     {
         float vidRef = t[19], pwrRef = t[20];
@@ -275,13 +320,13 @@ internal static class RyzenSmu
         };
     }
 
-    /// <summary>Zen3（Vermeer）表头：PPT / TDC / THM / FIT / EDC / VID 六组 {limit, value} 自 idx0 顺排。
-    /// 遥测组用 idx11（VID_VALUE）的镜像定位并以 TEL × I = P 验算；先校验表头形状，避免误认别代的表。</summary>
+    /// <summary>Validates the Zen3 header before locating its telemetry mirror.
+    /// Confirms the group with TEL * current = power to avoid matching another layout.</summary>
     private static PtLayout? ProbeZen3Header(float[] t)
     {
-        if (!IsPtTemp(t[4]) || !IsPtTemp(t[5])) return null;                                   // THM {上限, 当前}
-        if (t[10] is not (> 0.3f and < 2.0f) || t[11] is not (> 0.3f and < 2.0f)) return null; // VID {上限, 当前}
-        if (t[1] <= 0 || t[3] <= 0 || t[9] <= 0) return null;                                  // PPT / TDC / EDC 当前值
+        if (!IsPtTemp(t[4]) || !IsPtTemp(t[5])) return null; // Validate thermal limit and value.
+        if (t[10] is not (> 0.3f and < 2.0f) || t[11] is not (> 0.3f and < 2.0f)) return null; // Validate VID limit and value.
+        if (t[1] <= 0 || t[3] <= 0 || t[9] <= 0) return null; // Require positive PPT, TDC, and EDC values.
 
         float vidRef = t[11];
         int baseIdx = -1;
@@ -308,13 +353,13 @@ internal static class RyzenSmu
         };
     }
 
-    /// <summary>每核电压段用「cores 个电压紧跟同样长的温度段」定位。cores 为槽位数（含屏蔽槽），
-    /// 屏蔽槽填 0 不参与匹配。探不中返回 -1。</summary>
+    /// <summary>Finds a per-core voltage segment followed by an equal-length temperature segment.
+    /// Skips fused-off slots and returns -1 when absent.</summary>
     private static int ProbePerCoreVolt(float[] t, int cores)
     {
         for (int i = 24; i + 2 * cores <= t.Length; i++)
         {
-            if (IsPtVolt(t[i - 1])) continue;   // 段首之前必须断开，避免落在长电压段的中间
+            if (IsPtVolt(t[i - 1])) continue; // Require a segment boundary to avoid matching inside a longer voltage range.
             bool ok = true;
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtVolt(t[i + k]);
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtTemp(t[i + cores + k]);
@@ -323,9 +368,9 @@ internal static class RyzenSmu
         return -1;
     }
 
-    /// <summary>每核频率段（GHz），其后紧跟同样长的每核有效频率段。段位置逐代不同，故自温度段之后逐段扫描。
-    /// 判据为「本段是合理频率且下一段不超过本段」，有效频率留 10% 余量（两段非同一瞬间采样）。
-    /// 屏蔽槽跳过。探不中返回 -1。</summary>
+    /// <summary>Finds per-core frequency and effective-frequency segments after temperature.
+    /// Allows 10% sampling slack when comparing the adjacent segments;
+    /// skips fused-off slots and returns -1 when absent.</summary>
     private static int ProbePerCoreFreq(float[] t, int voltIdx, int cores)
     {
         if (voltIdx < 0) return -1;
@@ -345,14 +390,14 @@ internal static class RyzenSmu
         return -1;
     }
 
-    /// <summary>设置 PPT（持续功率上限，W）。</summary>
+    /// <summary>Sets the sustained PPT power limit in watts.</summary>
     public static bool SetPptLimit(uint watts)
     {
         try { lock (IoLock) return GetCpu().SetPPTLimit(watts) == SMU.Status.OK; }
         catch (Exception e) { Log.Write($"设置 PPT 异常: {e.Message}", "ERROR"); return false; }
     }
 
-    /// <summary>设置 TDC（VDD 持续电流上限，A）。</summary>
+    /// <summary>Sets the sustained TDC current limit in amperes.</summary>
     public static bool SetTdcLimit(uint amps)
     {
         try
@@ -367,7 +412,7 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"设置 TDC 异常: {e.Message}", "ERROR"); return false; }
     }
 
-    /// <summary>设置 EDC（VDD 峰值电流上限，A）。</summary>
+    /// <summary>Sets the peak EDC current limit in amperes.</summary>
     public static bool SetEdcLimit(uint amps)
     {
         try
@@ -382,7 +427,7 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"设置 EDC 异常: {e.Message}", "ERROR"); return false; }
     }
 
-    /// <summary>读取系统配置的 PPT 上限(W) 与 THM 上限(°C)；读不到返回 (0, 0)。</summary>
+    /// <summary>Reads configured PPT and thermal limits; returns (0, 0) on failure.</summary>
     public static (int pptLimit, int thmLimit) ReadSystemLimits()
     {
         try
@@ -396,7 +441,7 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"读取系统功率/温度上限失败: {e.Message}", "WARN"); return (0, 0); }
     }
 
-    /// <summary>读取硅片熔丝默认 PPT(W) 与 TDC(A)，用于初始化参数框；读不到返回 (0, 0)。</summary>
+    /// <summary>Reads fused PPT and TDC defaults for the editor; returns (0, 0) on failure.</summary>
     public static (int fusedPpt, int fusedTdc) ReadFusedLimits()
     {
         try
@@ -410,7 +455,7 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"读取熔丝默认限制失败: {e.Message}", "WARN"); return (0, 0); }
     }
 
-    /// <summary>读取当前 PBO 上限（PPT W / EDC A / TDC A）；Granite Ridge 优先使用实时 PM Table。</summary>
+    /// <summary>Reads current PPT, EDC, and TDC limits; Granite Ridge prefers live PM Table values.</summary>
     public static (int pptLimit, int edcLimit, int tdcLimit) ReadPboLimits()
     {
         try
@@ -424,10 +469,9 @@ internal static class RyzenSmu
                     && cpu.powerTable?.Table is { } tbl
                     && ProbePtLayout(tbl, coreCount) is { } lay && tbl.Length > lay.EdcLimitIdx)
                 {
+                    // 999 (1000 on ASUS) means the board set the limit unlocked; show it as is.
                     float ppt = tbl[lay.PptLimitIdx], edc = tbl[lay.EdcLimitIdx], tdc = tbl[lay.TdcLimitIdx];
-                    // 哨兵上限说明 PBO 已解锁，表里没有可写回参数框的数值，退回熔丝／系统上限。
-                    if (ppt < PtLimitSentinel && edc < PtLimitSentinel && tdc < PtLimitSentinel)
-                        return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
+                    return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
                 }
 
                 var sys = cpu.GetSystemPowerLimit();
@@ -440,7 +484,39 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return (0, 0, 0); }
     }
 
-    /// <summary>设置所有物理核心负压。</summary>
+    /// <summary>Reads PPT, EDC, and TDC limits live from the PM Table only, since the fallbacks in ReadPboLimits are not
+    /// what the CPU is running. Returns null when the table is unavailable; a non-positive item is null on its own.
+    /// The unlocked-PBO value (999, or 1000 on ASUS) is returned as is: it is the limit in effect, not a failed read.</summary>
+    public static (int? ppt, int? edc, int? tdc)? ReadLivePboLimits()
+    {
+        try
+        {
+            lock (IoLock)
+            {
+                var cpu = GetCpu();
+                var topo = cpu.info.topology;
+                int coreCount = (int)(topo.physicalCores > 0 ? topo.physicalCores : topo.cores);
+                if (cpu.RefreshPowerTable() != SMU.Status.OK
+                    || cpu.powerTable?.Table is not { } tbl
+                    || ProbePtLayout(tbl, coreCount) is not { } lay || tbl.Length <= lay.EdcLimitIdx)
+                    return null;
+                static int? Limit(float v) => v > 0 ? (int)Math.Round(v) : null;
+                return (Limit(tbl[lay.PptLimitIdx]), Limit(tbl[lay.EdcLimitIdx]), Limit(tbl[lay.TdcLimitIdx]));
+            }
+        }
+        catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return null; }
+    }
+
+    private const int CoReadbackPolls = 3;          // readbacks after each write
+    private const int CoMinWaitMs = 75;             // first wait between readbacks / rewrites
+    private const int CoMaxWaitMs = 1000;           // the wait doubles up to this while the SMU stays busy
+    private const int CoCoreTimeoutMs = 20_000;     // per core; a busy SMU clears long before this
+
+    /// <summary>
+    /// Writes each active core's CO and verifies its readback. A busy SMU mailbox makes writes or readbacks fail for
+    /// a while, so a core is rewritten with a growing wait until its readback matches; only a core that still does not
+    /// match after CoCoreTimeoutMs fails the call. Retries are not logged; the caller reports a failure.
+    /// </summary>
     public static bool SetOffsets(IReadOnlyList<int> offsets)
     {
         try
@@ -448,27 +524,50 @@ internal static class RyzenSmu
             lock (IoLock)
             {
                 var cpu = GetCpu();
+
+                bool WriteVerified(int i)
+                {
+                    var (ccd, core) = MapIndex(cpu, i);
+                    uint mask = cpu.MakeCoreMask(core, ccd, 0);
+                    long deadline = Environment.TickCount64 + CoCoreTimeoutMs;
+                    int wait = CoMinWaitMs;
+                    while (true)
+                    {
+                        cpu.SetPsmMarginSingleCore(mask, offsets[i]);   // the readback decides, not the return value
+                        for (int poll = 0; poll < CoReadbackPolls; poll++)
+                        {
+                            Thread.Sleep(wait);
+                            if (TryReadMargin(cpu, ccd, core) == offsets[i]) return true;
+                        }
+                        if (Environment.TickCount64 >= deadline) return false;
+                        wait = Math.Min(wait * 2, CoMaxWaitMs);
+                    }
+                }
+
+                for (int i = 0; i < offsets.Count; i++)
+                    if (!IsSlotDisabledNoLock(cpu, i) && !WriteVerified(i)) return false;
+
+                // Final pass: a core that drifted while the others were written is written again the same way
                 for (int i = 0; i < offsets.Count; i++)
                 {
                     if (IsSlotDisabledNoLock(cpu, i)) continue;
                     var (ccd, core) = MapIndex(cpu, i);
-                    if (!cpu.SetPsmMarginSingleCore(cpu.MakeCoreMask(core, ccd, 0), offsets[i]))
-                        Log.Write($"负压写入失败: 核心 {i} (CCD{ccd} Core{core}) 返回 false", "WARN");
+                    if (TryReadMargin(cpu, ccd, core) != offsets[i] && !WriteVerified(i)) return false;
                 }
                 return true;
             }
         }
         catch (Exception e)
         {
-            Log.Write($"设置负压异常: {e.Message}", "ERROR");
+            Log.Write($"设置 CO 异常: {e.Message}", "ERROR");
             return false;
         }
     }
 
-    // Vermeer 的 CCD 温度寄存器沿用 Zen2 地址；ZenStates 对 family 19H 统一用 Raphael 的 0x59B08，在 Vermeer 上读不出
+    // Vermeer uses the Zen2 CCD temperature address, not Raphael’s 0x59B08 used for family 19h.
     private const uint VermeerCcdTempReg = 0x00059954;
 
-    /// <summary>读取指定 CCD 的热点温度（°C）；读不到或超出量程返回 0。仅 Vermeer 走自己的寄存器。</summary>
+    /// <summary>Reads CCD hotspot temperature; returns zero when unavailable or out of range.</summary>
     public static float ReadCcdTemperature(uint ccd)
     {
         try
@@ -492,8 +591,8 @@ internal static class RyzenSmu
         }
     }
 
-    /// <summary>当前 CPU 的 SMU 是否有「设置全核 boost 上限」消息（0x70，Zen4 起才有）。
-    /// Zen3 上该消息 ID 为 0，而 SetBoostLimitAllCore 不校验 ID，会发出消息 0，必须在调用前拦下。</summary>
+    /// <summary>Checks for the all-core boost-limit message before calling SetBoostLimitAllCore.
+    /// Zen3 reports ID zero, which that command would otherwise send to the SMU.</summary>
     public static bool IsFMaxWriteSupported()
     {
         try
@@ -512,16 +611,16 @@ internal static class RyzenSmu
         }
     }
 
-    /// <summary>Curve Shaper 是否受支持（仅 Zen4/Zen5 桌面；线程撕裂者等无此命令）。</summary>
+    /// <summary>Checks whether this CPU exposes Curve Shaper commands.</summary>
     public static bool IsCurveShaperSupported()
     {
         try { lock (IoLock) return GetCpu().IsCurveShaperSupported(); }
         catch { return false; }
     }
 
-    /// <summary>读取 5 个频率档的 Curve Shaper margin，返回 [tier, col]（col: 0=低温 1=中温 2=高温）；失败返回全 0。</summary>
-    /// <param name="interfaceAvailable">读取接口是否可用。新 BIOS 下每档 raw arg 低位带 tier 编号(0..4)，
-    /// 故 raw 不会全 0；旧 BIOS 无读取接口时 raw 全 0（CS 电压已生效但读不回），此时返回 false。</param>
+    /// <summary>Reads the 5-by-3 Curve Shaper grid; returns zeros on failure.</summary>
+    /// <param name="interfaceAvailable">False when old BIOS readback returns all-zero raw arguments
+    /// despite applied CS values; newer BIOS responses include a tier ID.</param>
     public static int[,] ReadCurveShaper(out bool interfaceAvailable)
     {
         var grid = new int[5, 3];
@@ -535,9 +634,9 @@ internal static class RyzenSmu
                 interfaceAvailable = raw != null && raw.Any(x => x != 0);
                 for (int t = 0; raw != null && t < 5 && t < raw.Length; t++)
                 {
-                    grid[t, 0] = (sbyte)((raw[t] >> 8) & 0xFF);    // 低温
-                    grid[t, 1] = (sbyte)((raw[t] >> 16) & 0xFF);   // 中温
-                    grid[t, 2] = (sbyte)((raw[t] >> 24) & 0xFF);   // 高温
+                    grid[t, 0] = (sbyte)((raw[t] >> 8) & 0xFF);
+                    grid[t, 1] = (sbyte)((raw[t] >> 16) & 0xFF);
+                    grid[t, 2] = (sbyte)((raw[t] >> 24) & 0xFF);
                 }
             }
         }
@@ -548,7 +647,7 @@ internal static class RyzenSmu
         return grid;
     }
 
-    /// <summary>写入 5 个频率档的 Curve Shaper margin。grid[tier, col]（col: 0=低温 1=中温 2=高温）。</summary>
+    /// <summary>Writes the 5-by-3 Curve Shaper grid.</summary>
     public static bool SetCurveShaper(int[,] grid)
     {
         try
@@ -559,12 +658,12 @@ internal static class RyzenSmu
                 bool ok = true;
                 for (int t = 0; t < 5; t++)
                 {
-                    // 5 档连续下发，给 SMU 邮箱留出结算时间，降低响应寄存器读到过渡值的概率
+                    // Pause between tier writes so the SMU mailbox can settle before readback.
                     if (t > 0) Thread.Sleep(2);
                     var st = cpu.SetCurveShaperMargin(grid[t, 2], grid[t, 1], grid[t, 0], t);
                     if (st != SMU.Status.OK)
                     {
-                        // 邮箱瞬时抖动（返回值不属于任何已定义状态码），重试一次同样的写入再判定
+                        // Retry one undefined mailbox response before declaring the write failed.
                         Thread.Sleep(5);
                         st = cpu.SetCurveShaperMargin(grid[t, 2], grid[t, 1], grid[t, 0], t);
                     }

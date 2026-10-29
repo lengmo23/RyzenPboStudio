@@ -1,0 +1,126 @@
+using System.Runtime.InteropServices;
+
+namespace RyzenPboStudio;
+
+/// <summary>Uses DWM dark-title attribute 20, falling back to 19 on older Windows.</summary>
+internal static class DarkTitleBar
+{
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    public static void Apply(IntPtr hwnd)
+    {
+        try
+        {
+            int on = 1;
+            if (DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int)) != 0)
+                DwmSetWindowAttribute(hwnd, 19, ref on, sizeof(int));
+        }
+        catch { /* Dark title bar is optional. */ }
+    }
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(IntPtr hwnd, string? appName, string? idList);
+
+    /// <summary>Gives a scrollable control's native scrollbars the dark Explorer theme.</summary>
+    public static void ApplyScrollBars(IntPtr hwnd)
+    {
+        try { SetWindowTheme(hwnd, "DarkMode_Explorer", null); }
+        catch { /* Light scrollbars are acceptable. */ }
+    }
+}
+
+/// <summary>Dark message and confirmation dialog matching the main window.</summary>
+internal sealed class ThemedDialog : Form
+{
+    private ThemedDialog(string text, string title, string acceptText, string? cancelText)
+    {
+        Text = title;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        BackColor = Theme.Surface;
+        ForeColor = Theme.TextHi;
+        Font = new Font(Theme.FontFamily, 10F);
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+
+        var message = new Label
+        {
+            Text = text,
+            AutoSize = true,
+            MaximumSize = new Size(460, 0),
+            ForeColor = Theme.TextHi,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0, 0, 0, 16),
+        };
+        PillButton NewButton(string label, DialogResult result, bool primary) => new()
+        {
+            Text = label,
+            Size = new Size(96, 34),
+            Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
+            Hover = primary ? Theme.AccentHover : Theme.Border,
+            ForeColor = primary ? Theme.AccentText : Theme.TextHi,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold),
+            DialogResult = result,
+            Margin = new Padding(0),
+        };
+        var ok = NewButton(acceptText, cancelText == null ? DialogResult.OK : DialogResult.Yes, true);
+        var buttons = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.RightToLeft,
+            Anchor = AnchorStyles.Right,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        PillButton? cancel = null;
+        if (cancelText != null)
+        {
+            cancel = NewButton(cancelText, DialogResult.No, false);
+            cancel.Margin = new Padding(8, 0, 0, 0);
+            buttons.Controls.Add(cancel);
+        }
+        buttons.Controls.Add(ok);
+
+        var layout = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Theme.Surface,
+            Padding = new Padding(18, 16, 18, 14),
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.Controls.Add(message, 0, 0);
+        layout.Controls.Add(buttons, 0, 1);
+
+        Controls.Add(layout);
+        AcceptButton = ok;
+        CancelButton = cancel ?? ok;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        DarkTitleBar.Apply(Handle);
+    }
+
+    public static void Show(IWin32Window? owner, string text, string title)
+    {
+        using var dlg = new ThemedDialog(text, title, "确定", null);
+        if (owner == null) dlg.StartPosition = FormStartPosition.CenterScreen;
+        if (owner == null) dlg.ShowDialog(); else dlg.ShowDialog(owner);
+    }
+
+    public static bool Ask(IWin32Window owner, string text, string title, string acceptText, string cancelText)
+    {
+        using var dlg = new ThemedDialog(text, title, acceptText, cancelText);
+        return dlg.ShowDialog(owner) == DialogResult.Yes;
+    }
+}

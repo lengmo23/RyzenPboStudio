@@ -5,29 +5,80 @@ using System.Text.Json.Serialization;
 
 namespace RyzenPboStudio;
 
-/// <summary>用户可调参数。</summary>
+/// <summary>User-adjustable tuning settings.</summary>
 internal static class Config
 {
-    public const int DefaultDuration = 120; // 每轮测试时间（秒）
-    public const int DefaultVt3 = 20;       // VT3 测试轮数
-    public const int DefaultBkt = 10;       // BKT 测试轮数
-    public const int DefaultSvt = 10;       // SVT 测试轮数
-    public const int StepOnError = 2;       // 每次报错后负压增加的步长
+    public const int DefaultDuration = 120;
+    public const int DefaultVt3 = 20;
+    public const int DefaultBkt = 10;
+    public const int DefaultSvt = 10;
+    public const int DefaultStepOnError = 2;
+    public const int MaxStepOnError = 5;
+    // Auto-mode CO backoff per reported error; loaded from profiles\setting.json.
+    public static int StepOnError { get; set; } = DefaultStepOnError;
+    public const int CoMax = 30;      // highest CO the SMU accepts; backoff stops here.
 }
 
-/// <summary>日志：仅输出到界面（事件）；落盘需用户在界面点「保存日志」手动导出。</summary>
+/// <summary>Writes each session's log to a separate file and streams lines to the UI.</summary>
 internal static class Log
 {
+    private static readonly object FileLock = new();
+    private static readonly string RunFile = Path.Combine(Workspace.LogsDir,
+        $"run_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{Environment.ProcessId}.log");
+    private static StreamWriter? _writer;
+    private static bool _writeFailureReported;
+
     public static event Action<string>? OnLine;
 
     public static void Write(string msg, string level = "INFO")
     {
         string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {msg}";
-        OnLine?.Invoke(line);
+        lock (FileLock)
+        {
+            try
+            {
+                if (_writer == null)
+                {
+                    Directory.CreateDirectory(Workspace.LogsDir);
+                    _writer = new StreamWriter(
+                        new FileStream(RunFile, FileMode.CreateNew, FileAccess.Write, FileShare.Read),
+                        new UTF8Encoding(false)) { AutoFlush = true };
+                }
+                _writer.WriteLine(line);
+            }
+            catch (Exception e)
+            {
+                if (!_writeFailureReported)
+                {
+                    _writeFailureReported = true;
+                    OnLine?.Invoke($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [WARN] 保存运行日志失败: {e.Message}");
+                }
+            }
+            OnLine?.Invoke(line);
+        }
+    }
+
+    /// <summary>
+    /// Per-core CO as a title line plus one aligned line per core; fused-off slots are skipped. With
+    /// <paramref name="before"/> only the changed cores are listed as "Core n  a → b".
+    /// </summary>
+    public static void WriteCo(string title, IReadOnlyList<int> co, IReadOnlyList<int>? before = null, string level = "INFO")
+    {
+        var slots = Enumerable.Range(0, co.Count)
+            .Where(i => !RyzenSmu.IsSlotDisabled(i) && (before == null || i >= before.Count || before[i] != co[i]))
+            .ToList();
+        if (before != null && slots.Count == 0)
+        {
+            Write($"{title}无变化", level);
+            return;
+        }
+        Write(title, level);
+        foreach (int i in slots)
+            Write(before != null && i < before.Count ? $"Core {i,-3} {before[i],3} → {co[i],3}" : $"Core {i,-3} {co[i],3}", level);
     }
 }
 
-/// <summary>持久化的测试状态。JSON 字段名是跨版本互读的契约，改名会让旧状态文件失效。</summary>
+/// <summary>Persisted test state; JSON property names must remain compatible across versions.</summary>
 internal sealed class TestState
 {
     [JsonPropertyName("offsets")] public List<int> Offsets { get; set; } = new();
@@ -36,15 +87,37 @@ internal sealed class TestState
     [JsonPropertyName("seq_phase")] public string? SeqPhase { get; set; }
     [JsonPropertyName("duration_seconds")] public int? DurationSeconds { get; set; }
     [JsonPropertyName("iterations_map")] public Dictionary<string, int>? IterationsMap { get; set; }
-    // 测试范围：ALL=全部核心，CCD=单个 CCD，EACH=逐 CCD 依次，CUSTOM=自定义核心。
-    // EACH 时 ScopeCcd 记录断电前跑到第几个 CCD，恢复后从那个 CCD 继续。
+    // Sequential / combined plan of the interrupted run; older state files only have IterationsMap.
+    [JsonPropertyName("multi_test")] public MultiTestSettings? MultiTest { get; set; }
+    // Scope values: ALL, one CCD, each CCD in turn, or custom cores.
+    // EACH stores the current CCD so crash recovery can resume there.
     [JsonPropertyName("test_scope")] public string? TestScope { get; set; }
     [JsonPropertyName("scope_ccd")] public int? ScopeCcd { get; set; }
     [JsonPropertyName("scope_cores")] public List<int>? ScopeCores { get; set; }
     [JsonPropertyName("timestamp")] public double Timestamp { get; set; }
 }
 
-/// <summary>统一的子进程调用：捕获 stdout+stderr，带超时。</summary>
+/// <summary>One applied_pbo.ndjson record of the PBO limits in effect; null marks a value that is not known.</summary>
+internal sealed class PboSnapshot
+{
+    [JsonPropertyName("ts")] public string? Ts { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("fmax")] public uint? FMax { get; set; }
+    [JsonPropertyName("ppt")] public int? Ppt { get; set; }
+    [JsonPropertyName("edc")] public int? Edc { get; set; }
+    [JsonPropertyName("tdc")] public int? Tdc { get; set; }
+}
+
+/// <summary>One applied_cs.ndjson record of the Curve Shaper margins in effect, flattened as tier * 3 + column like
+/// cs_state.json; null margins mark values that could not be read back.</summary>
+internal sealed class CsSnapshot
+{
+    [JsonPropertyName("ts")] public string? Ts { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("margins")] public List<int>? Margins { get; set; }
+}
+
+/// <summary>Runs a child process with captured output and a timeout.</summary>
 internal static class ProcUtil
 {
     public static (int code, string output) Capture(
@@ -73,34 +146,34 @@ internal static class ProcUtil
         {
             try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
         }
-        p.WaitForExit(); // 确保异步读取回调全部冲刷
+        p.WaitForExit();
 
         return (p.HasExited ? p.ExitCode : -1, sb.ToString());
     }
 }
 
-/// <summary>工作目录、路径、状态文件、关机标记等。</summary>
+/// <summary>Application paths and runtime state files.</summary>
 internal static class Workspace
 {
-    /// <summary>EXE 所在目录（外部工具基于这里查找）。运行时产物见 LogsDir / ProfilesDir。</summary>
+    /// <summary>Executable directory used to locate external tools.</summary>
     public static readonly string BaseDir =
         AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
 
-    /// <summary>日志目录：y-cruncher 输出、手动导出的运行日志，均按日期时间命名。</summary>
+    /// <summary>Directory for session logs and y-cruncher output.</summary>
     public static string LogsDir => Path.Combine(BaseDir, "logs");
 
-    /// <summary>配置与状态目录：负压历史、恢复状态、CO/CS 配置、校准数据。</summary>
+    /// <summary>Directory for CO history, recovery state, CS settings, and calibration.</summary>
     public static string ProfilesDir => Path.Combine(BaseDir, "profiles");
 
-    public static string StateFile => Path.Combine(ProfilesDir, "undervolt_state.json");
+    public static string StateFile => Path.Combine(ProfilesDir, "test_state.json");
     public static string InProgressFlag => Path.Combine(ProfilesDir, "test_in_progress");
     public static string FinalOffsets => Path.Combine(ProfilesDir, "final_offsets.txt");
 
-    /// <summary>新建一条带时间戳的日志路径：logs\{prefix}_yyyyMMdd_HHmmss.{ext}。</summary>
+    /// <summary>Creates a timestamped path under logs.</summary>
     public static string NewLogPath(string prefix, string ext) =>
         Path.Combine(LogsDir, $"{prefix}_{DateTime.Now:yyyyMMdd_HHmmss}.{ext}");
 
-    /// <summary>旧版本把运行时文件直接写在 EXE 同目录。</summary>
+    /// <summary>Legacy runtime files were stored beside the executable.</summary>
     private static readonly string[] LegacyProfileFiles =
     {
         "undervolt_state.json", "test_in_progress", "final_offsets.txt",
@@ -110,22 +183,23 @@ internal static class Workspace
     private static readonly string[] LegacyLogFiles = { "y-cruncher.log", "undervolt_log.txt" };
 
     /// <summary>
-    /// 建立 logs\ 与 profiles\ 目录，并把旧版本遗留在 EXE 同目录的运行时文件迁移进来。
-    /// 必须在读取脏标记与负压历史之前调用：否则从旧版本升级后会读不到上次崩溃的恢复点，
-    /// 断电恢复会静默失效。
+    /// Creates runtime directories and migrates files from the old executable directory.
+    /// Call before reading the crash marker or CO history so upgrades preserve recovery.
     /// </summary>
     public static void EnsureLayout()
     {
-        try { Directory.CreateDirectory(LogsDir); } catch { /* 写入时会再报错 */ }
-        try { Directory.CreateDirectory(ProfilesDir); } catch { /* 同上 */ }
+        try { Directory.CreateDirectory(LogsDir); } catch { /* Report directory errors when writing. */ }
+        try { Directory.CreateDirectory(ProfilesDir); } catch { /* Report directory errors when writing. */ }
 
         foreach (string name in LegacyProfileFiles)
             MoveLegacy(Path.Combine(BaseDir, name), Path.Combine(ProfilesDir, name));
         foreach (string name in LegacyLogFiles)
             MoveLegacy(Path.Combine(BaseDir, name), Path.Combine(LogsDir, name));
+        // The recovery state was named undervolt_state.json before 3.0.1.
+        MoveLegacy(Path.Combine(ProfilesDir, "undervolt_state.json"), StateFile);
     }
 
-    /// <summary>迁移单个旧文件。目标已存在说明新位置的数据更新，保留新的、不覆盖。</summary>
+    /// <summary>Migrates a legacy file without replacing newer data at the destination.</summary>
     private static void MoveLegacy(string from, string to)
     {
         try
@@ -135,7 +209,7 @@ internal static class Workspace
         }
         catch
         {
-            // 迁移失败不阻断启动；旧文件留在原处，最多是这一次读不到历史
+            // Keep the legacy file if migration fails; startup can continue.
         }
     }
 
@@ -144,7 +218,7 @@ internal static class Workspace
         try { if (File.Exists(StateFile)) File.Delete(StateFile); } catch { }
     }
 
-    /// <summary>标记「测试进行中」（脏标记）。正常结束/退出时清除；下次启动若仍在 = 上次异常中断。</summary>
+    /// <summary>Marks a test active; an uncleared marker indicates an interrupted run.</summary>
     public static void MarkInProgress(string info)
     {
         try { DurableIO.WriteAllText(InProgressFlag, info); } catch { }
@@ -162,7 +236,7 @@ internal static class Workspace
         try
         {
             string json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
-            DurableIO.WriteAllText(StateFile, json);   // 强制落盘 + 原子替换
+            DurableIO.WriteAllText(StateFile, json); // Flush and replace atomically.
         }
         catch (Exception e)
         {
@@ -188,7 +262,7 @@ internal static class Workspace
         return null;
     }
 
-    /// <summary>查询事件日志最近是否有内核电源事件(41)/Bug Check(1001)，仅用于丰富恢复日志，不作为判定依据。</summary>
+    /// <summary>Reads recent power or bug-check events for recovery logs, not crash detection.</summary>
     public static bool RecentKernelPowerEvent()
     {
         try
@@ -208,13 +282,13 @@ internal static class Workspace
         }
         catch
         {
-            // 查询失败按无事件处理
+            // Treat event-log query failure as no event.
         }
         return false;
     }
 }
 
-/// <summary>带强制落盘的写入：先写临时文件并 Flush 到物理磁盘，再原子替换；追加同样落盘。</summary>
+/// <summary>Flushes writes to disk before atomic replacement or append.</summary>
 internal static class DurableIO
 {
     public static void WriteAllText(string path, string text)
@@ -226,9 +300,9 @@ internal static class DurableIO
         {
             w.Write(text);
             w.Flush();
-            fs.Flush(flushToDisk: true);   // 真正写到盘，不只是系统缓存
+            fs.Flush(flushToDisk: true); // Flush through the OS cache to disk.
         }
-        File.Move(tmp, path, overwrite: true); // 同卷原子替换，断电不会留下半截文件
+        File.Move(tmp, path, overwrite: true); // Same-volume replacement prevents a partial state file.
     }
 
     public static void AppendLine(string path, string line)
@@ -241,7 +315,7 @@ internal static class DurableIO
     }
 }
 
-/// <summary>负压应用日志的一条记录。</summary>
+/// <summary>One persisted CO application record.</summary>
 internal sealed class AppliedEntry
 {
     [JsonPropertyName("ts")] public string Ts { get; set; } = "";
@@ -252,18 +326,17 @@ internal sealed class AppliedEntry
 }
 
 /// <summary>
-/// 负压应用历史日志（NDJSON，每行一组）。每次下发负压前先在这里强制落盘，
-/// 因此即便随后立刻死机断电，崩溃前的负压也已在磁盘上。追加式天然抗崩溃：
-/// 断电最多损坏最后一行，读取时自动跳过。
+/// Append and flush each CO group before writing the CPU.
+/// A crash can damage only the final NDJSON line, which readers skip.
 /// </summary>
 internal static class Journal
 {
     public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_offsets.ndjson");
 
-    /// <summary>用户在测试未运行时手动下发的负压：接管上次中断的负压，恢复时不再回退一档。</summary>
+    /// <summary>Manual CO applied while idle takes ownership and skips recovery backoff.</summary>
     public const string ManualTakeover = "manual-takeover";
 
-    /// <summary>用户在测试运行中手动下发的负压：其后若死机，仍按正常规则回退。</summary>
+    /// <summary>Manual CO applied during a test still receives crash backoff.</summary>
     public const string ManualInTest = "manual-in-test";
 
     public static void Record(IReadOnlyList<int> offsets, string mode, string? phase, string reason)
@@ -282,11 +355,11 @@ internal static class Journal
         }
         catch (Exception e)
         {
-            Log.Write($"写入负压日志失败: {e.Message}", "WARN");
+            Log.Write($"写入 CO 日志失败: {e.Message}", "WARN");
         }
     }
 
-    /// <summary>读取最后一条有效记录（跳过断电导致损坏的尾行）。</summary>
+    /// <summary>Reads the last valid record, skipping a damaged tail line.</summary>
     public static AppliedEntry? ReadLastEntry()
     {
         try
@@ -304,13 +377,13 @@ internal static class Journal
                 }
                 catch
                 {
-                    // 损坏行，继续往前找
+                    // Skip a damaged record and continue backward.
                 }
             }
         }
         catch
         {
-            // 读失败按无记录处理
+            // Treat a read failure as no history.
         }
         return null;
     }
@@ -318,12 +391,113 @@ internal static class Journal
     public static List<int>? ReadLastOffsets() => ReadLastEntry()?.Offsets;
 }
 
-/// <summary>下发负压的唯一入口：先落盘日志，再写入 CPU（persist-before-apply）。</summary>
+/// <summary>Append-only ndjson history shared by the PBO and CS journals.</summary>
+internal static class NdjsonJournal
+{
+    public static string Now() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+    /// <summary>Reads the last valid record that matches, skipping a damaged tail line.</summary>
+    public static T? ReadLast<T>(string path, Func<T, bool> match) where T : class
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            string[] lines = File.ReadAllLines(path);
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                string line = lines[i].Trim();
+                if (line.Length == 0) continue;
+                try
+                {
+                    if (JsonSerializer.Deserialize<T>(line) is { } rec && match(rec)) return rec;
+                }
+                catch
+                {
+                    // Skip a damaged record and continue backward.
+                }
+            }
+        }
+        catch
+        {
+            // Treat a read failure as no history.
+        }
+        return null;
+    }
+}
+
+/// <summary>
+/// PBO limit history: a record at each test start and after each PBO Apply, including mid-test changes.
+/// Crash recovery restores the last record and boot-apply the last PBO Apply; CO stays in applied_offsets.ndjson,
+/// whose every line needs offsets.
+/// </summary>
+internal static class PboJournal
+{
+    public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_pbo.ndjson");
+
+    public const string ManualApply = "manual-apply";
+    public const string TestStart = "test-start";
+
+    public static void Record(PboSnapshot snap, string reason)
+    {
+        try
+        {
+            snap.Ts = NdjsonJournal.Now();
+            snap.Reason = reason;
+            DurableIO.AppendLine(FilePath, JsonSerializer.Serialize(snap));
+        }
+        catch (Exception e)
+        {
+            Log.Write($"写入 PBO 日志失败: {e.Message}", "WARN");
+        }
+    }
+
+    /// <summary>Reads the last valid record, optionally only of the given reason.</summary>
+    public static PboSnapshot? ReadLast(string? reason = null) =>
+        NdjsonJournal.ReadLast<PboSnapshot>(FilePath, s => reason == null || s.Reason == reason);
+}
+
+/// <summary>
+/// Curve Shaper history in applied_cs.ndjson: a record at each test start and after each CS Apply, including
+/// mid-test changes. Crash recovery restores the last record.
+/// </summary>
+internal static class CsJournal
+{
+    public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_cs.ndjson");
+
+    public const string ManualApply = PboJournal.ManualApply;
+    public const string TestStart = PboJournal.TestStart;
+
+    public static void Record(CsSnapshot snap, string reason)
+    {
+        try
+        {
+            snap.Ts = NdjsonJournal.Now();
+            snap.Reason = reason;
+            DurableIO.AppendLine(FilePath, JsonSerializer.Serialize(snap));
+        }
+        catch (Exception e)
+        {
+            Log.Write($"写入 CS 日志失败: {e.Message}", "WARN");
+        }
+    }
+
+    public static CsSnapshot? ReadLast() => NdjsonJournal.ReadLast<CsSnapshot>(FilePath, _ => true);
+}
+
+/// <summary>Persists CO history before applying offsets to the CPU.</summary>
 internal static class Tuning
 {
     public static bool Apply(IReadOnlyList<int> offsets, string mode, string? phase, string reason)
     {
-        Journal.Record(offsets, mode, phase, reason); // ① 先强制落盘
-        return RyzenSmu.SetOffsets(offsets);          // ② 再下发到 CPU
+        Journal.Record(offsets, mode, phase, reason); // Persist offsets first.
+        bool ok = RyzenSmu.SetOffsets(offsets); // Then apply and verify each core.
+        if (!ok)
+        {
+            // A failed write may leave some cores changed; preserve the observed state for crash recovery.
+            var observed = RyzenSmu.ReadOffsets(offsets.Count);
+            Journal.Record(observed, mode, phase, "write-verification-failed");
+            Log.WriteCo("CO 写入失败，当前读数（读取失败记为 0）：", observed, level: "WARN");
+        }
+        return ok;
     }
 }
