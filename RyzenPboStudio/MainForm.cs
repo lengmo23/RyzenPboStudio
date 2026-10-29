@@ -1567,9 +1567,9 @@ internal sealed partial class MainForm : Form
         card.Padding = new Padding(14, 6, 14, 6);
 
         ConfigNumBox(_fmaxBox, 0, 7000, 25, 74);
-        ConfigNumBox(_pptBox, 30, 999, 5, 62);
-        ConfigNumBox(_edcBox, 10, 999, 5, 62);
-        ConfigNumBox(_tdcBox, 10, 999, 5, 62);
+        ConfigNumBox(_pptBox, 30, 1000, 5, 62);
+        ConfigNumBox(_edcBox, 10, 1000, 5, 62);
+        ConfigNumBox(_tdcBox, 10, 1000, 5, 62);
         _pptBox.Value = 142; // Replaced with live CPU limits during initialization.
         _edcBox.Value = 180;
         _tdcBox.Value = 160;
@@ -2291,7 +2291,7 @@ internal sealed partial class MainForm : Form
     /// Writes back only the recorded PBO limits that differ from what the CPU runs now (after a crash, or at boot the
     /// BIOS values). Writing FMax disturbs some power-plan states and board-level core frequency limits (e.g. ASUS), so
     /// matching values are left alone, and a value that cannot be read now is not written blindly. The unlocked-PBO
-    /// sentinel 999 is compared like any other value. Written values are shown in the PBO editor. Returns false when a
+    /// value (999, or 1000 on ASUS) is compared like any other. Written values are shown in the PBO editor. Returns false when a
     /// write fails. context prefixes the log lines.
     /// </summary>
     private bool RestorePbo(PboSnapshot saved, string context)

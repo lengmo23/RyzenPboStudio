@@ -469,7 +469,7 @@ internal static class RyzenSmu
                     && cpu.powerTable?.Table is { } tbl
                     && ProbePtLayout(tbl, coreCount) is { } lay && tbl.Length > lay.EdcLimitIdx)
                 {
-                    // 999 means the board set the limit unlocked; show it as is.
+                    // 999 (1000 on ASUS) means the board set the limit unlocked; show it as is.
                     float ppt = tbl[lay.PptLimitIdx], edc = tbl[lay.EdcLimitIdx], tdc = tbl[lay.TdcLimitIdx];
                     return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
                 }
@@ -486,7 +486,7 @@ internal static class RyzenSmu
 
     /// <summary>Reads PPT, EDC, and TDC limits live from the PM Table only, since the fallbacks in ReadPboLimits are not
     /// what the CPU is running. Returns null when the table is unavailable; a non-positive item is null on its own.
-    /// The unlocked-PBO sentinel 999 is returned as is: it is the limit in effect, not a failed read.</summary>
+    /// The unlocked-PBO value (999, or 1000 on ASUS) is returned as is: it is the limit in effect, not a failed read.</summary>
     public static (int? ppt, int? edc, int? tdc)? ReadLivePboLimits()
     {
         try
