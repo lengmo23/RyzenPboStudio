@@ -710,15 +710,16 @@ internal static class VoltageAlign
 
         if (frequencyNotes != null)
             foreach (string note in frequencyNotes) sb.Append($"\n{note}");
-        sb.Append("\n最终 CO：");
-        foreach (int s in Enumerable.Range(0, scb.SlotCount).Where(scb.IsUsable)) sb.Append($"\nCore {s,-3} {offsets[s],3}");
+        // Per-core final CO is a table column, so the summary leaves it out; the log keeps it.
         if (clamped.Count > 0) sb.Append($"\n达到 CO 下限：Core {string.Join("、", clamped.OrderBy(s => s))}");
         if (stopped.Count > 0) sb.Append($"\n计算出错已停止下调：Core {string.Join("、", stopped.OrderBy(s => s))}");
         if (unconverged.Count > 0) sb.Append($"\n未收敛：Core {string.Join("、", unconverged)}");
         sb.Append("\n结果已填入 CO 编辑器（未保存），请先通过压力测试再保存。");
 
         string text = sb.ToString();
-        foreach (string line in text.Split('\n')) Log.Write(line, cancelled || unconverged.Count > 0 ? "WARN" : "INFO");
+        string level = cancelled || unconverged.Count > 0 ? "WARN" : "INFO";
+        foreach (string line in text.Split('\n')) Log.Write(line, level);
+        Log.WriteCo("电压对齐最终 CO：", offsets, level: level);
         win.SetSummary(text);
         return offsets;
     }

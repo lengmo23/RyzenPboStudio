@@ -1,13 +1,16 @@
 ﻿<#
 .SYNOPSIS
-    Package bin\ into full and update release archives.
+    Package bin\ into lite, net8contained and update release archives.
 
 .DESCRIPTION
-    full   includes y-cruncher for first-time installation.
-    update contains only the application and dependencies for in-app updates.
-    Updater prefers assets whose names contain "update".
+    lite          includes y-cruncher for first-time installation; needs .NET 8 installed.
+    net8contained is lite with the .NET 8 runtime bundled (self-contained), for machines without .NET 8.
+                  It is published from the same source into a temporary folder, and is also the in-app
+                  update package of such installs.
+    update        contains only the application and dependencies for in-app updates of the lite package.
+    Updater prefers assets whose names contain "update"; a self-contained install takes "net8contained".
 
-    Both archives use the same fixed top-level folder. Updater.ExtractAndVerify
+    All archives use the same fixed top-level folder. Updater.ExtractAndVerify
     locates it by the main executable. README and notices come from the repository
     root rather than the ZenStates-Core build output.
 
@@ -51,14 +54,14 @@ $stageRoot = Join-Path ([IO.Path]::GetTempPath()) "rps-pack-$(Get-Random)"
 $folderName = 'AMDRyzenPBOStudio'
 
 function New-Package {
-    param([string]$Kind, [bool]$IncludeTools)
+    param([string]$Kind, [bool]$IncludeTools, [string]$AppDir = $bin)
 
     $stage = Join-Path $stageRoot "$Kind\$folderName"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-    # Copy application files; tools are included only in the full archive.
-    Get-ChildItem -LiteralPath $bin -File | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $stage -Force
+    # Copy application files; tools always come from the publish folder and only into first-install archives.
+    Get-ChildItem -LiteralPath $AppDir | Where-Object { $_.Name -notin @('logs', 'profiles', 'tools') } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $stage -Recurse -Force
     }
     if ($IncludeTools) {
         $tools = Join-Path $bin 'tools'
@@ -66,7 +69,7 @@ function New-Package {
             Copy-Item -LiteralPath $tools -Destination $stage -Recurse -Force
         }
         else {
-            Write-Warning "bin\tools 不存在，full 包将不含 y-cruncher。"
+            Write-Warning "bin\tools 不存在，$Kind 包将不含 y-cruncher。"
         }
     }
 
@@ -75,7 +78,7 @@ function New-Package {
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README_zh_cn.md') -Destination (Join-Path $stage 'README_zh_cn.md') -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Force
 
-    # Keep "update" and "full" in asset names for Updater.CheckAsync selection.
+    # Updater.CheckAsync selects assets by "update", then "lite" / "full" (older releases), or "net8contained".
     $zip = Join-Path $out "AMD-Ryzen-PBO-Studio-v$version-$Kind.zip"
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
@@ -89,8 +92,21 @@ function New-Package {
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 try {
-    $full = New-Package -Kind 'full'   -IncludeTools $true
+    # Self-contained build of the same source, checked against the publish folder before any archive is written.
+    $net8Dir = Join-Path $stageRoot 'publish-net8'
+    $proj = Join-Path $repoRoot 'RyzenPboStudio\RyzenPboStudio.csproj'
+    Write-Host "发布含 .NET 8 的版本..."
+    dotnet publish $proj -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o $net8Dir --nologo -v q
+    if ($LASTEXITCODE -ne 0) { throw "含 .NET 8 的版本发布失败（dotnet publish 返回 $LASTEXITCODE）。" }
+    $net8Version = (Get-Item -LiteralPath (Join-Path $net8Dir $exeName)).VersionInfo.ProductVersion
+    if ($net8Version -notmatch "^$([regex]::Escape($version))(\+|$)") {
+        throw "含 .NET 8 的版本号 $net8Version 与 $BinDir 的 $version 不一致，请先重新发布 $BinDir。"
+    }
+
+    $lite = New-Package -Kind 'lite'   -IncludeTools $true
     $upd  = New-Package -Kind 'update' -IncludeTools $false
+    # "update", "lite" and "full" must stay out of this name: installs without bundled .NET select by them.
+    $net8 = New-Package -Kind 'net8contained' -IncludeTools $true -AppDir $net8Dir
 }
 finally {
     if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }

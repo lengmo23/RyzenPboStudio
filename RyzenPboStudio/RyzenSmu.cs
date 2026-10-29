@@ -252,9 +252,6 @@ internal static class RyzenSmu
     public static int? LastTdcLimit { get; private set; }
     public static int? LastEdcLimit { get; private set; }
 
-    // An unlocked PBO reports limit sentinel 999, which must not populate writable controls.
-    private const float PtLimitSentinel = 999f;
-
     /// <summary>PM Table offsets vary by generation and model.
     /// Probe EDC, per-core segments, and VDDCR_CPU telemetry at runtime.</summary>
     internal sealed class PtLayout
@@ -472,10 +469,9 @@ internal static class RyzenSmu
                     && cpu.powerTable?.Table is { } tbl
                     && ProbePtLayout(tbl, coreCount) is { } lay && tbl.Length > lay.EdcLimitIdx)
                 {
+                    // 999 means the board set the limit unlocked; show it as is.
                     float ppt = tbl[lay.PptLimitIdx], edc = tbl[lay.EdcLimitIdx], tdc = tbl[lay.TdcLimitIdx];
-                    // An unlocked PBO sentinel is not a writable limit; use fused or configured limits.
-                    if (ppt < PtLimitSentinel && edc < PtLimitSentinel && tdc < PtLimitSentinel)
-                        return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
+                    return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
                 }
 
                 var sys = cpu.GetSystemPowerLimit();
@@ -488,9 +484,10 @@ internal static class RyzenSmu
         catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return (0, 0, 0); }
     }
 
-    /// <summary>Reads PPT, EDC, and TDC limits live from the PM Table only. Returns null when the table is unavailable
-    /// or reports the unlocked-PBO sentinel, since the fallbacks in ReadPboLimits are not what the CPU is running.</summary>
-    public static (int ppt, int edc, int tdc)? ReadLivePboLimits()
+    /// <summary>Reads PPT, EDC, and TDC limits live from the PM Table only, since the fallbacks in ReadPboLimits are not
+    /// what the CPU is running. Returns null when the table is unavailable; a non-positive item is null on its own.
+    /// The unlocked-PBO sentinel 999 is returned as is: it is the limit in effect, not a failed read.</summary>
+    public static (int? ppt, int? edc, int? tdc)? ReadLivePboLimits()
     {
         try
         {
@@ -503,10 +500,8 @@ internal static class RyzenSmu
                     || cpu.powerTable?.Table is not { } tbl
                     || ProbePtLayout(tbl, coreCount) is not { } lay || tbl.Length <= lay.EdcLimitIdx)
                     return null;
-                float ppt = tbl[lay.PptLimitIdx], edc = tbl[lay.EdcLimitIdx], tdc = tbl[lay.TdcLimitIdx];
-                if (ppt <= 0 || edc <= 0 || tdc <= 0) return null;
-                if (ppt >= PtLimitSentinel || edc >= PtLimitSentinel || tdc >= PtLimitSentinel) return null;
-                return ((int)Math.Round(ppt), (int)Math.Round(edc), (int)Math.Round(tdc));
+                static int? Limit(float v) => v > 0 ? (int)Math.Round(v) : null;
+                return (Limit(tbl[lay.PptLimitIdx]), Limit(tbl[lay.EdcLimitIdx]), Limit(tbl[lay.TdcLimitIdx]));
             }
         }
         catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return null; }

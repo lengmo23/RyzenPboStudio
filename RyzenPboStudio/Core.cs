@@ -108,6 +108,15 @@ internal sealed class PboSnapshot
     [JsonPropertyName("tdc")] public int? Tdc { get; set; }
 }
 
+/// <summary>One applied_cs.ndjson record of the Curve Shaper margins in effect, flattened as tier * 3 + column like
+/// cs_state.json; null margins mark values that could not be read back.</summary>
+internal sealed class CsSnapshot
+{
+    [JsonPropertyName("ts")] public string? Ts { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("margins")] public List<int>? Margins { get; set; }
+}
+
 /// <summary>Runs a child process with captured output and a timeout.</summary>
 internal static class ProcUtil
 {
@@ -382,42 +391,25 @@ internal static class Journal
     public static List<int>? ReadLastOffsets() => ReadLastEntry()?.Offsets;
 }
 
-/// <summary>
-/// PBO limit history: a record at each test start and after each PBO Apply, including mid-test changes.
-/// Crash recovery restores the last record; CO stays in applied_offsets.ndjson, whose every line needs offsets.
-/// </summary>
-internal static class PboJournal
+/// <summary>Append-only ndjson history shared by the PBO and CS journals.</summary>
+internal static class NdjsonJournal
 {
-    public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_pbo.ndjson");
+    public static string Now() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
 
-    public static void Record(PboSnapshot snap, string reason)
+    /// <summary>Reads the last valid record that matches, skipping a damaged tail line.</summary>
+    public static T? ReadLast<T>(string path, Func<T, bool> match) where T : class
     {
         try
         {
-            snap.Ts = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-            snap.Reason = reason;
-            DurableIO.AppendLine(FilePath, JsonSerializer.Serialize(snap));
-        }
-        catch (Exception e)
-        {
-            Log.Write($"写入 PBO 日志失败: {e.Message}", "WARN");
-        }
-    }
-
-    /// <summary>Reads the last valid record, skipping a damaged tail line.</summary>
-    public static PboSnapshot? ReadLast()
-    {
-        try
-        {
-            if (!File.Exists(FilePath)) return null;
-            string[] lines = File.ReadAllLines(FilePath);
+            if (!File.Exists(path)) return null;
+            string[] lines = File.ReadAllLines(path);
             for (int i = lines.Length - 1; i >= 0; i--)
             {
                 string line = lines[i].Trim();
                 if (line.Length == 0) continue;
                 try
                 {
-                    if (JsonSerializer.Deserialize<PboSnapshot>(line) is { } snap) return snap;
+                    if (JsonSerializer.Deserialize<T>(line) is { } rec && match(rec)) return rec;
                 }
                 catch
                 {
@@ -431,6 +423,65 @@ internal static class PboJournal
         }
         return null;
     }
+}
+
+/// <summary>
+/// PBO limit history: a record at each test start and after each PBO Apply, including mid-test changes.
+/// Crash recovery restores the last record and boot-apply the last PBO Apply; CO stays in applied_offsets.ndjson,
+/// whose every line needs offsets.
+/// </summary>
+internal static class PboJournal
+{
+    public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_pbo.ndjson");
+
+    public const string ManualApply = "manual-apply";
+    public const string TestStart = "test-start";
+
+    public static void Record(PboSnapshot snap, string reason)
+    {
+        try
+        {
+            snap.Ts = NdjsonJournal.Now();
+            snap.Reason = reason;
+            DurableIO.AppendLine(FilePath, JsonSerializer.Serialize(snap));
+        }
+        catch (Exception e)
+        {
+            Log.Write($"写入 PBO 日志失败: {e.Message}", "WARN");
+        }
+    }
+
+    /// <summary>Reads the last valid record, optionally only of the given reason.</summary>
+    public static PboSnapshot? ReadLast(string? reason = null) =>
+        NdjsonJournal.ReadLast<PboSnapshot>(FilePath, s => reason == null || s.Reason == reason);
+}
+
+/// <summary>
+/// Curve Shaper history in applied_cs.ndjson: a record at each test start and after each CS Apply, including
+/// mid-test changes. Crash recovery restores the last record.
+/// </summary>
+internal static class CsJournal
+{
+    public static string FilePath => Path.Combine(Workspace.ProfilesDir, "applied_cs.ndjson");
+
+    public const string ManualApply = PboJournal.ManualApply;
+    public const string TestStart = PboJournal.TestStart;
+
+    public static void Record(CsSnapshot snap, string reason)
+    {
+        try
+        {
+            snap.Ts = NdjsonJournal.Now();
+            snap.Reason = reason;
+            DurableIO.AppendLine(FilePath, JsonSerializer.Serialize(snap));
+        }
+        catch (Exception e)
+        {
+            Log.Write($"写入 CS 日志失败: {e.Message}", "WARN");
+        }
+    }
+
+    public static CsSnapshot? ReadLast() => NdjsonJournal.ReadLast<CsSnapshot>(FilePath, _ => true);
 }
 
 /// <summary>Persists CO history before applying offsets to the CPU.</summary>

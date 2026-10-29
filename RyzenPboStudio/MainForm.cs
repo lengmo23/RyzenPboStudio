@@ -461,6 +461,7 @@ internal sealed partial class MainForm : Form
         _modeCombo.ForeColor = Theme.TextHi;
         _modeCombo.Font = new Font(Theme.FontFamily, 10F);
         _modeCombo.Margin = new Padding(0);
+        DarkCombo.Apply(_modeCombo);
         foreach (var opt in ModeOptions) _modeCombo.Items.Add(opt.display);
         _modeCombo.SelectedIndexChanged += (_, _) =>
         {
@@ -1052,9 +1053,10 @@ internal sealed partial class MainForm : Form
         try
         {
             UpdateInfo? info;
+            IReadOnlyList<ReleaseNote>? currentNotes;
             try
             {
-                info = await Updater.CheckAsync();
+                (info, currentNotes) = await Updater.CheckAsync();
             }
             catch (Exception e)
             {
@@ -1070,7 +1072,10 @@ internal sealed partial class MainForm : Form
                 Updater.ClearSkip();
                 RefreshUpdateTip();
                 if (manual)
-                    ThemedDialog.Show(Form.ActiveForm ?? this, $"当前已是最新版本 v{Updater.CurrentVersion}。", "检查更新");
+                {
+                    using var latest = BuildUpToDateDialog(currentNotes);
+                    latest.ShowDialog(Form.ActiveForm ?? this);
+                }
                 return;
             }
 
@@ -1100,13 +1105,10 @@ internal sealed partial class MainForm : Form
     }
 
     private const int MaxNotesHeight = 260; // Longer release notes scroll.
+    private const int NotesDialogWidth = 480;
 
-    /// <summary>Update prompt: version headline and download size, one bold line per change with a dim
-    /// explanation, then a restart note. Returns DialogResult.Yes to update.</summary>
-    private static Form BuildUpdatePrompt(UpdateInfo info)
+    private static TableLayoutPanel NewNotesRoot()
     {
-        const int width = 480;
-        var dlg = NewDialog("发现新版本");
         var root = new TableLayoutPanel
         {
             AutoSize = true,
@@ -1115,53 +1117,97 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Surface,
             Padding = new Padding(22, 18, 22, 16),
         };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, NotesDialogWidth));
+        return root;
+    }
 
-        Label Para(string text, float size, Color color, int maxWidth, bool bold = false, Padding? margin = null)
+    private static Label NotesPara(string text, float size, Color color, int maxWidth, bool bold = false, Padding? margin = null)
+    {
+        var m = margin ?? new Padding(0);
+        return new Label
         {
-            var m = margin ?? new Padding(0);
-            return new Label
-            {
-                Text = text,
-                AutoSize = true,
-                MaximumSize = new Size(maxWidth - m.Left, 0),   // indented lines wrap inside the column
-                ForeColor = color,
-                BackColor = Theme.Surface,
-                Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
-                Margin = m,
-            };
-        }
+            Text = text,
+            AutoSize = true,
+            MaximumSize = new Size(maxWidth - m.Left, 0),   // indented lines wrap inside the column
+            ForeColor = color,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+            Margin = m,
+        };
+    }
 
-        root.Controls.Add(Para($"{info.Tag} 已发布", 16F, Theme.Accent, width, bold: true));
-        root.Controls.Add(Para($"当前版本 v{Updater.CurrentVersion} · 更新包约 {info.Size / 1024.0 / 1024.0:F1} MB",
-            9F, Theme.TextLo, width, margin: new Padding(0, 4, 0, 0)));
-        root.Controls.Add(new Panel { Size = new Size(width, 1), BackColor = Theme.Border, Margin = new Padding(0, 14, 0, 12) });
-
-        // Notes scroll inside a fixed-height area; their width leaves room for the scrollbar.
-        int noteWidth = width - SystemInformation.VerticalScrollBarWidth - 4;
+    /// <summary>Release notes, one bold line per change with a dim explanation, scrolling inside a fixed-height area.</summary>
+    private static Control BuildNotesScroller(IReadOnlyList<ReleaseNote> releaseNotes)
+    {
+        // The notes' width leaves room for the scrollbar.
+        int noteWidth = NotesDialogWidth - SystemInformation.VerticalScrollBarWidth - 4;
         var notes = Flow(FlowDirection.TopDown);
-        foreach (var note in info.Notes)
+        foreach (var note in releaseNotes)
         {
             if (note.Title.Length > 0)
-                notes.Controls.Add(Para("●  " + note.Title, 10.5F, Theme.TextHi, noteWidth, bold: true, margin: new Padding(0, 0, 0, 2)));
+                notes.Controls.Add(NotesPara("●  " + note.Title, 10.5F, Theme.TextHi, noteWidth, bold: true, margin: new Padding(0, 0, 0, 2)));
             if (note.Detail.Length > 0)
-                notes.Controls.Add(Para(note.Detail, 9.5F, Theme.TextLo, noteWidth,
+                notes.Controls.Add(NotesPara(note.Detail, 9.5F, Theme.TextLo, noteWidth,
                     margin: new Padding(note.Title.Length > 0 ? 18 : 0, 0, 0, 10)));
         }
-        if (info.Notes.Count == 0)
-            notes.Controls.Add(Para("本次更新未附说明。", 9.5F, Theme.TextLo, noteWidth, margin: new Padding(0, 0, 0, 10)));
+        if (releaseNotes.Count == 0)
+            notes.Controls.Add(NotesPara("本次更新未附说明。", 9.5F, Theme.TextLo, noteWidth, margin: new Padding(0, 0, 0, 10)));
         var scroller = new Panel
         {
             AutoScroll = true,
-            Size = new Size(width, Math.Min(notes.GetPreferredSize(Size.Empty).Height, MaxNotesHeight)),
+            Size = new Size(NotesDialogWidth, Math.Min(notes.GetPreferredSize(Size.Empty).Height, MaxNotesHeight)),
             BackColor = Theme.Surface,
             Margin = new Padding(0),
         };
         scroller.HandleCreated += (_, _) => DarkTitleBar.ApplyScrollBars(scroller.Handle);
         scroller.Controls.Add(notes);
-        root.Controls.Add(scroller);
+        return scroller;
+    }
 
-        root.Controls.Add(Para("更新时会关闭程序，覆盖安装后自动重启。", 8.5F, Theme.TextLo, width, margin: new Padding(0, 6, 0, 0)));
+    /// <summary>Manual check with no newer release: the current version, then its notes when it is the latest release.</summary>
+    private static Form BuildUpToDateDialog(IReadOnlyList<ReleaseNote>? currentNotes)
+    {
+        const int width = NotesDialogWidth;
+        var dlg = NewDialog("检查更新");
+        var root = NewNotesRoot();
+        root.Controls.Add(NotesPara("当前已是最新版本", 16F, Theme.Accent, width, bold: true));
+        root.Controls.Add(NotesPara($"v{Updater.CurrentVersion}" + (currentNotes != null ? " · 本版本更新内容" : ""),
+            9F, Theme.TextLo, width, margin: new Padding(0, 4, 0, 0)));
+        if (currentNotes != null)
+        {
+            root.Controls.Add(new Panel { Size = new Size(width, 1), BackColor = Theme.Border, Margin = new Padding(0, 14, 0, 12) });
+            root.Controls.Add(BuildNotesScroller(currentNotes));
+        }
+
+        var ok = Pill("确定", 104, primary: true);
+        ok.DialogResult = DialogResult.OK;
+        var buttons = Flow(FlowDirection.LeftToRight);
+        buttons.Anchor = AnchorStyles.Right;
+        buttons.Margin = new Padding(0, 16, 0, 0);
+        buttons.Controls.Add(ok);
+        root.Controls.Add(buttons);
+
+        dlg.Controls.Add(root);
+        dlg.AcceptButton = ok;
+        dlg.CancelButton = ok;
+        return dlg;
+    }
+
+    /// <summary>Update prompt: version headline and download size, the release notes, then a restart note.
+    /// Returns DialogResult.Yes to update.</summary>
+    private static Form BuildUpdatePrompt(UpdateInfo info)
+    {
+        const int width = NotesDialogWidth;
+        var dlg = NewDialog("发现新版本");
+        var root = NewNotesRoot();
+
+        root.Controls.Add(NotesPara($"{info.Tag} 已发布", 16F, Theme.Accent, width, bold: true));
+        root.Controls.Add(NotesPara($"当前版本 v{Updater.CurrentVersion} · 更新包约 {info.Size / 1024.0 / 1024.0:F1} MB",
+            9F, Theme.TextLo, width, margin: new Padding(0, 4, 0, 0)));
+        root.Controls.Add(new Panel { Size = new Size(width, 1), BackColor = Theme.Border, Margin = new Padding(0, 14, 0, 12) });
+        root.Controls.Add(BuildNotesScroller(info.Notes));
+
+        root.Controls.Add(NotesPara("更新时会关闭程序，覆盖安装后自动重启。", 8.5F, Theme.TextLo, width, margin: new Padding(0, 6, 0, 0)));
 
         var ok = Pill("现在更新", 104, primary: true);
         var later = Pill("暂不更新", 104);
@@ -1349,6 +1395,7 @@ internal sealed partial class MainForm : Form
         box.ForeColor = Color.FromArgb(0xD4, 0xD4, 0xD4);
         box.Font = new Font(Theme.MonoFamily, 10F);
         box.Dock = DockStyle.Fill;
+        box.HandleCreated += (_, _) => DarkTitleBar.ApplyScrollBars(box.Handle);
 
         // Clearing the display does not remove the session log on disk.
         var btnBar = new Panel { Dock = DockStyle.Bottom, Height = 46, BackColor = Theme.Surface };
@@ -1458,19 +1505,24 @@ internal sealed partial class MainForm : Form
         return f;
     }
 
-    private static NumericUpDown NewCoCell() => new()
+    private static NumericUpDown NewCoCell()
     {
-        Minimum = -50,
-        Maximum = 30,
-        Value = 0,
-        Width = 58,
-        BackColor = Theme.SurfaceAlt,
-        ForeColor = Theme.TextHi,
-        BorderStyle = BorderStyle.FixedSingle,
-        TextAlign = HorizontalAlignment.Center,
-        Font = new Font(Theme.MonoFamily, 10F),
-        Margin = new Padding(0, 2, 0, 2),
-    };
+        var cell = new NumericUpDown
+        {
+            Minimum = -50,
+            Maximum = 30,
+            Value = 0,
+            Width = 58,
+            BackColor = Theme.SurfaceAlt,
+            ForeColor = Theme.TextHi,
+            BorderStyle = BorderStyle.FixedSingle,
+            TextAlign = HorizontalAlignment.Center,
+            Font = new Font(Theme.MonoFamily, 10F),
+            Margin = new Padding(0, 2, 0, 2),
+        };
+        DarkSpin.Apply(cell);
+        return cell;
+    }
 
     private PillButton MakeStepButton(string text, Action onClick)
     {
@@ -1531,6 +1583,7 @@ internal sealed partial class MainForm : Form
         _scalarBox.ForeColor = Theme.TextHi;
         _scalarBox.Font = new Font(Theme.MonoFamily, 10F);
         _scalarBox.Margin = new Padding(0, 5, 8, 0);
+        DarkCombo.Apply(_scalarBox, center: true);
         for (int x = 1; x <= 10; x++) _scalarBox.Items.Add($"{x}X");
         SelectScalar(1);
         _scalarBox.SelectedIndexChanged += (_, _) => { if (!_scalarLoading) _scalarDirty = true; };
@@ -1568,6 +1621,7 @@ internal sealed partial class MainForm : Form
         box.Maximum = max;
         box.Increment = inc;
         StyleUpDown(box, width);
+        DarkSpin.Apply(box);
     }
 
     /// <summary>Applies the shared style to a PBO numeric input.</summary>
@@ -1727,19 +1781,24 @@ internal sealed partial class MainForm : Form
         Margin = new Padding(0, 5, 6, 5),
     };
 
-    private static NumericUpDown NewCsCell(bool last) => new()
+    private static NumericUpDown NewCsCell(bool last)
     {
-        Minimum = -50,
-        Maximum = 30,
-        Value = 0,
-        Width = CsCellWidth,
-        BackColor = Theme.SurfaceAlt,
-        ForeColor = Theme.TextHi,
-        BorderStyle = BorderStyle.FixedSingle,
-        TextAlign = HorizontalAlignment.Center,
-        Font = new Font(Theme.MonoFamily, 10F),
-        Margin = new Padding(0, 5, last ? 0 : CsColumnGap, 5),
-    };
+        var cell = new NumericUpDown
+        {
+            Minimum = -50,
+            Maximum = 30,
+            Value = 0,
+            Width = CsCellWidth,
+            BackColor = Theme.SurfaceAlt,
+            ForeColor = Theme.TextHi,
+            BorderStyle = BorderStyle.FixedSingle,
+            TextAlign = HorizontalAlignment.Center,
+            Font = new Font(Theme.MonoFamily, 10F),
+            Margin = new Padding(0, 5, last ? 0 : CsColumnGap, 5),
+        };
+        DarkSpin.Apply(cell);
+        return cell;
+    }
 
     // CO editor behavior
 
@@ -1828,7 +1887,7 @@ internal sealed partial class MainForm : Form
         if (okP) rec.Ppt = (int)ppt;
         if (okE) rec.Edc = (int)edc;
         if (okT) rec.Tdc = (int)tdc;
-        PboJournal.Record(rec, "manual-apply");
+        PboJournal.Record(rec, PboJournal.ManualApply);
         string fmaxPart = _fmaxWritable ? $"FMax {fmax} MHz / " : "FMax 跳过（不支持）/ ";
         string scalarPart = !_scalarWritable ? " / Scalar 跳过（不支持）"
                           : writeScalar ? $" / Scalar {_scalarBox.Text}" : " / Scalar 未改动";
@@ -1847,6 +1906,8 @@ internal sealed partial class MainForm : Form
             // Cache applied CS values because older BIOS versions cannot read them back.
             _csState.FromGrid(g);
             _csState.Save();
+            // Record what was written so crash recovery restores the latest CS, even when changed mid-test.
+            CsJournal.Record(new CsSnapshot { Margins = new List<int>(_csState.Margins) }, CsJournal.ManualApply);
         }
         Log.Write("手动应用 Curve Shaper" + (_csState.ReadBroken ? "（备用模式）" : "") + (ok ? "" : "（写入异常，详见上方）"));
         SetStatus(ok ? "已应用 Curve Shaper" : "Curve Shaper 应用失败", ok ? Theme.Success : Theme.Accent);
@@ -2227,45 +2288,106 @@ internal sealed partial class MainForm : Form
     }
 
     /// <summary>
-    /// After a crash, writes back only the last recorded PBO limits that now differ from the CPU. Writing FMax disturbs
-    /// some power-plan states and board-level core frequency limits (e.g. ASUS), so matching values are left alone, and
-    /// a value that cannot be read now is not written blindly.
+    /// Writes back only the recorded PBO limits that differ from what the CPU runs now (after a crash, or at boot the
+    /// BIOS values). Writing FMax disturbs some power-plan states and board-level core frequency limits (e.g. ASUS), so
+    /// matching values are left alone, and a value that cannot be read now is not written blindly. The unlocked-PBO
+    /// sentinel 999 is compared like any other value. Written values are shown in the PBO editor. Returns false when a
+    /// write fails. context prefixes the log lines.
     /// </summary>
-    private void RestorePboAfterCrash(PboSnapshot saved)
+    private bool RestorePbo(PboSnapshot saved, string context)
     {
         if (saved.FMax == null && saved.Ppt == null && saved.Edc == null && saved.Tdc == null)
         {
-            Log.Write("死机恢复：没有可核对的 PBO 记录，未重新写入");
-            return;
+            Log.Write($"{context}：没有可核对的 PBO 记录，未写入 PBO 参数");
+            return true;
         }
         var now = ReadPboSnapshot();
         var changes = new List<string>();
+        var written = new List<(NumericUpDown box, decimal value)>();
         bool compared = false, ok = true;
 
         if (saved.FMax is uint f && now.FMax is uint nf)
         {
             compared = true;
-            if (nf != f) { ok &= RyzenSmu.SetFMax(f); changes.Add($"FMax {nf} → {f} MHz"); }
+            if (nf != f)
+            {
+                bool done = RyzenSmu.SetFMax(f);
+                ok &= done;
+                if (done) written.Add((_fmaxBox, f));
+                changes.Add($"FMax {nf} → {f} MHz");
+            }
         }
         // PM Table limits are rounded floats; a 1 W / 1 A difference is reading noise.
-        void Limit(string name, string unit, int? want, int? have, Func<uint, bool> set)
+        void Limit(string name, string unit, int? want, int? have, Func<uint, bool> set, NumericUpDown box)
         {
             if (want is not int w || have is not int h) return;
             compared = true;
             if (Math.Abs(h - w) <= 1) return;
-            ok &= set((uint)w);
+            bool done = set((uint)w);
+            ok &= done;
+            if (done) written.Add((box, w));
             changes.Add($"{name} {h} → {w} {unit}");
         }
-        Limit("PPT", "W", saved.Ppt, now.Ppt, RyzenSmu.SetPptLimit);
-        Limit("EDC", "A", saved.Edc, now.Edc, RyzenSmu.SetEdcLimit);
-        Limit("TDC", "A", saved.Tdc, now.Tdc, RyzenSmu.SetTdcLimit);
+        Limit("PPT", "W", saved.Ppt, now.Ppt, RyzenSmu.SetPptLimit, _pptBox);
+        Limit("EDC", "A", saved.Edc, now.Edc, RyzenSmu.SetEdcLimit, _edcBox);
+        Limit("TDC", "A", saved.Tdc, now.Tdc, RyzenSmu.SetTdcLimit, _tdcBox);
 
         if (!compared)
-            Log.Write("死机恢复：未能读取当前 PBO 参数，未重新写入", "WARN");
+            Log.Write($"{context}：未能读取当前 PBO 参数，未写入 PBO 参数", "WARN");
         else if (changes.Count == 0)
-            Log.Write("死机恢复：PBO 参数与最后一次记录一致，未重新写入");
+            Log.Write($"{context}：PBO 参数与记录一致（{DescribePbo(now)}），未写入");
         else
-            Log.Write($"死机恢复：PBO 参数已恢复 {string.Join("、", changes)}" + (ok ? "" : "（部分写入失败）"), ok ? "INFO" : "WARN");
+            Log.Write($"{context}：PBO 参数已写入 {string.Join("、", changes)}" + (ok ? "" : "（部分写入失败）"), ok ? "INFO" : "WARN");
+
+        if (written.Count > 0)
+            Ui(() =>
+            {
+                foreach (var (box, value) in written)
+                    box.Value = Math.Clamp(value, box.Minimum, box.Maximum);
+            });
+        return ok;
+    }
+
+    /// <summary>Reads the CS margins the CPU runs; null margins when old BIOS cannot read them back.</summary>
+    private static CsSnapshot ReadCsSnapshot()
+    {
+        var g = RyzenSmu.ReadCurveShaper(out bool readable);
+        if (!readable) return new CsSnapshot();
+        var s = new CsState();
+        s.FromGrid(g);
+        return new CsSnapshot { Margins = s.Margins };
+    }
+
+    /// <summary>
+    /// After a crash, writes back the last recorded CS margins unless the CPU already runs them. Old BIOS cannot read
+    /// CS back, so the record is written whenever a match cannot be confirmed; a record of unknown margins is skipped.
+    /// </summary>
+    private void RestoreCsAfterCrash()
+    {
+        if (!RyzenSmu.IsCurveShaperSupported() || CsJournal.ReadLast() is not { } saved) return;
+        if (saved.Margins is not { Count: >= 15 } want)
+        {
+            Log.Write("死机恢复：最后一次 CS 记录无法读回，未写入 CS");
+            return;
+        }
+        if (ReadCsSnapshot().Margins is { } now && now.SequenceEqual(want))
+        {
+            Log.Write("死机恢复：CS 与记录一致，未写入");
+            return;
+        }
+        var g = new CsState { Margins = want }.ToGrid();
+        bool ok = RyzenSmu.SetCurveShaper(g);
+        Log.Write(ok ? "死机恢复：CS 已写入最后一次记录" : "死机恢复：CS 写入失败，详见上方", ok ? "INFO" : "WARN");
+        if (ok)
+            Ui(() =>
+            {
+                for (int t = 0; t < 5; t++)
+                    for (int c = 0; c < 3; c++)
+                    {
+                        var cell = _csCells[t, c];
+                        cell.Value = Math.Clamp(g[t, c], (int)cell.Minimum, (int)cell.Maximum);
+                    }
+            });
     }
 
     private void RunTestThread()
@@ -2354,7 +2476,8 @@ internal sealed partial class MainForm : Form
                 Log.Write("死机恢复设置 CO 失败", "ERROR");
                 return false;
             }
-            if (PboJournal.ReadLast() is { } savedPbo) RestorePboAfterCrash(savedPbo);
+            RestoreCsAfterCrash();
+            if (PboJournal.ReadLast() is { } savedPbo) RestorePbo(savedPbo, "死机恢复");
 
             if (_testMode == "SEQ" && !string.IsNullOrEmpty(seqResumePhase))
                 Log.Write($"恢复测试模式: 顺序测试，从中断的 {seqResumePhase} 阶段继续");
@@ -2379,7 +2502,8 @@ internal sealed partial class MainForm : Form
             testRound = 0;
             Log.WriteCo("当前 CO 值：", offsets);
             var pbo = ReadPboSnapshot();
-            PboJournal.Record(pbo, "test-start");
+            PboJournal.Record(pbo, PboJournal.TestStart);
+            if (RyzenSmu.IsCurveShaperSupported()) CsJournal.Record(ReadCsSnapshot(), CsJournal.TestStart);
             Log.Write($"当前 PBO 参数：{DescribePbo(pbo)}");
 
             // Persist baseline offsets for recovery before the first test callback.
