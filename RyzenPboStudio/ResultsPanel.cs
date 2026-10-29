@@ -88,6 +88,10 @@ internal sealed class ResultsPanel : Panel
         };
 
         summary.Resize += (_, _) => UpdateSummaryScroll();
+        summary.HandleCreated += (_, _) => DarkTitleBar.ApplyScrollBars(summary.Handle);
+        // The grid's scrollbars are child controls with their own windows.
+        foreach (var bar in grid.Controls.OfType<ScrollBar>())
+            bar.HandleCreated += (_, _) => DarkTitleBar.ApplyScrollBars(bar.Handle);
 
         // Dock order keeps the title and status above the summary and filling table.
         Controls.Add(grid);

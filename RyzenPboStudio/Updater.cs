@@ -76,8 +76,17 @@ internal static class Updater
     public static Version CurrentVersion =>
         typeof(Updater).Assembly.GetName().Version is { } v ? new Version(v.Major, v.Minor, v.Build) : new Version(0, 0, 0);
 
-    /// <summary>Returns the latest update, or null when absent or unavailable.</summary>
-    public static async Task<UpdateInfo?> CheckAsync(CancellationToken token = default)
+    // Asset-name marker of the self-contained package; it must never contain "update", "lite" or "full", which installs
+    // without bundled .NET (including older versions) select by.
+    private const string SelfContainedTag = "net8contained";
+
+    /// <summary>True when .NET 8 is bundled next to the executable rather than installed on the system.</summary>
+    private static bool IsSelfContained => File.Exists(Path.Combine(AppContext.BaseDirectory, "coreclr.dll"));
+
+    /// <summary>Returns the latest update, or null when absent or unavailable. currentNotes holds the Release notes of
+    /// the running version when it is the latest release, otherwise null.</summary>
+    public static async Task<(UpdateInfo? update, IReadOnlyList<ReleaseNote>? currentNotes)> CheckAsync(
+        CancellationToken token = default)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
         // GitHub API requires User-Agent.
@@ -85,22 +94,35 @@ internal static class Updater
         http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
 
         GhRelease? release = await http.GetFromJsonAsync<GhRelease>(LatestReleaseApi, token);
-        if (release == null || release.Draft || release.Prerelease) return null;
+        if (release == null || release.Draft || release.Prerelease) return (null, null);
 
-        if (!TryParseTag(release.TagName, out Version latest)) return null;
-        if (latest <= CurrentVersion) return null;
+        if (!TryParseTag(release.TagName, out Version latest)) return (null, null);
+        if (latest == CurrentVersion) return (null, ParseNotes(release.Body));
+        if (latest < CurrentVersion) return (null, null);
 
-        // Prefer the smaller update archive; use full only when update is absent.
         var zips = release.Assets
             .Where(a => a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) && a.DownloadUrl.Length > 0)
             .ToList();
-        GhAsset? zip = zips.FirstOrDefault(a => a.Name.Contains("update", StringComparison.OrdinalIgnoreCase))
-                       ?? zips.FirstOrDefault(a => a.Name.Contains("full", StringComparison.OrdinalIgnoreCase))
-                       ?? zips.FirstOrDefault();
-        if (zip == null) return null;
+        GhAsset? zip;
+        if (IsSelfContained)
+        {
+            // update.zip relies on an installed .NET 8, so a bundled-runtime install takes the self-contained package.
+            zip = zips.FirstOrDefault(a => a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase))
+                  ?? throw new InvalidOperationException($"{release.TagName} 没有内置 .NET 8 的安装包，请到项目主页手动下载。");
+        }
+        else
+        {
+            // Prefer the smaller update archive; use lite (named full before 3.0.3) only when update is absent.
+            var plain = zips.Where(a => !a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase)).ToList();
+            zip = plain.FirstOrDefault(a => a.Name.Contains("update", StringComparison.OrdinalIgnoreCase))
+                  ?? plain.FirstOrDefault(a => a.Name.Contains("lite", StringComparison.OrdinalIgnoreCase)
+                                            || a.Name.Contains("full", StringComparison.OrdinalIgnoreCase))
+                  ?? plain.FirstOrDefault();
+        }
+        if (zip == null) return (null, null);
 
-        return new UpdateInfo(latest, release.TagName, ParseNotes(release.Body), zip.DownloadUrl, zip.Size,
-            ParseSha256(zip.Digest));
+        return (new UpdateInfo(latest, release.TagName, ParseNotes(release.Body), zip.DownloadUrl, zip.Size,
+            ParseSha256(zip.Digest)), null);
     }
 
     /// <summary>Hex SHA-256 from a GitHub asset digest such as "sha256:ab12…"; null for other or missing digests.</summary>
@@ -380,7 +402,8 @@ internal static class Updater
         sb.AppendLine("  echo 覆盖安装失败，正在还原原有版本...");
         sb.AppendLine($"  robocopy \"{backupDir}\" \"{installDir}\" /E /IS /IT /XD logs profiles /R:5 /W:2 >nul");
         sb.AppendLine("  if errorlevel 8 (");
-        sb.AppendLine($"    echo 还原失败。备份保存在 {backupDir}，请手动复制回 {installDir}。");
+        // Quoted: a ")" in an unquoted path, e.g. "Program Files (x86)", would end the if block early.
+        sb.AppendLine($"    echo 还原失败。备份保存在 \"{backupDir}\"，请手动复制回 \"{installDir}\"。");
         sb.AppendLine("    goto failed");
         sb.AppendLine("  )");
         sb.AppendLine("  echo 已还原原有版本。");

@@ -277,6 +277,7 @@ internal sealed partial class MainForm
             Font = new Font(Theme.FontFamily, 10F),
             Margin = new Padding(0, 8, 0, 0),
         };
+        DarkCombo.Apply(pick, center: true);
         for (int s = 1; s <= Config.MaxStepOnError; s++) pick.Items.Add($"+{s}");
         pick.SelectedIndex = Config.StepOnError - 1;
 
@@ -558,6 +559,7 @@ internal sealed partial class MainForm
                 Font = new Font(Theme.FontFamily, 10F),
                 Margin = new Padding(0, 2, 12, 0),
             };
+            DarkCombo.Apply(pick, center: true);
             foreach (var n in names)
                 if (n == rows[i].Test || rows.All(r => r.Test != n)) pick.Items.Add(n);
             pick.SelectedItem = rows[i].Test;

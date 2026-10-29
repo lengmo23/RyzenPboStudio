@@ -1,6 +1,6 @@
 namespace RyzenPboStudio;
 
-/// <summary>Logon autostart: boot-apply of saved CO/CS and auto-resume of an interrupted test.</summary>
+/// <summary>Logon autostart: boot-apply of saved CO/CS and applied PBO limits, and auto-resume of an interrupted test.</summary>
 internal sealed partial class MainForm
 {
     private readonly bool _autostartLaunch;   // launched by the scheduled task with --autostart
@@ -12,7 +12,7 @@ internal sealed partial class MainForm
     {
         _bootApplyCheck = new CheckBox
         {
-            Text = "开机自动应用 CO/CS",
+            Text = "开机自动应用PBO",
             AutoCheck = false,
             AutoSize = false,
             Size = new Size(158, 24),
@@ -25,6 +25,9 @@ internal sealed partial class MainForm
         _bootApplyCheck.FlatAppearance.CheckedBackColor = Theme.Accent;
         _bootApplyOn = AutoStart.BootApplyEnabled;
         RestyleBootApplyCheckBox();
+        _tips.SetToolTip(_bootApplyCheck,
+            "开机后写入已保存的 CO/CS，以及 PBO 页最后一次 Apply 的 FMax、PPT、EDC、TDC\n" +
+            "PBO 参数只写入与 BIOS 当前值不同的项");
         _bootApplyCheck.Click += (_, _) => OnBootApplyToggled(!_bootApplyOn);
         return _bootApplyCheck;
     }
@@ -50,7 +53,7 @@ internal sealed partial class MainForm
                     : null;
             if (problem != null)
             {
-                ThemedDialog.Show(this, problem, "开机自动应用 CO/CS");
+                ThemedDialog.Show(this, problem, "开机自动应用PBO");
                 return;
             }
         }
@@ -63,9 +66,9 @@ internal sealed partial class MainForm
         _bootApplyOn = on;
         RestyleBootApplyCheckBox();
         Log.Write(on
-            ? "已开启开机自动应用 CO/CS：每次登录 Windows 后自动启动并写入已保存的 CO/CS"
-            : "已关闭开机自动应用 CO/CS");
-        SetStatus(on ? "已开启开机自动应用 CO/CS" : "已关闭开机自动应用 CO/CS", Theme.Success);
+            ? "已开启开机自动应用PBO：每次登录 Windows 后自动启动并写入已保存的 CO/CS 与已应用的 PBO 参数"
+            : "已关闭开机自动应用PBO");
+        SetStatus(on ? "已开启开机自动应用PBO" : "已关闭开机自动应用PBO", Theme.Success);
         SyncAutoStartInBackground();
     }
 
@@ -73,7 +76,7 @@ internal sealed partial class MainForm
     {
         using var dialog = new Form
         {
-            Text = "开机自动应用 CO/CS",
+            Text = "开机自动应用PBO",
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             ClientSize = new Size(480, 150),
@@ -98,7 +101,7 @@ internal sealed partial class MainForm
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.Controls.Add(new Label
         {
-            Text = "请确保当前保存的CO/CS经过测试，否则开机可能会CPU欠压出现冻屏死机问题！",
+            Text = "请确保当前保存的CO/CS与已应用的PBO参数准确并经过测试，否则开机可能会CPU欠压出现冻屏死机问题！",
             Dock = DockStyle.Fill,
             ForeColor = Theme.TextHi,
             BackColor = Theme.Surface,
@@ -145,20 +148,21 @@ internal sealed partial class MainForm
         SyncAutoStartInBackground();
     }
 
-    /// <summary>Writes saved per-core CO offsets and CS margins only; FMax / PPT / EDC / TDC are left alone.</summary>
+    /// <summary>Writes saved per-core CO offsets and CS margins, then the FMax / PPT / EDC / TDC of the last PBO Apply
+    /// where they differ from the BIOS values the CPU booted with.</summary>
     private void BootApplySavedProfile()
     {
         // Flag still present: the system went down shortly after the last boot-apply
         if (AutoStart.BootApplyPending)
         {
             AutoStart.ClearBootApplyPending();
-            Log.Write("上次开机自动应用 CO/CS 后不久系统异常重启，本次未应用已保存的 CO/CS", "WARN");
+            Log.Write("上次开机自动应用后不久系统异常重启，本次未应用 CO/CS 与 PBO 参数", "WARN");
             SetStatus("已跳过开机自动应用（上次应用后系统异常重启）", Theme.Accent);
             ThemedDialog.Show(this,
-                "上次开机自动应用 CO/CS 后不久系统异常重启，为避免反复死机，本次没有应用已保存的 CO/CS。\n\n" +
+                "上次开机自动应用后不久系统异常重启，为避免反复死机，本次没有应用 CO/CS 与 PBO 参数。\n\n" +
                 "「开机自动应用」仍保持开启，下次开机会照常应用。\n" +
                 "如果这组设置不稳定，请调整后重新保存，或关闭「开机自动应用」。",
-                "未自动应用 CO/CS");
+                "未自动应用PBO");
             return;
         }
 
@@ -182,7 +186,7 @@ internal sealed partial class MainForm
 
         if (!AutoStart.MarkBootApplyPending())
         {
-            Log.Write("无法写入开机应用保护标记，为安全起见本次未自动应用 CO/CS", "WARN");
+            Log.Write("无法写入开机应用保护标记，为安全起见本次未自动应用 CO/CS 与 PBO 参数", "WARN");
             SetStatus("开机自动应用已跳过：无法写入保护标记", Theme.Accent);
             return;
         }
@@ -197,15 +201,22 @@ internal sealed partial class MainForm
         }
         else if (csSupported)
         {
-            Log.Write("未找到已保存的 Curve Shaper 配置，仅应用 CO");
+            Log.Write("未找到已保存的 Curve Shaper 配置，跳过 CS");
         }
+
+        bool okPbo = true;
+        var pbo = PboJournal.ReadLast(PboJournal.ManualApply);
+        if (pbo != null)
+            okPbo = RestorePbo(pbo, "开机自动应用");
+        else
+            Log.Write("开机自动应用：PBO 页尚未 Apply 过参数，跳过 PBO");
 
         OnCoRefresh();
         if (csGrid != null) OnCsRefresh();
 
-        string what = csGrid != null ? "CO/CS" : "CO";
-        SetStatus(okCo && okCs ? $"已开机自动应用 {what}" : "开机自动应用部分失败，详见日志",
-            okCo && okCs ? Theme.Success : Theme.Accent);
+        string what = (csGrid != null ? "CO/CS" : "CO") + (pbo != null ? "/PBO" : "");
+        bool ok = okCo && okCs && okPbo;
+        SetStatus(ok ? $"已开机自动应用 {what}" : "开机自动应用部分失败，详见日志", ok ? Theme.Success : Theme.Accent);
     }
 
     /// <summary>
