@@ -293,7 +293,9 @@ internal sealed class MonitorView : UserControl
         string bios = SystemInfo.GetBiosVersion();
         string agesa = cpu.systemInfo?.AgesaVersion ?? "";
         if (agesa.Length == 0) agesa = SystemInfo.GetAgesaVersion();
-        agesa = agesa.Split(' ')[^1];   // ComboAm5PI 1.2.7.0 → 1.2.7.0
+        // Drop the platform name: ComboAm5PI 1.2.7.0 → 1.2.7.0, ComboAM5PI 1.2.0.3 Patch A → 1.2.0.3 Patch A
+        int sp = agesa.IndexOf(' ');
+        if (sp >= 0) agesa = agesa[(sp + 1)..].Trim();
         string agesaText = agesa.Length > 0 ? $"AGESA {agesa}" : "";
         string biosPart = bios.Length > 0 ? $"BIOS {bios}" + (agesaText.Length > 0 ? $" ({agesaText})" : "") : agesaText;
 
@@ -719,10 +721,11 @@ internal sealed class MonitorView : UserControl
                 }
 
                 // Without counters, read EFFREQ and C0 activity from the adjacent PM Table segments.
+                // FREQEFF already includes the actual BCLK, unlike CORE_FREQ.
                 if (!readCounters && pts.Length > ptl.PerCoreFreqIdx + 3 * n)
                     for (int i = 0; i < n; i++)
                     {
-                        effFreq[i] = pts[ptl.PerCoreFreqIdx + n + i] * 1000.0 * bclkCorr;
+                        effFreq[i] = pts[ptl.PerCoreFreqIdx + n + i] * 1000.0;
                         float c0 = pts[ptl.PerCoreFreqIdx + 2 * n + i];
                         if (c0 is >= 0f and <= 100f) occ[i] = c0;
                     }
