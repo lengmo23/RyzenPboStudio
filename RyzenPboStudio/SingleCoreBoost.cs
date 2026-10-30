@@ -343,7 +343,7 @@ internal sealed class SingleCoreBoost : IDisposable
                 if (lay.PerCoreFreqIdx >= 0 && t.Length > lay.PerCoreFreqIdx + n + slot)
                 {
                     freqs.Add(t[lay.PerCoreFreqIdx + slot] * ghzToMhz);
-                    effs.Add(t[lay.PerCoreFreqIdx + n + slot] * ghzToMhz);
+                    effs.Add(t[lay.PerCoreFreqIdx + n + slot] * 1000.0);   // FREQEFF already includes the actual BCLK
                 }
                 if (c0Idx >= 0 && t.Length >= c0Idx + n)
                 {
