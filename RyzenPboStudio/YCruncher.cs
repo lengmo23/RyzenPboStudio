@@ -465,12 +465,14 @@ internal static partial class YCruncher
     }
 
     /// <summary>Refreshes offsets from CPU before backoff to include manual changes during the test.
-    /// Rejects an all-zero readback against nonzero cached offsets and leaves fused-off slots alone.</summary>
-    private static void RefreshBaselineFromCpu(List<int> current)
+    /// Rejects an all-zero readback against nonzero cached offsets, unless all zeros were applied manually,
+    /// and leaves fused-off slots alone.</summary>
+    public static void RefreshBaselineFromCpu(List<int> current, bool log = true)
     {
         var live = RyzenSmu.ReadOffsets(current.Count);
         if (live.Count != current.Count) return;
-        if (live.All(v => v == 0) && current.Any(v => v != 0)) return; // Reject an anomalous all-zero readback.
+        // Reject an anomalous all-zero readback unless the last CO write was a manual all-zero apply.
+        if (live.All(v => v == 0) && current.Any(v => v != 0) && !LastWriteWasManualZero()) return;
 
         bool changed = false;
         for (int i = 0; i < current.Count; i++)
@@ -478,9 +480,13 @@ internal static partial class YCruncher
             if (RyzenSmu.IsSlotDisabled(i)) continue;
             if (current[i] != live[i]) { current[i] = live[i]; changed = true; }
         }
-        if (changed)
+        if (changed && log)
             Log.WriteCo("CPU 当前 CO：", current, level: "WARN");
     }
+
+    private static bool LastWriteWasManualZero() =>
+        Journal.ReadLastEntry() is { Reason: Journal.ManualInTest or Journal.ManualTakeover } last
+        && last.Offsets.All(v => v == 0);
 
     private static void TryKill(Process proc)
     {

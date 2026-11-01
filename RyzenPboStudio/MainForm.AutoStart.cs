@@ -150,7 +150,7 @@ internal sealed partial class MainForm
 
     /// <summary>Writes saved per-core CO offsets and CS margins, then the FMax / PPT / EDC / TDC of the last PBO Apply
     /// where they differ from the BIOS values the CPU booted with.</summary>
-    private void BootApplySavedProfile()
+    private async void BootApplySavedProfile()
     {
         // Flag still present: the system went down shortly after the last boot-apply
         if (AutoStart.BootApplyPending)
@@ -191,25 +191,33 @@ internal sealed partial class MainForm
             return;
         }
 
-        bool okCo = Tuning.Apply(profile.Offsets, "BOOT", null, "boot-apply");
-        Log.WriteCo(okCo ? "开机自动应用 CO：" : "开机自动应用 CO 写入失败：", profile.Offsets, level: okCo ? "INFO" : "ERROR");
-        bool okCs = true;
-        if (csGrid != null)
-        {
-            okCs = RyzenSmu.SetCurveShaper(csGrid);
-            Log.Write("开机自动应用 Curve Shaper" + (okCs ? "" : "（写入异常，详见上方）"));
-        }
-        else if (csSupported)
-        {
-            Log.Write("未找到已保存的 Curve Shaper 配置，跳过 CS");
-        }
-
-        bool okPbo = true;
         var pbo = PboJournal.ReadLast(PboJournal.ManualApply);
-        if (pbo != null)
-            okPbo = RestorePbo(pbo, "开机自动应用");
-        else
-            Log.Write("开机自动应用：PBO 页尚未 Apply 过参数，跳过 PBO");
+        // Off the UI thread; tests stay disabled until the boot values are written.
+        SetControlsEnabled(false);
+        SetStatus("正在开机自动应用...", Theme.Warn);
+        var (okCo, okCs, okPbo) = await Task.Run(() =>
+        {
+            bool co = Tuning.Apply(profile.Offsets, "BOOT", null, "boot-apply");
+            Log.WriteCo(co ? "开机自动应用 CO：" : "开机自动应用 CO 写入失败：", profile.Offsets, level: co ? "INFO" : "ERROR");
+            bool cs = true;
+            if (csGrid != null)
+            {
+                cs = RyzenSmu.SetCurveShaper(csGrid);
+                Log.Write("开机自动应用 Curve Shaper" + (cs ? "" : "（写入异常，详见上方）"));
+            }
+            else if (csSupported)
+            {
+                Log.Write("未找到已保存的 Curve Shaper 配置，跳过 CS");
+            }
+
+            bool p = true;
+            if (pbo != null)
+                p = RestorePbo(pbo, "开机自动应用");
+            else
+                Log.Write("开机自动应用：PBO 页尚未 Apply 过参数，跳过 PBO");
+            return (co, cs, p);
+        });
+        SetControlsEnabled(true);
 
         OnCoRefresh();
         if (csGrid != null) OnCsRefresh();
