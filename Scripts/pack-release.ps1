@@ -1,14 +1,17 @@
 ﻿<#
 .SYNOPSIS
-    Package bin\ into lite, net8contained and update release archives.
+    Package bin\ into lite, net8contained, update and net8patch release archives.
 
 .DESCRIPTION
     lite          includes y-cruncher for first-time installation; needs .NET 8 installed.
     net8contained is lite with the .NET 8 runtime bundled (self-contained), for machines without .NET 8.
                   It is published from the same source into a temporary folder, and is also the in-app
-                  update package of such installs.
+                  update package of such installs when their runtime differs from this build's.
     update        contains only the application and dependencies for in-app updates of the lite package.
-    Updater prefers assets whose names contain "update"; a self-contained install takes "net8contained".
+    net8patch     contains only the self-contained build's application files (no runtime, no tools), named
+                  with its runtime version, for in-app updates of self-contained installs on that runtime.
+    Updater prefers assets whose names contain "update"; a self-contained install takes the net8patch
+    matching its runtime, otherwise "net8contained".
 
     All archives use the same fixed top-level folder. Updater.ExtractAndVerify
     locates it by the main executable. README and notices come from the repository
@@ -107,6 +110,19 @@ try {
     $upd  = New-Package -Kind 'update' -IncludeTools $false
     # "update", "lite" and "full" must stay out of this name: installs without bundled .NET select by them.
     $net8 = New-Package -Kind 'net8contained' -IncludeTools $true -AppDir $net8Dir
+
+    # Application files are the names the framework-dependent publish holds; taking them from the self-contained
+    # build keeps its runtimeconfig.json and deps.json, which match only the runtime version in the name.
+    $runtimeConfig = Get-Content -LiteralPath (Join-Path $net8Dir 'AMD Ryzen PBO Studio.runtimeconfig.json') -Raw | ConvertFrom-Json
+    $rt = ($runtimeConfig.runtimeOptions.includedFrameworks | Where-Object { $_.name -eq 'Microsoft.NETCore.App' }).version
+    if (-not $rt) { throw "无法从含 .NET 8 版本的 runtimeconfig.json 读取运行时版本。" }
+    $patchDir = Join-Path $stageRoot 'publish-net8patch'
+    New-Item -ItemType Directory -Force -Path $patchDir | Out-Null
+    Get-ChildItem -LiteralPath $bin -File | ForEach-Object {
+        Copy-Item -LiteralPath (Join-Path $net8Dir $_.Name) -Destination $patchDir
+    }
+    # "update", "lite", "full" and "net8contained" must stay out of this name, see Updater.SelfContainedPatchTag.
+    $patch = New-Package -Kind "net8patch-rt$rt" -IncludeTools $false -AppDir $patchDir
 }
 finally {
     if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
