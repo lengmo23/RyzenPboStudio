@@ -63,6 +63,7 @@ internal sealed partial class MainForm : Form
     private readonly ConcurrentQueue<string> _logQueue = new();
     private CancellationTokenSource? _cts;
     private volatile bool _stopRequested;
+    private volatile bool _restartRequested; // A manual CO change during the test asked to rerun it from the start.
     private Task? _testTask;
     private bool _testCompletedNormally;
     private string _testMode = "VT3";
@@ -1582,7 +1583,7 @@ internal sealed partial class MainForm : Form
         _scalarBox.BackColor = Theme.SurfaceAlt;
         _scalarBox.ForeColor = Theme.TextHi;
         _scalarBox.Font = new Font(Theme.MonoFamily, 10F);
-        _scalarBox.Margin = new Padding(0, 5, 8, 0);
+        _scalarBox.Margin = new Padding(0, 6, 8, 0);   // text centered level with the 23 px number boxes
         DarkCombo.Apply(_scalarBox, center: true);
         for (int x = 1; x <= 10; x++) _scalarBox.Items.Add($"{x}X");
         SelectScalar(1);
@@ -1607,7 +1608,7 @@ internal sealed partial class MainForm : Form
 
         var apply = Primary("Apply");
         apply.Size = new Size(84, 30);
-        apply.Margin = new Padding(0, 4, 0, 0);
+        apply.Margin = new Padding(16, 4, 0, 0);
         apply.Click += (_, _) => OnPboApply();
         flow.Controls.Add(apply);
 
@@ -1816,14 +1817,25 @@ internal sealed partial class MainForm : Form
         cell.Value = Math.Clamp(v, (int)cell.Minimum, (int)cell.Maximum);
     }
 
-    private void OnCoApply()
+    private bool _coApplying;
+    private bool _changePromptMuted; // The mid-test change prompt stays muted until the app exits.
+
+    private async void OnCoApply()
     {
+        if (_coApplying) return;
+        _coApplying = true;
         var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
         // Manual changes during a test do not take ownership; crash recovery still backs off one step.
         bool testRunning = _testTask is { IsCompleted: false };
         string reason = testRunning ? Journal.ManualInTest : Journal.ManualTakeover;
-        bool ok = Tuning.Apply(vals, "MANUAL", null, reason);
-        Log.WriteCo(ok ? "手动应用 CO：" : "手动应用 CO 写入失败：", vals, level: ok ? "INFO" : "ERROR");
+        SetStatus("正在写入 CO...", Theme.Warn);
+        Log.Write("正在写入 CO...");
+        long started = Environment.TickCount64;
+        // Per-core write and readback can take seconds while the SMU is busy under load.
+        bool ok = await Task.Run(() => Tuning.Apply(vals, "MANUAL", null, reason));
+        _coApplying = false;
+        double secs = (Environment.TickCount64 - started) / 1000.0;
+        Log.WriteCo(ok ? $"手动应用 CO（{secs:F1} 秒）：" : $"手动应用 CO 写入失败（{secs:F1} 秒）：", vals, level: ok ? "INFO" : "ERROR");
         if (ok && Workspace.WasInterrupted())
         {
             if (testRunning)
@@ -1837,13 +1849,31 @@ internal sealed partial class MainForm : Form
             }
         }
         SetStatus(ok ? "已手动应用 Curve Optimizer" : "CO 应用失败", ok ? Theme.Success : Theme.Accent);
+
+        if (ok && testRunning) PromptRestartAfterManualChange("CO");
     }
 
-    private void OnCoRefresh()
+    /// <summary>After a manual CO or CS change during a test, asks whether to rerun it from the first step and round.</summary>
+    private void PromptRestartAfterManualChange(string what)
     {
-        var off = RyzenSmu.ReadOffsets(_coSlotCount);
+        if (_changePromptMuted) return;
+        bool restart = ThemedDialog.Ask(this, $"检测到测试中手动修改了 {what}，是否重新开始测试？\n重新测试从第一项第一轮开始。",
+            $"手动修改 {what}", "重新测试", "继续测试", "本次运行不再提示，继续测试", out _changePromptMuted);
+        if (restart && _testTask is { IsCompleted: false } && !_stopRequested)
+        {
+            _restartRequested = true;
+            _cts?.Cancel();
+            _stopBtn.Enabled = false;
+            SetStatus("正在重新开始测试...", Theme.Warn);
+        }
+    }
+
+    private async void OnCoRefresh()
+    {
+        int n = _coSlotCount;
+        // Off the UI thread: the reads wait for IoLock, which a CO write or the monitor may hold.
+        var (off, fmax) = await Task.Run(() => (RyzenSmu.ReadOffsets(n), RyzenSmu.ReadFMax()));
         for (int i = 0; i < _coSlotCount && i < off.Count; i++) SetCell(i, off[i]);
-        uint fmax = RyzenSmu.ReadFMax();
         if (fmax > 0) _fmaxBox.Value = Math.Clamp(fmax, (uint)_fmaxBox.Minimum, (uint)_fmaxBox.Maximum);
     }
 
@@ -1865,20 +1895,31 @@ internal sealed partial class MainForm : Form
     }
 
     /// <summary>Applies FMax, PPT, EDC, and TDC limits together.</summary>
-    private void OnPboApply()
+    private bool _pboApplying;
+
+    private async void OnPboApply()
     {
+        if (_pboApplying) return;
+        _pboApplying = true;
         uint fmax = (uint)_fmaxBox.Value;
         uint ppt = (uint)_pptBox.Value;
         uint edc = (uint)_edcBox.Value;
         uint tdc = (uint)_tdcBox.Value;
-        // Zen3 has no FMax write message; sending message ID 0 would be unsafe.
-        bool okF = !_fmaxWritable || RyzenSmu.SetFMax(fmax);
-        bool okP = RyzenSmu.SetPptLimit(ppt);
-        bool okE = RyzenSmu.SetEdcLimit(edc);
-        bool okT = RyzenSmu.SetTdcLimit(tdc);
         uint scalar = SelectedScalar();   // Auto = 1X
         bool writeScalar = _scalarWritable && _scalarDirty;
-        bool okS = !writeScalar || RyzenSmu.SetPboScalar(scalar);
+        bool fmaxWritable = _fmaxWritable;
+        SetStatus("正在写入 PBO 限制...", Theme.Warn);
+        // Off the UI thread: the writes wait for IoLock, which a CO write or the monitor may hold.
+        var (okF, okP, okE, okT, okS) = await Task.Run(() =>
+        (
+            // Zen3 has no FMax write message; sending message ID 0 would be unsafe.
+            !fmaxWritable || RyzenSmu.SetFMax(fmax),
+            RyzenSmu.SetPptLimit(ppt),
+            RyzenSmu.SetEdcLimit(edc),
+            RyzenSmu.SetTdcLimit(tdc),
+            !writeScalar || RyzenSmu.SetPboScalar(scalar)
+        ));
+        _pboApplying = false;
         if (writeScalar && okS) _scalarDirty = false;
         bool ok = okF && okP && okE && okT && okS;
         // Record what was written so crash recovery restores the latest limits, even when changed mid-test.
@@ -1897,10 +1938,18 @@ internal sealed partial class MainForm : Form
 
     // Curve Shaper behavior
 
-    private void OnCsApply()
+    private bool _csApplying;
+
+    private async void OnCsApply()
     {
+        if (_csApplying) return;
+        _csApplying = true;
         var g = CsGridFromCells();
-        bool ok = RyzenSmu.SetCurveShaper(g);
+        bool testRunning = _testTask is { IsCompleted: false };
+        SetStatus("正在写入 Curve Shaper...", Theme.Warn);
+        // Off the UI thread: the write waits for IoLock, which a CO write or the monitor may hold.
+        bool ok = await Task.Run(() => RyzenSmu.SetCurveShaper(g));
+        _csApplying = false;
         if (ok)
         {
             // Cache applied CS values because older BIOS versions cannot read them back.
@@ -1911,6 +1960,7 @@ internal sealed partial class MainForm : Form
         }
         Log.Write("手动应用 Curve Shaper" + (_csState.ReadBroken ? "（备用模式）" : "") + (ok ? "" : "（写入异常，详见上方）"));
         SetStatus(ok ? "已应用 Curve Shaper" : "Curve Shaper 应用失败", ok ? Theme.Success : Theme.Accent);
+        if (ok && testRunning) PromptRestartAfterManualChange("Curve Shaper");
     }
 
     private int[,] CsGridFromCells()
@@ -1922,9 +1972,10 @@ internal sealed partial class MainForm : Form
         return g;
     }
 
-    private void OnCsRefresh()
+    private async void OnCsRefresh()
     {
-        var g = RyzenSmu.ReadCurveShaper(out bool hasInterface);
+        // Off the UI thread: the read waits for IoLock, which a CO write or the monitor may hold.
+        var (g, hasInterface) = await Task.Run(() => (RyzenSmu.ReadCurveShaper(out bool h), h));
 
         if (!hasInterface)
         {
@@ -2257,6 +2308,7 @@ internal sealed partial class MainForm : Form
     private void StopTest(object? sender, EventArgs e)
     {
         _stopRequested = true;
+        _restartRequested = false;
         _cts?.Cancel();
         _measureCts?.Cancel();
         SetStatus("正在停止...", Theme.Accent);
@@ -2657,6 +2709,17 @@ internal sealed partial class MainForm : Form
             return passOk;
         }
 
+        // Include CO applied manually during the test, which the stress loop only reads back on backoff.
+        YCruncher.RefreshBaselineFromCpu(offsets, log: false);
+
+        if (_restartRequested)
+        {
+            Log.WriteCo("手动修改 CO，重新开始测试：", offsets, level: "WARN");
+            Workspace.ClearState();
+            Workspace.ClearInProgress();
+            return false;
+        }
+
         // An incomplete run must not produce final results unless the user stopped it.
         if (!allPassed && !_stopRequested)
         {
@@ -2666,6 +2729,16 @@ internal sealed partial class MainForm : Form
             var partialSnapshot = new List<int>(offsets);
             Ui(() => _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", partialSnapshot)}]");
             return false;
+        }
+
+        // A stopped run has not passed: no pass summary and no final result.
+        if (_stopRequested)
+        {
+            Workspace.ClearState();
+            Workspace.ClearInProgress();
+            var stopSnapshot = new List<int>(offsets);
+            Ui(() => _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", stopSnapshot)}]");
+            return true;
         }
 
         Log.Write("\n" + new string('=', 50));
@@ -2709,7 +2782,7 @@ internal sealed partial class MainForm : Form
         }
 
         Workspace.ClearState();
-        Workspace.ClearInProgress(); // Normal completion or manual stop clears the marker.
+        Workspace.ClearInProgress(); // Normal completion clears the marker.
 
         var finalSnapshot = new List<int>(offsets);
         Ui(() => _offsetsLabel.Text = $"最终 CO: [{string.Join(", ", finalSnapshot)}]");
@@ -2723,6 +2796,12 @@ internal sealed partial class MainForm : Form
 
         SetControlsEnabled(true);
         _stopBtn.Enabled = false;
+        if (_restartRequested)
+        {
+            _restartRequested = false;
+            StartTest(null, EventArgs.Empty);
+            return;
+        }
         SetStatus("就绪", Theme.Success);
         OnTestFinishedForAutostart();
 
@@ -2731,7 +2810,7 @@ internal sealed partial class MainForm : Form
         else if (!_stopRequested)
             ThemedDialog.Show(this, "测试未跑完，未生成最终结果，原因见运行日志。", "测试未完成");
         else
-            ThemedDialog.Show(this, "测试已停止，进程已清理完成。", "已停止");
+            Log.Write("测试已停止，进程已清理完成");
     }
 
     // Single Core Boost and voltage alignment

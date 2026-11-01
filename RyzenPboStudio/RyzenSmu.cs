@@ -513,7 +513,7 @@ internal static class RyzenSmu
     private const int CoCoreTimeoutMs = 20_000;     // per core; a busy SMU clears long before this
 
     /// <summary>
-    /// Writes each active core's CO and verifies its readback. A busy SMU mailbox makes writes or readbacks fail for
+    /// Writes each active core whose CO readback differs from the target and verifies it. A busy SMU mailbox makes writes or readbacks fail for
     /// a while, so a core is rewritten with a growing wait until its readback matches; only a core that still does not
     /// match after CoCoreTimeoutMs fails the call. Retries are not logged; the caller reports a failure.
     /// </summary>
@@ -545,7 +545,12 @@ internal static class RyzenSmu
                 }
 
                 for (int i = 0; i < offsets.Count; i++)
-                    if (!IsSlotDisabledNoLock(cpu, i) && !WriteVerified(i)) return false;
+                {
+                    if (IsSlotDisabledNoLock(cpu, i)) continue;
+                    var (ccd, core) = MapIndex(cpu, i);
+                    if (TryReadMargin(cpu, ccd, core) == offsets[i]) continue;   // already at target
+                    if (!WriteVerified(i)) return false;
+                }
 
                 // Final pass: a core that drifted while the others were written is written again the same way
                 for (int i = 0; i < offsets.Count; i++)
