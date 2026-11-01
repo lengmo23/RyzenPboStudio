@@ -80,6 +80,10 @@ internal static class Updater
     // without bundled .NET (including older versions) select by.
     private const string SelfContainedTag = "net8contained";
 
+    // Asset-name marker of the self-contained app-only package, named "...-net8patch-rt<runtime>.zip". Besides the words
+    // above it must not contain "net8contained", which 3.0.3–3.0.5 self-contained installs select by.
+    private const string SelfContainedPatchTag = "net8patch";
+
     /// <summary>True when .NET 8 is bundled next to the executable rather than installed on the system.</summary>
     private static bool IsSelfContained => File.Exists(Path.Combine(AppContext.BaseDirectory, "coreclr.dll"));
 
@@ -106,14 +110,19 @@ internal static class Updater
         GhAsset? zip;
         if (IsSelfContained)
         {
-            // update.zip relies on an installed .NET 8, so a bundled-runtime install takes the self-contained package.
-            zip = zips.FirstOrDefault(a => a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase))
+            // update.zip relies on an installed .NET 8, so a bundled-runtime install takes the self-contained packages.
+            // The app-only package keeps the installed runtime and fits only the runtime it was built against.
+            var rt = Environment.Version;
+            string patchSuffix = $"-{SelfContainedPatchTag}-rt{rt.Major}.{rt.Minor}.{rt.Build}.zip";
+            zip = zips.FirstOrDefault(a => a.Name.EndsWith(patchSuffix, StringComparison.OrdinalIgnoreCase))
+                  ?? zips.FirstOrDefault(a => a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase))
                   ?? throw new InvalidOperationException($"{release.TagName} 没有内置 .NET 8 的安装包，请到项目主页手动下载。");
         }
         else
         {
             // Prefer the smaller update archive; use lite (named full before 3.0.3) only when update is absent.
-            var plain = zips.Where(a => !a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase)).ToList();
+            var plain = zips.Where(a => !a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase)
+                                        && !a.Name.Contains(SelfContainedPatchTag, StringComparison.OrdinalIgnoreCase)).ToList();
             zip = plain.FirstOrDefault(a => a.Name.Contains("update", StringComparison.OrdinalIgnoreCase))
                   ?? plain.FirstOrDefault(a => a.Name.Contains("lite", StringComparison.OrdinalIgnoreCase)
                                             || a.Name.Contains("full", StringComparison.OrdinalIgnoreCase))
