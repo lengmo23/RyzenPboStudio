@@ -353,19 +353,23 @@ internal static class RyzenSmu
         };
     }
 
-    /// <summary>Finds a per-core voltage segment followed by an equal-length temperature segment.
-    /// Skips fused-off slots and returns -1 when absent.</summary>
+    /// <summary>Finds a per-core voltage segment followed by an equal-length temperature segment, preferring the first
+    /// candidate whose frequency segment is also found. Constant blocks can pass the voltage/temperature test alone
+    /// (9800X3D: 0.624 V then 25 °C), and idle per-core power below 1.6 W directly before the real segment looks
+    /// like a voltage. Skips fused-off slots and returns -1 when absent.</summary>
     private static int ProbePerCoreVolt(float[] t, int cores)
     {
+        int voltOnly = -1;
         for (int i = 24; i + 2 * cores <= t.Length; i++)
         {
-            if (IsPtVolt(t[i - 1])) continue; // Require a segment boundary to avoid matching inside a longer voltage range.
             bool ok = true;
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtVolt(t[i + k]);
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtTemp(t[i + cores + k]);
-            if (ok) return i;
+            if (!ok) continue;
+            if (ProbePerCoreFreq(t, i, cores) >= 0) return i;
+            if (voltOnly < 0 && !IsPtVolt(t[i - 1])) voltOnly = i;   // fallback for tables without a frequency segment
         }
-        return -1;
+        return voltOnly;
     }
 
     /// <summary>Finds per-core frequency and effective-frequency segments after temperature.
