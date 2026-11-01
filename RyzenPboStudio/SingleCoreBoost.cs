@@ -225,7 +225,7 @@ internal sealed class SingleCoreBoost : IDisposable
     {
         var t = ReadTable();
         if (t == null) return false;
-        var lay = RyzenSmu.ProbePtLayout(t, SlotCount);
+        var lay = RyzenSmu.ProbePtLayout(t, SlotCount, bclk);
         if (lay == null) return false;
         // Keep the more complete layout
         if (layout is { PerCoreVoltIdx: >= 0 } && lay.PerCoreVoltIdx < 0) return true;
