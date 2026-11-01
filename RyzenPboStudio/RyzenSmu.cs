@@ -279,16 +279,18 @@ internal static class RyzenSmu
 
     /// <summary>Probes Zen4/Zen5 and then Zen3 PM Table layouts; returns null on failure.
     /// An incomplete per-core layout retains a negative index so callers can retry.
+    /// <paramref name="bclk"/> is the CPU-domain BCLK in MHz, used to match CORE_FREQ against FREQEFF.
     /// </summary>
-    internal static PtLayout? ProbePtLayout(float[]? t, int cores)
+    internal static PtLayout? ProbePtLayout(float[]? t, int cores, double bclk = 100)
     {
         if (t == null || cores <= 0 || t.Length < 70) return null;
 
         var lay = ProbeZen4Header(t) ?? ProbeZen3Header(t);
         if (lay == null) return null;
 
-        lay.PerCoreVoltIdx = ProbePerCoreVolt(t, cores);
-        lay.PerCoreFreqIdx = ProbePerCoreFreq(t, lay.PerCoreVoltIdx, cores);
+        float scale = bclk is > 50 and < 200 ? (float)(bclk / 100.0) : 1f;
+        lay.PerCoreVoltIdx = ProbePerCoreVolt(t, cores, scale);
+        lay.PerCoreFreqIdx = ProbePerCoreFreq(t, lay.PerCoreVoltIdx, cores, scale);
         return lay;
     }
 
@@ -357,7 +359,7 @@ internal static class RyzenSmu
     /// candidate whose frequency segment is also found. Constant blocks can pass the voltage/temperature test alone
     /// (9800X3D: 0.624 V then 25 °C), and idle per-core power below 1.6 W directly before the real segment looks
     /// like a voltage. Skips fused-off slots and returns -1 when absent.</summary>
-    private static int ProbePerCoreVolt(float[] t, int cores)
+    private static int ProbePerCoreVolt(float[] t, int cores, float bclkScale)
     {
         int voltOnly = -1;
         for (int i = 24; i + 2 * cores <= t.Length; i++)
@@ -366,16 +368,17 @@ internal static class RyzenSmu
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtVolt(t[i + k]);
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtTemp(t[i + cores + k]);
             if (!ok) continue;
-            if (ProbePerCoreFreq(t, i, cores) >= 0) return i;
+            if (ProbePerCoreFreq(t, i, cores, bclkScale) >= 0) return i;
             if (voltOnly < 0 && !IsPtVolt(t[i - 1])) voltOnly = i;   // fallback for tables without a frequency segment
         }
         return voltOnly;
     }
 
     /// <summary>Finds per-core frequency and effective-frequency segments after temperature.
-    /// Allows 10% sampling slack when comparing the adjacent segments;
-    /// skips fused-off slots and returns -1 when absent.</summary>
-    private static int ProbePerCoreFreq(float[] t, int voltIdx, int cores)
+    /// Allows 10% sampling slack when comparing the adjacent segments; CORE_FREQ is reported at 100 MHz BCLK and
+    /// FREQEFF at the actual BCLK, so CORE_FREQ is scaled by <paramref name="bclkScale"/> first.
+    /// Skips fused-off slots and returns -1 when absent.</summary>
+    private static int ProbePerCoreFreq(float[] t, int voltIdx, int cores, float bclkScale)
     {
         if (voltIdx < 0) return -1;
         for (int seg = 2; seg <= 6; seg++)
@@ -387,7 +390,7 @@ internal static class RyzenSmu
             {
                 if (IsSlotMaskedNoLock(k)) continue;
                 float freq = t[f + k], eff = t[f + cores + k];
-                ok = freq is >= 0.2f and <= 7.5f && eff >= -0.01f && eff <= freq * 1.10f;
+                ok = freq is >= 0.2f and <= 7.5f && eff >= -0.01f && eff <= freq * bclkScale * 1.10f;
             }
             if (ok) return f;
         }

@@ -572,7 +572,7 @@ internal sealed class MonitorView : UserControl
                     {
                         // Keep probing incomplete PM Table layouts; fused-off or sleeping cores can hide a segment for one frame.
                         if (ptLayout is not { PerCoreVoltIdx: >= 0, PerCoreFreqIdx: >= 0 })
-                            ptLayout = RyzenSmu.ProbePtLayout(tbl, n) ?? ptLayout;
+                            ptLayout = RyzenSmu.ProbePtLayout(tbl, n, bclk) ?? ptLayout;
                         if (ptLayout is { } lay)
                         {
                             if (lay.PerCoreVoltIdx >= 0 && tbl.Length > lay.PerCoreVoltIdx + n)
