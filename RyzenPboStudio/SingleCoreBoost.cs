@@ -227,7 +227,9 @@ internal sealed class SingleCoreBoost : IDisposable
         if (t == null) return false;
         var lay = RyzenSmu.ProbePtLayout(t, SlotCount);
         if (lay == null) return false;
-        if (layout is { PerCoreVoltIdx: >= 0 } && lay.PerCoreVoltIdx < 0) return true;   // keep the complete layout
+        // Keep the more complete layout
+        if (layout is { PerCoreVoltIdx: >= 0 } && lay.PerCoreVoltIdx < 0) return true;
+        if (layout is { PerCoreFreqIdx: >= 0 } && lay.PerCoreFreqIdx < 0) return true;
 
         layout = lay;
         powIdx = lay.PerCoreVoltIdx >= 0 ? Segment(t, lay.PerCoreVoltIdx - SlotCount, 0f, 120f) : -1;
@@ -247,7 +249,7 @@ internal sealed class SingleCoreBoost : IDisposable
     /// <summary>Waits until the target core is actually loaded; moving the thread takes a scheduler tick or two.</summary>
     private bool WaitForLoad(int slot, CancellationToken ct)
     {
-        if (powIdx < 0) ProbeLayout();
+        if (powIdx < 0 || layout is not { PerCoreFreqIdx: >= 0 }) ProbeLayout();
         if (powIdx < 0) return !ct.WaitHandle.WaitOne(1000);
 
         var sw = Stopwatch.StartNew();
@@ -259,14 +261,12 @@ internal sealed class SingleCoreBoost : IDisposable
         return false;
     }
 
-    /// <summary>Loaded = power above the floor and at least twice any other core, which rejects a busy machine.</summary>
+    /// <summary>Loaded = the target core draws power above the floor and, when the C0 segment exists, is busy.
+    /// Other cores are not compared: a background thread on another core would otherwise block readiness.</summary>
     private bool IsLoaded(float[] t, int slot)
     {
-        if (powIdx < 0 || t.Length < powIdx + SlotCount) return false;
-        double me = t[powIdx + slot], other = 0;
-        for (int k = 0; k < SlotCount; k++)
-            if (k != slot && !slotDisabled[k] && t[powIdx + k] > other) other = t[powIdx + k];
-        return me >= MinLoadW && me >= other * 2;
+        if (powIdx < 0 || t.Length < powIdx + SlotCount || t[powIdx + slot] < MinLoadW) return false;
+        return c0Idx < 0 || t.Length < c0Idx + SlotCount || t[c0Idx + slot] >= MinOcc;
     }
 
     /// <summary>Reads APERF / MPERF / TSC in one affinity binding so the three form one snapshot.</summary>
