@@ -26,7 +26,7 @@ internal static class CppcReader
         }
         catch (Exception e)
         {
-            Log.Write($"读取 CPPC 事件日志失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read the CPPC event log: {0}", e.Message), "WARN");
             return null;
         }
     }

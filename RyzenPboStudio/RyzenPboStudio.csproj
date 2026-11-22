@@ -11,13 +11,13 @@
     <AssemblyName>AMD Ryzen PBO Studio</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\ICON.ico</ApplicationIcon>
-    <Version>3.0.5</Version>
+    <Version>4.0.0-beta</Version>
     <!-- Assembly metadata shown in the executable's Details properties. -->
     <Product>AMD Ryzen PBO Studio</Product>
     <Authors>@lengmo23</Authors>
     <Company>@lengmo23</Company>
     <Copyright>Copyright © 2026 @lengmo23. Licensed under GPL-3.0.</Copyright>
-    <Description>AMD Ryzen Curve Optimizer 负压测试与自动调整工具</Description>
+    <Description>AMD Ryzen Curve Optimizer（CO）测试与自动调整工具</Description>
     <!-- Fix the build date at compile time instead of reading file timestamps at runtime. -->
     <BuildDate>$([System.DateTime]::Now.ToString("yyyy-MM-dd"))</BuildDate>
     <!-- CPU detection uses registry and Win32 APIs instead of wmic. -->
@@ -51,6 +51,8 @@
     <!-- Payment QR codes for the sponsor dialog (JPEG data despite the .png name). -->
     <EmbeddedResource Include="..\Alipay.png" LogicalName="RyzenPboStudio.Alipay.png" />
     <EmbeddedResource Include="..\Wechat.png" LogicalName="RyzenPboStudio.Wechat.png" />
+    <!-- Translations, one lang\<culture>.ini per language; English is built in. -->
+    <None Update="lang\*.ini" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <Target Name="GenerateEmbeddedToolBundle"
@@ -76,6 +78,29 @@
           SkipUnchangedFiles="true" />
     <Message Condition="'@(YCruncherFile)' == ''" Importance="high"
              Text="y-cruncher not found locally; published without it (user supplies it in tools\y-cruncher\)." />
+  </Target>
+
+  <!-- Publish bundled DRAM preset folders under dram\ when present. -->
+  <Target Name="CopyDramPresetsToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <DramPresetFile Include="..\dram-presets\**\*" />
+    </ItemGroup>
+    <Copy Condition="'@(DramPresetFile)' != ''"
+          SourceFiles="@(DramPresetFile)"
+          DestinationFiles="@(DramPresetFile->'$(PublishDir)dram\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Publish the closed-source protected Memory OC native module when built locally;
+       open-source builds skip it cleanly and fall back to the built-in placeholder panel. -->
+  <Target Name="CopyProtectedMemOcToPublish" AfterTargets="Publish">
+    <PropertyGroup>
+      <ProtectedMemOcNativePath>$(MSBuildProjectDirectory)\..\private\MemOc\out\MemOcNative.dll</ProtectedMemOcNativePath>
+    </PropertyGroup>
+    <Copy Condition="Exists('$(ProtectedMemOcNativePath)')"
+          SourceFiles="$(ProtectedMemOcNativePath)"
+          DestinationFiles="$(PublishDir)MemOcNative.dll"
+          SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

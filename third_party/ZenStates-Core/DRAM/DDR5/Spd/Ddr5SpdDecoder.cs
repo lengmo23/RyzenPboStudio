@@ -186,6 +186,7 @@ namespace ZenStates.Core
         private const int SPD_EXPO_REVISION = 836;
         private const int SPD_EXPO_PROFILES = 837;   // [0]=profile1, [1]=profile2
         private const int SPD_EXPO_VDD1 = 842;   // VDD voltage code
+        private const int SPD_EXPO_PROFILE_SIZE = 40;   // profile 2 starts 40 bytes after profile 1
         private const int SPD_EXPO_VDDQ1 = 843;   // VDDQ voltage code
         private const int SPD_EXPO_TCKMIN1_LSB = 846;   // Profile 1 tCKAVGmin
         private const int SPD_EXPO_TCKMIN1_MSB = 847;
@@ -743,16 +744,18 @@ namespace ZenStates.Core
                 info.ExpoProfile1.IsValid = ((profileBits & 0x01) != 0) && info.ExpoProfile1.tCKAVGminPs > 0;
                 info.ExpoProfile2 = new Ddr5ExpoProfile();
 
-                if ((profileBits & 0x02) != 0 && spd.Length >= SPD_EXPO_TCKMIN1_LSB + 32)
+                // Profiles are 40-byte blocks. A single-profile module can still report 0x03 here, so profile 2
+                // counts only when its block holds a cycle time and a VDD.
+                if ((profileBits & 0x0E) != 0 && spd.Length >= SPD_EXPO_TCKMIN1_LSB + SPD_EXPO_PROFILE_SIZE + 20)
                 {
                     info.ExpoProfile2 = DecodeExpoProfile(
                         spd,
                         2,
-                        SPD_EXPO_TCKMIN1_LSB + 32,
-                        SPD_EXPO_VDD1 + 2,
-                        SPD_EXPO_VDDQ1 + 2);
+                        SPD_EXPO_TCKMIN1_LSB + SPD_EXPO_PROFILE_SIZE,
+                        SPD_EXPO_VDD1 + SPD_EXPO_PROFILE_SIZE,
+                        SPD_EXPO_VDDQ1 + SPD_EXPO_PROFILE_SIZE);
 
-                    info.ExpoProfile2.IsValid = info.ExpoProfile2.tCKAVGminPs > 0;
+                    info.ExpoProfile2.IsValid = info.ExpoProfile2.tCKAVGminPs > 0 && info.ExpoProfile2.VddCode != 0;
                 }
             }
             else
@@ -865,14 +868,20 @@ namespace ZenStates.Core
             p.tRP = (int)Math.Ceiling((double)p.tRPminPs / tCKideal - 0.01);
             p.TimingString = string.Format("{0}-{1}-{2} @ {3}", p.CL, p.tRCD, p.tRP, p.SpeedGrade);
 
-            // Voltage: code * 5mV + 1100mV base
+            // Voltage: bits[7:5] whole volts + bits[4:0] x 50 mV
             p.VddCode = B(spd, vddOffset);
             p.VddqCode = B(spd, vddqOffset);
-            p.VddMv = 1100 + p.VddCode * 5;
-            p.VddqMv = 1100 + p.VddqCode * 5;
+            p.VddMv = ProfileVoltageMv(p.VddCode);
+            p.VddqMv = ProfileVoltageMv(p.VddqCode);
 
             p.IsValid = true;
             return p;
+        }
+
+        /// <summary>EXPO / XMP 3.0 voltage byte: bits[7:5] whole volts, bits[4:0] in 50 mV steps (0x28 = 1.40 V).</summary>
+        private static int ProfileVoltageMv(int code)
+        {
+            return ((code >> 5) & 0x07) * 1000 + (code & 0x1F) * 50;
         }
 
         private static Ddr5XmpProfile DecodeXmpProfile(byte[] spd, int profileNum, int baseOff)
@@ -886,9 +895,9 @@ namespace ZenStates.Core
             p.VddqCode = B(spd, baseOff + XMP_OFF_VDDQ);
             p.VppCode = B(spd, baseOff + XMP_OFF_VPP);
 
-            p.VddMv = 1100 + p.VddCode * 5;
-            p.VddqMv = 1100 + p.VddqCode * 5;
-            p.VppMv = 1500 + p.VppCode * 5;
+            p.VddMv = ProfileVoltageMv(p.VddCode);
+            p.VddqMv = ProfileVoltageMv(p.VddqCode);
+            p.VppMv = ProfileVoltageMv(p.VppCode);
 
             p.tCKAVGminPs = U16LE(spd, baseOff + XMP_OFF_TCK_LSB);
 

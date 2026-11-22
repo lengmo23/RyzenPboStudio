@@ -4,57 +4,37 @@ using System.Runtime.InteropServices;
 
 namespace RyzenPboStudio;
 
-/// <summary>Draws the borderless title bar and handles dragging from its empty area.</summary>
+/// <summary>Slim draggable workspace title bar with page heading, global status pill, clock, and window buttons.</summary>
 internal sealed class HeaderBar : Control
 {
-    private const int IconSize = 48;
-    private const int InfoGap = 48; // Gap between title and hardware details.
-    private const int BtnW = 42, BtnH = 42, BtnTop = 4, BtnRight = 6; // Large outlined window icons.
-    private const int BtnUpdate = 0, BtnSponsor = 1, BtnInfo = 2, BtnMin = 3, BtnClose = 4, BtnCount = 5;
-
+    private const int BtnMin = 0, BtnClose = 1, BtnCount = 2;
     private const int WM_NCLBUTTONDOWN = 0xA1, HTCAPTION = 2;
+
     [DllImport("user32.dll")] private static extern bool ReleaseCapture();
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
-    private int hoverBtn = -1, pressedBtn = -1;
-    private readonly ToolTip tip = new();
-    private string updateTip = "检查更新";
-    private bool updateAvailable;
+    private int _hoverBtn = -1, _pressedBtn = -1;
+    private bool _hoverStatus;
+    private bool _hoverNoteLink, _pressedNoteLink;
+    private readonly ToolTip _tip = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 120 };
+    private string? _tipText;
 
-    public event EventHandler? UpdateClicked;
-    public event EventHandler? SponsorClicked;
-    public event EventHandler? InfoClicked;
+    private string _pageTitle = "";
+    private string _statusText = L.T("Ready");
+    private Color _statusColor = Theme.Success;
+    private string _clockText = DateTime.Now.ToString("yyyy/MM/dd HH:mm");
+    private string? _notePrefix, _noteLink, _noteUrl;
 
-    /// <summary>Hover text of the update button, e.g. the available version or download progress.</summary>
-    public string UpdateTip
-    {
-        get => updateTip;
-        set
-        {
-            if (updateTip == value) return;
-            updateTip = value;
-            if (hoverBtn == BtnUpdate) ShowTip(BtnUpdate);
-        }
-    }
+    private Font? _titleFont;
+    private Font? _statusFont;
+    private Font? _clockFont;
+    private Rectangle _statusRect;
+    private Rectangle _noteLinkRect;
 
-    /// <summary>Marks the update button with a dot while a newer release is known.</summary>
-    public bool UpdateAvailable
-    {
-        get => updateAvailable;
-        set { if (updateAvailable != value) { updateAvailable = value; Invalidate(); } }
-    }
+    public event Action<string>? NoteLinkClicked;
 
-    private readonly Font titleFont = new(Theme.FontFamily, 17F, FontStyle.Bold);
-    private readonly Font subFont = new(Theme.FontFamily, 9F);
-    private readonly Font infoFont = new(Theme.FontFamily, 9F);
-    private readonly Bitmap? icon;
-    private readonly string title = "AMD Ryzen PBO Studio";
-    private readonly string subtitle;
-    private readonly string[] lines = { "", "", "" };
-
-    /// <summary>Version shown to the user, e.g. "V2.2.0Beta" from csproj Version "2.2.0-beta". The SDK appends
-    /// "+commit" build metadata to the informational version, which is dropped. The updater keeps comparing the
-    /// numeric assembly version, which has no prerelease tag.</summary>
+    /// <summary>Version shown to the user, e.g. "V3.0.5" or "V2.2.0Beta". The SDK appends "+commit" build
+    /// metadata to the informational version, which is dropped.</summary>
     public static string DisplayVersion { get; } = MakeDisplayVersion();
 
     private static string MakeDisplayVersion()
@@ -73,169 +53,281 @@ internal sealed class HeaderBar : Control
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         BackColor = Theme.Bg;
-        ForeColor = MonTheme.Fg;
-
-        subtitle = $"{DisplayVersion} · AUTOMATIC OC TOOL";
-        try
-        {
-            using var stream = typeof(HeaderBar).Assembly.GetManifestResourceStream("RyzenPboStudio.ICON.ico");
-            if (stream != null)
-            {
-                using var ico = new Icon(stream, IconSize, IconSize);
-                icon = ico.ToBitmap();
-            }
-        }
-        catch { icon = null; }
+        ForeColor = Theme.TextHi;
+        RebuildFonts(9F);
+        Font = new Font(Theme.FontFamily, 9F);
     }
 
-    /// <summary>Updates one hardware-info row without repainting unchanged text.</summary>
-    public void SetLine(int index, string text)
+    public string PageTitle
     {
-        if (lines[index] == text) return;
-        lines[index] = text;
+        get => _pageTitle;
+        set { if (_pageTitle != value) { _pageTitle = value; Invalidate(); } }
+    }
+
+    public void SetStatus(string text, Color color)
+    {
+        if (_statusText == text && _statusColor == color) return;
+        _statusText = text;
+        _statusColor = color;
+        if (_hoverStatus) SetTip(_statusText);
         Invalidate();
+    }
+
+    public void SetClock(string text)
+    {
+        if (_clockText == text) return;
+        _clockText = text;
+        Invalidate();
+    }
+
+    /// <summary>Shows a subtle attribution note with a clickable author handle right of the status capsule.</summary>
+    public void SetPageNote(string? prefix, string? link, string? url)
+    {
+        if (_notePrefix == prefix && _noteLink == link && _noteUrl == url) return;
+        _notePrefix = prefix;
+        _noteLink = link;
+        _noteUrl = url;
+        _noteLinkRect = Rectangle.Empty;
+        _hoverNoteLink = false;
+        _pressedNoteLink = false;
+        Invalidate();
+    }
+
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        RebuildFonts(Font?.Size ?? 9F);
+        Invalidate();
+    }
+
+    private void RebuildFonts(float basePt)
+    {
+        var oldTitle = _titleFont;
+        var oldStatus = _statusFont;
+        var oldClock = _clockFont;
+        (_titleFont, _statusFont, _clockFont) = CreateScaledFonts(basePt);
+        oldTitle?.Dispose();
+        oldStatus?.Dispose();
+        oldClock?.Dispose();
+    }
+
+    private static (Font title, Font status, Font clock) CreateScaledFonts(float basePt)
+    {
+        float k = Math.Max(0.6f, basePt / 9f);
+        return (
+            new Font(Theme.FontFamily, 11.5f * k, FontStyle.Bold),
+            new Font(Theme.FontFamily, 8.75f * k),
+            new Font(Theme.FontFamily, 8.5f * k)
+        );
+    }
+
+    private Rectangle BtnRect(int i)
+    {
+        float s = Math.Max(0.7f, Height / 42f);
+        int bw = Math.Max(26, (int)Math.Round(38 * s));
+        int bh = Math.Max(20, (int)Math.Round(30 * s));
+        int gap = Math.Max(2, (int)Math.Round(4 * s));
+        int right = Math.Max(6, (int)Math.Round(10 * s));
+        int top = (Height - bh) / 2;
+        int idxFromRight = BtnCount - 1 - i;
+        return new Rectangle(Width - right - (idxFromRight + 1) * bw - idxFromRight * gap, top, bw, bh);
+    }
+
+    private int HitButton(Point p)
+    {
+        for (int i = 0; i < BtnCount; i++)
+            if (BtnRect(i).Contains(p)) return i;
+        return -1;
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        e.Graphics.Clear(BackColor);
-        int h = ClientSize.Height;
-        int x = 4;
-
-        if (icon != null)
-        {
-            e.Graphics.DrawImage(icon, x, (h - IconSize) / 2, IconSize, IconSize);
-            x += IconSize + 12;
-        }
-
-        var flags = TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
-        var titleSize = TextRenderer.MeasureText(e.Graphics, title, titleFont, Size.Empty, flags);
-        var subSize = TextRenderer.MeasureText(e.Graphics, subtitle, subFont, Size.Empty, flags);
-        int blockH = titleSize.Height + 2 + subSize.Height;
-        int y = (h - blockH) / 2;
-        TextRenderer.DrawText(e.Graphics, title, titleFont, new Point(x, y), MonTheme.Fg, flags);
-        TextRenderer.DrawText(e.Graphics, subtitle, subFont, new Point(x + 2, y + titleSize.Height + 2), MonTheme.Dim, flags);
-        x += Math.Max(titleSize.Width, subSize.Width) + InfoGap;
-
-        // Center hardware details clear of window buttons and trim overlong text.
-        int lineH = TextRenderer.MeasureText(e.Graphics, "Ag", infoFont, Size.Empty, flags).Height + 3;
-        int ly = (h - lineH * lines.Length) / 2;
-        int width = Math.Max(0, ClientSize.Width - BtnRight - BtnCount * BtnW - 8 - x);
-        foreach (string line in lines)
-        {
-            TextRenderer.DrawText(e.Graphics, line, infoFont, new Rectangle(x, ly, width, lineH),
-                MonTheme.Fg, flags | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter);
-            ly += lineH;
-        }
-
-        for (int i = 0; i < BtnCount; i++) DrawWindowButton(e.Graphics, i);
-        using var border = new Pen(Theme.Border);
-        e.Graphics.DrawLine(border, 0, h - 1, ClientSize.Width, h - 1);
-    }
-
-    private Rectangle BtnRect(int i) => new(ClientSize.Width - BtnRight - (BtnCount - i) * BtnW, BtnTop, BtnW, BtnH);
-
-    private int HitButton(Point p)
-    {
-        for (int i = 0; i < BtnCount; i++) if (BtnRect(i).Contains(p)) return i;
-        return -1;
-    }
-
-    /// <summary>Draws a window button as a large outlined icon; it brightens on hover and the close button turns red.</summary>
-    private void DrawWindowButton(Graphics g, int i)
-    {
-        var r = BtnRect(i);
-        bool hot = hoverBtn == i;
+        var g = e.Graphics;
+        g.Clear(BackColor);
+        if (Width <= 4 || Height <= 4 || _titleFont == null || _statusFont == null || _clockFont == null) return;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        if (hot)
-        {
-            using var bg = new SolidBrush(i == BtnClose ? Theme.Accent : Theme.Border);
-            using var hl = Theme.RoundRect(Rectangle.Inflate(r, -2, -2), 6);
-            g.FillPath(bg, hl);
-        }
 
-        int cx = r.Left + r.Width / 2, cy = r.Top + r.Height / 2;
-        using var pen = new Pen(hot ? (i == BtnClose ? Theme.AccentText : MonTheme.Fg) : MonTheme.Dim, 1.7f)
+        float s = Math.Max(0.7f, Height / 42f);
+        int padX = (int)Math.Round(18 * s);
+        var flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+
+        // Right side: window buttons + clock
+        for (int i = 0; i < BtnCount; i++) DrawWindowButton(g, i, s);
+
+        var firstBtn = BtnRect(BtnMin);
+        var clockSize = TextRenderer.MeasureText(g, _clockText, _clockFont, Size.Empty, flags);
+        int clockRight = firstBtn.Left - (int)Math.Round(12 * s);
+        var clockRect = new Rectangle(Math.Max(0, clockRight - clockSize.Width), 0, clockSize.Width, Height);
+        TextRenderer.DrawText(g, _clockText, _clockFont, clockRect, Theme.TextLo, flags);
+
+        // Left side: current page title + global status capsule
+        var titleSize = TextRenderer.MeasureText(g, _pageTitle, _titleFont, Size.Empty, flags);
+        var titleRect = new Rectangle(padX, 0, titleSize.Width, Height);
+        TextRenderer.DrawText(g, _pageTitle, _titleFont, titleRect, Theme.TextHi, flags);
+
+        int pillLeft = titleRect.Right + (int)Math.Round(14 * s);
+        int maxPillRight = clockRect.Left - (int)Math.Round(12 * s);
+        int availW = maxPillRight - pillLeft;
+        if (availW > (int)Math.Round(48 * s))
         {
-            StartCap = LineCap.Round,
-            EndCap = LineCap.Round,
-            LineJoin = LineJoin.Round,
-        };
-        if (i == BtnUpdate)
-        {
-            // Download arrow over a tray.
-            g.DrawLine(pen, cx, cy - 11, cx, cy + 4);
-            g.DrawLines(pen, new[] { new Point(cx - 6, cy - 2), new Point(cx, cy + 4), new Point(cx + 6, cy - 2) });
-            g.DrawLines(pen, new[] { new Point(cx - 11, cy + 4), new Point(cx - 11, cy + 11), new Point(cx + 11, cy + 11), new Point(cx + 11, cy + 4) });
-            if (updateAvailable)
-                using (var dot = new SolidBrush(Theme.Accent)) g.FillEllipse(dot, cx + 7, cy - 14, 7, 7);
-        }
-        else if (i == BtnSponsor)
-        {
-            // Coffee cup: rounded body, handle on the right, two wisps of steam.
-            const int x0 = -11, x1 = 6, top = -2, bottom = 11, rad = 4;
-            using var cup = new GraphicsPath();
-            cup.AddLine(cx + x0, cy + top, cx + x1, cy + top);
-            cup.AddLine(cx + x1, cy + top, cx + x1, cy + bottom - rad);
-            cup.AddArc(cx + x1 - 2 * rad, cy + bottom - 2 * rad, 2 * rad, 2 * rad, 0, 90);
-            cup.AddLine(cx + x1 - rad, cy + bottom, cx + x0 + rad, cy + bottom);
-            cup.AddArc(cx + x0, cy + bottom - 2 * rad, 2 * rad, 2 * rad, 90, 90);
-            cup.CloseFigure();
-            g.DrawPath(pen, cup);
-            g.DrawArc(pen, cx + x1 - 3, cy + 1, 8, 7, -90, 180);
-            g.DrawBezier(pen, cx - 6, cy - 5, cx - 8, cy - 8, cx - 4, cy - 10, cx - 6, cy - 13);
-            g.DrawBezier(pen, cx, cy - 5, cx - 2, cy - 8, cx + 2, cy - 10, cx, cy - 13);
-        }
-        else if (i == BtnInfo)
-        {
-            g.DrawEllipse(pen, cx - 12, cy - 12, 24, 24);
-            using (var dot = new SolidBrush(pen.Color)) g.FillEllipse(dot, cx - 1.6f, cy - 7.6f, 3.2f, 3.2f);
-            g.DrawLine(pen, cx, cy - 2, cx, cy + 6);
-        }
-        else if (i == BtnMin)
-        {
-            using (var box = Theme.RoundRect(new Rectangle(cx - 11, cy - 11, 22, 22), 4)) g.DrawPath(pen, box);
-            g.DrawLine(pen, cx - 6, cy, cx + 6, cy);
+            int pillH = Math.Max(18, (int)Math.Round(25 * s));
+            int dotD = Math.Max(6, (int)Math.Round(7.5f * s));
+            int glowD = dotD + Math.Max(4, (int)Math.Round(5 * s));
+            int innerPadL = (int)Math.Round(10 * s);
+            int innerGap = (int)Math.Round(7 * s);
+            int innerPadR = (int)Math.Round(11 * s);
+            var textNeed = TextRenderer.MeasureText(g, _statusText, _statusFont, Size.Empty, flags);
+            int pillW = Math.Min(availW, innerPadL + dotD + innerGap + textNeed.Width + innerPadR);
+            int pillY = (Height - pillH) / 2;
+            _statusRect = new Rectangle(pillLeft, pillY, pillW, pillH);
+
+            using var pillPath = Theme.RoundRect(_statusRect, pillH / 2);
+            using var pillFill = new SolidBrush(Theme.Surface);
+            using var pillStroke = new Pen(Color.FromArgb(95, _statusColor), 1f);
+            g.FillPath(pillFill, pillPath);
+            g.DrawPath(pillStroke, pillPath);
+
+            int dotCx = _statusRect.Left + innerPadL + dotD / 2;
+            int dotCy = _statusRect.Top + pillH / 2;
+            using (var glow = new SolidBrush(Color.FromArgb(55, _statusColor)))
+                g.FillEllipse(glow, dotCx - glowD / 2f, dotCy - glowD / 2f, glowD, glowD);
+            using (var dot = new SolidBrush(_statusColor))
+                g.FillEllipse(dot, dotCx - dotD / 2f, dotCy - dotD / 2f, dotD, dotD);
+
+            int textX = _statusRect.Left + innerPadL + dotD + innerGap;
+            int textW = Math.Max(0, _statusRect.Right - innerPadR - textX);
+            var textRect = new Rectangle(textX, _statusRect.Top, textW, pillH);
+            TextRenderer.DrawText(g, _statusText, _statusFont, textRect, Theme.TextHi,
+                flags | TextFormatFlags.EndEllipsis);
         }
         else
         {
-            g.DrawLine(pen, cx - 10, cy - 10, cx + 10, cy + 10);
-            g.DrawLine(pen, cx - 10, cy + 10, cx + 10, cy - 10);
+            _statusRect = Rectangle.Empty;
         }
-        g.SmoothingMode = SmoothingMode.Default;
+
+        _noteLinkRect = Rectangle.Empty;
+        if (!string.IsNullOrEmpty(_noteLink))
+        {
+            int noteLeft = (_statusRect.IsEmpty ? pillLeft : _statusRect.Right) + (int)Math.Round(14 * s);
+            int maxNoteRight = clockRect.Left - (int)Math.Round(16 * s);
+            int noteAvail = maxNoteRight - noteLeft;
+            var linkSize = TextRenderer.MeasureText(g, _noteLink, _statusFont, Size.Empty, flags);
+            string prefixText = string.IsNullOrEmpty(_notePrefix) ? "" : _notePrefix + " ";
+            var prefixSize = prefixText.Length > 0
+                ? TextRenderer.MeasureText(g, prefixText, _statusFont, Size.Empty, flags)
+                : Size.Empty;
+            int prefixW = Math.Min(prefixSize.Width, Math.Max(0, noteAvail - linkSize.Width));
+            if (noteAvail >= linkSize.Width + (prefixText.Length > 0 ? Math.Min(prefixSize.Width, (int)Math.Round(40 * s)) : 0))
+            {
+                if (prefixW > 0)
+                {
+                    var prefixRect = new Rectangle(noteLeft, 0, prefixW, Height);
+                    TextRenderer.DrawText(g, prefixText, _statusFont, prefixRect, Theme.TextMid,
+                        flags | TextFormatFlags.EndEllipsis);
+                }
+                int linkX = noteLeft + prefixW;
+                var linkRect = new Rectangle(linkX, 0, linkSize.Width, Height);
+                Color linkColor = _pressedNoteLink ? Theme.Accent : Theme.AccentHover;
+                TextRenderer.DrawText(g, _noteLink, _statusFont, linkRect, linkColor, flags);
+                if (_hoverNoteLink)
+                {
+                    int lineY = (Height + linkSize.Height) / 2 + 1;
+                    using var uPen = new Pen(linkColor, 1f);
+                    g.DrawLine(uPen, linkX, lineY, linkX + linkSize.Width - 1, lineY);
+                }
+                _noteLinkRect = new Rectangle(linkX, Math.Max(0, (Height - linkSize.Height) / 2 - 4),
+                    linkSize.Width, linkSize.Height + 8);
+            }
+        }
+
+        using var border = new Pen(Theme.BorderSubtle);
+        g.DrawLine(border, 0, Height - 1, Width, Height - 1);
     }
+
+    private void DrawWindowButton(Graphics g, int i, float s)
+    {
+        var r = BtnRect(i);
+        bool hot = _hoverBtn == i;
+        if (hot)
+        {
+            using var bg = new SolidBrush(i == BtnClose ? Theme.Danger : Theme.SurfaceAlt);
+            using var path = Theme.RoundRect(r, 6);
+            g.FillPath(bg, path);
+        }
+
+        int cx = r.Left + r.Width / 2;
+        int cy = r.Top + r.Height / 2;
+        int half = Math.Max(4, (int)Math.Round(4.5f * s));
+        Color fg = hot ? (i == BtnClose ? Color.White : Theme.TextHi) : Theme.TextMid;
+        using var pen = new Pen(fg, Math.Max(1.3f, 1.55f * s))
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+        };
+
+        if (i == BtnMin)
+        {
+            g.DrawLine(pen, cx - half, cy, cx + half, cy);
+        }
+        else
+        {
+            g.DrawLine(pen, cx - half, cy - half, cx + half, cy + half);
+            g.DrawLine(pen, cx - half, cy + half, cx + half, cy - half);
+        }
+    }
+
+    private bool HitNoteLink(Point p) => !string.IsNullOrEmpty(_noteUrl) && _noteLinkRect.Contains(p);
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         int hit = HitButton(e.Location);
-        if (hit == hoverBtn) return;
-        hoverBtn = hit;
-        if (hit is BtnUpdate or BtnSponsor) ShowTip(hit);
-        else tip.Hide(this);
-        Invalidate();
+        bool overLink = hit < 0 && HitNoteLink(e.Location);
+        _hoverStatus = hit < 0 && !overLink && _statusRect.Contains(e.Location);
+        SetTip(overLink ? _noteUrl : (_hoverStatus ? _statusText : null));
+        if (hit != _hoverBtn || overLink != _hoverNoteLink)
+        {
+            _hoverBtn = hit;
+            _hoverNoteLink = overLink;
+            Cursor = (hit >= 0 || overLink) ? Cursors.Hand : Cursors.Default;
+            Invalidate();
+        }
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        tip.Hide(this);
-        if (hoverBtn != -1) { hoverBtn = -1; Invalidate(); }
+        _hoverStatus = false;
+        SetTip(null);
+        if (_hoverBtn != -1 || _hoverNoteLink)
+        {
+            _hoverBtn = -1;
+            _hoverNoteLink = false;
+            Cursor = Cursors.Default;
+            Invalidate();
+        }
     }
 
-    private void ShowTip(int btn)
+    private void SetTip(string? text)
     {
-        var r = BtnRect(btn);
-        tip.Show(btn == BtnUpdate ? updateTip : "赞助作者", this, r.Left, r.Bottom + 2);
+        if (_tipText == text) return;
+        _tipText = text;
+        _tip.SetToolTip(this, text);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
         if (e.Button != MouseButtons.Left) return;
-        pressedBtn = HitButton(e.Location);
-        if (pressedBtn >= 0 || FindForm() is not { } form) return;
-        // Treat dragging empty space as dragging the system title bar.
+        _pressedBtn = HitButton(e.Location);
+        if (_pressedBtn >= 0) return;
+        if (HitNoteLink(e.Location))
+        {
+            _pressedNoteLink = true;
+            Invalidate();
+            return;
+        }
+        if (FindForm() is not { } form) return;
         ReleaseCapture();
         SendMessage(form.Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
     }
@@ -243,16 +335,20 @@ internal sealed class HeaderBar : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        int pressed = pressedBtn;
-        pressedBtn = -1;
+        if (_pressedNoteLink)
+        {
+            _pressedNoteLink = false;
+            Invalidate();
+            if (e.Button == MouseButtons.Left && HitNoteLink(e.Location) && _noteUrl is { } url)
+                NoteLinkClicked?.Invoke(url);
+            return;
+        }
+        int pressed = _pressedBtn;
+        _pressedBtn = -1;
         if (e.Button != MouseButtons.Left || pressed < 0 || HitButton(e.Location) != pressed || FindForm() is not { } form) return;
-        hoverBtn = -1;
-        tip.Hide(this);
+        _hoverBtn = -1;
         Invalidate();
-        if (pressed == BtnUpdate) UpdateClicked?.Invoke(this, EventArgs.Empty);
-        else if (pressed == BtnSponsor) SponsorClicked?.Invoke(this, EventArgs.Empty);
-        else if (pressed == BtnInfo) InfoClicked?.Invoke(this, EventArgs.Empty);
-        else if (pressed == BtnMin) form.WindowState = FormWindowState.Minimized;
+        if (pressed == BtnMin) form.WindowState = FormWindowState.Minimized;
         else form.Close();
     }
 
@@ -260,11 +356,11 @@ internal sealed class HeaderBar : Control
     {
         if (disposing)
         {
-            titleFont.Dispose();
-            subFont.Dispose();
-            infoFont.Dispose();
-            tip.Dispose();
-            icon?.Dispose();
+            _titleFont?.Dispose();
+            _statusFont?.Dispose();
+            _clockFont?.Dispose();
+            _titleFont = _statusFont = _clockFont = null;
+            _tip.Dispose();
         }
         base.Dispose(disposing);
     }

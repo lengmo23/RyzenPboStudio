@@ -29,12 +29,12 @@ internal sealed class CsState
         catch (JsonException e)
         {
             // A power loss can leave an all-zero file; delete it to avoid repeated parse failures.
-            Log.Write($"CS 备用状态已损坏，丢弃: {e.Message}", "WARN");
+            Log.Write(L.F("CS backup state is corrupt and was discarded: {0}", e.Message), "WARN");
             try { File.Delete(FilePath); } catch { }
         }
         catch (Exception e)
         {
-            Log.Write($"读取 CS 备用状态失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read the CS backup state: {0}", e.Message), "WARN");
         }
         return new CsState();
     }
@@ -47,7 +47,7 @@ internal sealed class CsState
         }
         catch (Exception e)
         {
-            Log.Write($"保存 CS 备用状态失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to save the CS backup state: {0}", e.Message), "WARN");
         }
     }
 

@@ -70,7 +70,7 @@ internal static class ToolBundle
             }
 
             if (!ownsMutex)
-                throw new TimeoutException("等待测试组件释放超时");
+                throw new TimeoutException(L.T("Timed out waiting to extract the test components"));
 
             if (!ValidateExtractedFiles(target, manifest))
                 ExtractBundle(cacheBase, target, manifest);
@@ -88,10 +88,10 @@ internal static class ToolBundle
     {
         using var archive = OpenArchive();
         var entry = archive.GetEntry(ManifestEntryName)
-            ?? throw new InvalidDataException("内嵌工具包缺少清单");
+            ?? throw new InvalidDataException(L.T("The embedded tool bundle has no manifest"));
         using var stream = entry.Open();
         return JsonSerializer.Deserialize<ToolBundleManifest>(stream)
-            ?? throw new InvalidDataException("内嵌工具包清单无效");
+            ?? throw new InvalidDataException(L.T("The embedded tool bundle manifest is invalid"));
     }
 
     private static void ValidateManifest(ToolBundleManifest manifest)
@@ -100,11 +100,11 @@ internal static class ToolBundle
             || string.IsNullOrWhiteSpace(manifest.BundleVersion)
             || manifest.Files.Count == 0)
         {
-            throw new InvalidDataException("内嵌工具包清单格式不受支持");
+            throw new InvalidDataException(L.T("Unsupported tool bundle manifest format"));
         }
 
         if (manifest.BundleVersion.Any(c => !char.IsLetterOrDigit(c) && c is not '.' and not '-' and not '_'))
-            throw new InvalidDataException("内嵌工具包版本号包含非法字符");
+            throw new InvalidDataException(L.T("The tool bundle version contains invalid characters"));
 
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in manifest.Files)
@@ -114,7 +114,7 @@ internal static class ToolBundle
                 || file.Sha256.Length != 64
                 || !paths.Add(file.Path))
             {
-                throw new InvalidDataException("内嵌工具包文件清单无效");
+                throw new InvalidDataException(L.T("The tool bundle file list is invalid"));
             }
         }
     }
@@ -135,7 +135,7 @@ internal static class ToolBundle
             foreach (var file in manifest.Files)
             {
                 var entry = archive.GetEntry(file.Path)
-                    ?? throw new InvalidDataException($"工具包缺少文件: {file.Path}");
+                    ?? throw new InvalidDataException(L.F("The tool bundle is missing a file: {0}", file.Path));
                 string destination = GetSafeChildPath(temporary, file.Path);
                 string? parent = Path.GetDirectoryName(destination);
                 if (parent != null)
@@ -154,7 +154,7 @@ internal static class ToolBundle
             }
 
             if (!ValidateExtractedFiles(temporary, manifest))
-                throw new InvalidDataException("释放后的测试组件未通过完整性校验");
+                throw new InvalidDataException(L.T("The extracted test components failed the integrity check"));
 
             if (Directory.Exists(target))
                 Directory.Delete(target, recursive: true);
@@ -209,7 +209,7 @@ internal static class ToolBundle
     private static ZipArchive OpenArchive()
     {
         Stream stream = typeof(ToolBundle).Assembly.GetManifestResourceStream(ResourceName)
-            ?? throw new FileNotFoundException("程序内未找到测试组件资源");
+            ?? throw new FileNotFoundException(L.T("Test component resource not found in the program"));
         return new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: false);
     }
 
@@ -222,7 +222,7 @@ internal static class ToolBundle
             normalizedRoot,
             relativePath.Replace('/', Path.DirectorySeparatorChar)));
         if (!child.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("工具包包含越界路径");
+            throw new InvalidDataException(L.T("The tool bundle contains a path outside its folder"));
         return child;
     }
 

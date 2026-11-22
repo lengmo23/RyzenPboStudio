@@ -9,6 +9,20 @@ namespace RyzenPboStudio;
 /// </summary>
 internal static class SystemInfo
 {
+    /// <summary>True when the SMBIOS chassis type is a portable one (laptop, notebook, convertible, tablet...).</summary>
+    public static bool IsLaptop()
+    {
+        try
+        {
+            using var searcher = new System.Management.ManagementObjectSearcher("SELECT ChassisTypes FROM Win32_SystemEnclosure");
+            foreach (var o in searcher.Get())
+                if (o["ChassisTypes"] is ushort[] types && types.Any(t => t is 8 or 9 or 10 or 11 or 14 or 30 or 31 or 32))
+                    return true;
+        }
+        catch { }
+        return false;
+    }
+
     /// <summary>Full CPU name, or "AMD Ryzen" on failure.</summary>
     public static string GetCpuName()
     {

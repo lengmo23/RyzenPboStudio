@@ -126,10 +126,13 @@ internal sealed partial class MainForm
     }
 
     private string SeqTip() =>
-        "依次运行：" + string.Join(" → ", _multi.Sequence.Select(s => $"{s.Test} {s.Rounds} 轮 × {s.Seconds} 秒"));
+        L.T("Runs in order: ") +
+        string.Join(" → ", _multi.Sequence.Select(s => L.F("{0} {1} rounds × {2} s", s.Test, s.Rounds, s.Seconds)));
 
     private string ComboTip() =>
-        $"{string.Join(" + ", _multi.ComboTests)} 组合运行，共 {_multi.ComboRounds} 轮，每轮内各项轮流运行 {_multi.ComboSeconds} 秒";
+        L.F("{0} combined, {1} rounds, each test runs {2} s in turn per round", ComboNames(), _multi.ComboRounds, _multi.ComboSeconds);
+
+    private string ComboNames() => string.Join(" + ", _multi.ComboTests);
 
     private void RefreshMultiTips()
     {
@@ -148,7 +151,7 @@ internal sealed partial class MainForm
             Radius = 8,
             BackColor = Theme.Surface,
             Normal = Theme.SurfaceAlt,
-            Hover = Theme.Border,
+            Hover = Theme.SurfaceHover,
             ForeColor = Theme.TextHi,
             Margin = new Padding(0, 0, 0, 2),
         };
@@ -158,13 +161,13 @@ internal sealed partial class MainForm
     }
 
     private static string AutoAdjustTip() =>
-        $"压测报错时，把出错核心的 CO 自动回退一档（+{Config.StepOnError}）后重跑整轮，\n直到该轮通过或你手动停止。y-cruncher 整体崩溃时，回退本次测试范围内的全部核心。\nCO 最多回退到 +{Config.CoMax}，到达上限即停止测试。";
+        L.F("On an error, backs off the failing core's CO by one step (+{0}) and reruns the round\nuntil it passes or you stop it. If y-cruncher crashes, backs off every core in the test scope.\nCO backs off up to +{1}; the test stops at that limit.", Config.StepOnError, Config.CoMax);
 
     /// <summary>Risk notice before a test starts; "我已知晓" returns OK. dontShow is the "do not show again" box.</summary>
     private static Form BuildTestRiskDialog(out CheckBox dontShow)
     {
         const int width = 480;
-        var dlg = NewDialog("开始测试前请阅读");
+        var dlg = NewDialog(L.T("Read before testing"));
         var root = new TableLayoutPanel
         {
             AutoSize = true,
@@ -176,7 +179,7 @@ internal sealed partial class MainForm
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
         root.Controls.Add(new Label
         {
-            Text = "风险声明",
+            Text = L.T("Risk notice"),
             AutoSize = true,
             ForeColor = Theme.Accent,
             BackColor = Theme.Surface,
@@ -185,11 +188,11 @@ internal sealed partial class MainForm
         });
         foreach (string item in new[]
         {
-            "测试会持续向 CPU 写入负 CO 并运行高强度压力测试，电压不足时可能出现运算错误、冻屏、蓝屏或自动重启。",
-            "死机可能导致未保存的数据丢失，请先保存并关闭正在进行的工作。",
-            "测试期间请勿操作电脑，以免干扰测试结果。",
-            "CO 与 CS 都会影响系统稳定性，通过测试不代表日常使用中绝对稳定。",
-            "降压超频存在硬件风险，数据丢失或硬件损坏由用户自行承担。",
+            L.T("The test keeps writing negative CO to the CPU and runs heavy stress tests; with too little voltage you may see computation errors, freezes, blue screens or restarts."),
+            L.T("A crash can lose unsaved data; save and close your work first."),
+            L.T("Do not use the PC during the test, or the results may be affected."),
+            L.T("Both CO and CS affect stability; passing the test does not guarantee stability in daily use."),
+            L.T("Undervolting and overclocking carry hardware risk; you are responsible for any data loss or hardware damage."),
         })
         {
             // Bullet and text in separate columns so wrapped lines align with the text, not the bullet.
@@ -212,15 +215,15 @@ internal sealed partial class MainForm
 
         var check = new CheckBox
         {
-            Text = "不再提示",
+            Text = L.T("Don't show again"),
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            ForeColor = Theme.TextLo,
+            ForeColor = Theme.TextMid,
             BackColor = Theme.Surface,
             Margin = new Padding(0),
         };
-        var ok = Pill("我已知晓", 112, primary: true);
-        var cancel = Pill("取消", 84);
+        var ok = Pill(L.T("I understand"), 112, primary: true);
+        var cancel = Pill(L.T("Cancel"), 84);
         ok.DialogResult = DialogResult.OK;
         cancel.DialogResult = DialogResult.Cancel;
         cancel.Margin = new Padding(8, 0, 0, 0);
@@ -252,20 +255,20 @@ internal sealed partial class MainForm
     /// <summary>Shows the risk notice unless it was dismissed for good; false cancels the start.</summary>
     private bool ConfirmTestRisk()
     {
-        if (_multi.RiskNoticeDismissed) return true;
+        if (_multi.RiskNoticeDismissed || AppSettings.Current.ExpertMode) return true;
         using var dlg = BuildTestRiskDialog(out var dontShow);
         if (dlg.ShowDialog(this) != DialogResult.OK) return false;
         if (dontShow.Checked)
         {
             _multi.RiskNoticeDismissed = true;
-            if (!_multi.Save()) SetStatus("「不再提示」保存失败，本次运行期间仍然生效", Theme.Accent);
+            if (!_multi.Save()) SetStatus(L.T("Failed to save \"Don't show again\"; it still applies until the program closes"), Theme.Danger);
         }
         return true;
     }
 
     private void ShowStepDialog()
     {
-        using var dlg = NewDialog("自动模式步长");
+        using var dlg = NewDialog(L.T("Auto mode step"));
 
         var pick = new ComboBox
         {
@@ -281,8 +284,8 @@ internal sealed partial class MainForm
         for (int s = 1; s <= Config.MaxStepOnError; s++) pick.Items.Add($"+{s}");
         pick.SelectedIndex = Config.StepOnError - 1;
 
-        var okBtn = Pill("确定", 96, primary: true);
-        var cancelBtn = Pill("取消", 96);
+        var okBtn = Pill(L.T("OK"), 96, primary: true);
+        var cancelBtn = Pill(L.T("Cancel"), 96);
         okBtn.DialogResult = DialogResult.OK;
         cancelBtn.DialogResult = DialogResult.Cancel;
         cancelBtn.Margin = new Padding(8, 0, 0, 0);
@@ -300,9 +303,9 @@ internal sealed partial class MainForm
             BackColor = Theme.Surface,
             Padding = new Padding(16, 14, 16, 14),
         };
-        root.Controls.Add(Hint("压测报错时，出错核心的 CO 每次回退的档数"));
+        root.Controls.Add(Hint(L.T("CO steps to back off a failing core on each error")));
         root.Controls.Add(pick);
-        root.Controls.Add(Hint($"可选 +1～+{Config.MaxStepOnError}，默认 +{Config.DefaultStepOnError}"));
+        root.Controls.Add(Hint(L.F("+1 to +{0}, default +{1}", Config.MaxStepOnError, Config.DefaultStepOnError)));
         root.Controls.Add(buttons);
         dlg.Controls.Add(root);
         dlg.AcceptButton = okBtn;
@@ -314,8 +317,8 @@ internal sealed partial class MainForm
 
         Config.StepOnError = _multi.BackoffStep = step;
         _tips.SetToolTip(_autoAdjBtn, AutoAdjustTip());
-        Log.Write($"自动模式 CO 步长：+{step}");
-        if (!_multi.Save()) SetStatus("自动模式步长保存失败，本次运行期间仍然生效", Theme.Accent);
+        Log.Write(L.F("Auto mode CO step: +{0}", step));
+        if (!_multi.Save()) SetStatus(L.T("Failed to save the auto mode step; it still applies until the program closes"), Theme.Danger);
     }
 
     private sealed class StepRow
@@ -357,7 +360,7 @@ internal sealed partial class MainForm
         Font = new Font(Theme.FontFamily, 9.5F, primary ? FontStyle.Bold : FontStyle.Regular),
         BackColor = Theme.Surface,
         Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
-        Hover = primary ? Theme.AccentHover : Theme.Border,
+        Hover = primary ? Theme.AccentHover : Theme.SurfaceHover,
         ForeColor = primary ? Theme.AccentText : Theme.TextHi,
         Margin = new Padding(0),
     };
@@ -384,7 +387,7 @@ internal sealed partial class MainForm
     private void ShowMultiTestDialog()
     {
         string[] names = MultiTestNames;
-        using var dlg = NewDialog("多项测试设置");
+        using var dlg = NewDialog(L.T("Multi-test settings"));
 
         PillButton IconButton(string glyph) => new()
         {
@@ -394,14 +397,14 @@ internal sealed partial class MainForm
             Font = new Font("Segoe UI Symbol", 9F),
             BackColor = Theme.Surface,
             Normal = Theme.SurfaceAlt,
-            Hover = Theme.Border,
+            Hover = Theme.SurfaceHover,
             ForeColor = Theme.TextHi,
             Margin = new Padding(4, 1, 0, 0),
         };
 
         // ── Page switch ──
-        var seqTab = Pill("顺序测试", 120);
-        var comboTab = Pill("组合测试", 120);
+        var seqTab = Pill(L.T("Sequential"), 120);
+        var comboTab = Pill(L.T("Combined"), 120);
         comboTab.Margin = new Padding(8, 0, 0, 0);
         var tabRow = Flow(FlowDirection.LeftToRight);
         tabRow.Margin = new Padding(0, 0, 0, 12);
@@ -411,11 +414,11 @@ internal sealed partial class MainForm
         // ── Sequential page ──
         var rows = new List<StepRow>();
         var stepList = Flow(FlowDirection.TopDown);
-        var addBtn = Pill("+ 添加步骤", 110);
+        var addBtn = Pill(L.T("+ Add step"), 110);
         addBtn.Margin = new Padding(0, 8, 0, 0);
         var seqEstimate = Hint();
         var seqPage = Flow(FlowDirection.TopDown);
-        seqPage.Controls.Add(Hint($"按顺序依次运行，同一项目只能出现一次（{MultiTestSettings.MinSeqSteps}～{MultiTestSettings.MaxSeqSteps} 步）"));
+        seqPage.Controls.Add(Hint(L.F("Runs in order; each test can appear once ({0} to {1} steps)", MultiTestSettings.MinSeqSteps, MultiTestSettings.MaxSeqSteps)));
         seqPage.Controls.Add(stepList);
         seqPage.Controls.Add(addBtn);
         seqPage.Controls.Add(seqEstimate);
@@ -447,19 +450,19 @@ internal sealed partial class MainForm
         var comboRoundsBox = new TextBox();
         var comboFields = Flow(FlowDirection.LeftToRight);
         comboFields.Margin = new Padding(0, 4, 0, 0);
-        AddFieldPair(comboFields, "每轮(秒)", comboSecondsBox, 66);
-        AddFieldPair(comboFields, "轮数", comboRoundsBox, 60);
+        AddFieldPair(comboFields, L.T("Sec/round"), comboSecondsBox, 66);
+        AddFieldPair(comboFields, L.T("Rounds"), comboRoundsBox, 60);
         var comboEstimate = Hint();
         var comboPage = Flow(FlowDirection.TopDown);
-        comboPage.Controls.Add(Hint($"每一轮内，勾选的项目轮流各运行「每轮秒数」（至少选 {MultiTestSettings.MinComboTests} 项）"));
+        comboPage.Controls.Add(Hint(L.F("In each round, the checked tests take turns running for Sec/round (pick at least {0})", MultiTestSettings.MinComboTests)));
         comboPage.Controls.Add(checkGrid);
         comboPage.Controls.Add(comboFields);
         comboPage.Controls.Add(comboEstimate);
 
         // ── Footer ──
-        var resetBtn = Pill("恢复默认", 96);
-        var okBtn = Pill("确定", 96, primary: true);
-        var cancelBtn = Pill("取消", 96);
+        var resetBtn = Pill(L.T("Defaults"), 96);
+        var okBtn = Pill(L.T("OK"), 96, primary: true);
+        var cancelBtn = Pill(L.T("Cancel"), 96);
         cancelBtn.DialogResult = DialogResult.Cancel;
         cancelBtn.Margin = new Padding(8, 0, 0, 0);
         var footer = new TableLayoutPanel
@@ -490,7 +493,7 @@ internal sealed partial class MainForm
         root.Controls.Add(tabRow);
         root.Controls.Add(seqPage);
         root.Controls.Add(comboPage);
-        root.Controls.Add(Hint("逐 CCD 测试时，总时长乘以 CCD 数"));
+        root.Controls.Add(Hint(L.T("With Each CCD, the total time is multiplied by the CCD count")));
         root.Controls.Add(footer);
         dlg.Controls.Add(root);
         dlg.CancelButton = cancelBtn;
@@ -503,15 +506,18 @@ internal sealed partial class MainForm
                 if (PositiveInt(r.Rounds) is not int rd || PositiveInt(r.Seconds) is not int sc) { seq = -1; break; }
                 seq += (long)rd * sc;
             }
-            seqEstimate.Text = seq >= 0 ? $"预计时长约 {Minutes(seq)} 分钟" : "请填写有效的轮数和每轮秒数";
+            seqEstimate.Text = seq >= 0 ? L.F("About {0} min", Minutes(seq)) : L.T("Enter valid rounds and seconds per round");
 
             int picked = comboChecks.Values.Count(c => c.Checked);
             if (picked < MultiTestSettings.MinComboTests)
-                comboEstimate.Text = $"至少选择 {MultiTestSettings.MinComboTests} 项";
+                comboEstimate.Text = L.F("Pick at least {0}", MultiTestSettings.MinComboTests);
             else if (PositiveInt(comboRoundsBox.Text) is int cr && PositiveInt(comboSecondsBox.Text) is int cs)
-                comboEstimate.Text = $"预计时长约 {Minutes((long)picked * cr * cs)} 分钟（{picked} 项 × {cs} 秒 × {cr} 轮）";
+            {
+                string min = Minutes((long)picked * cr * cs);
+                comboEstimate.Text = L.F("About {0} min ({1} tests × {2} s × {3} rounds)", min, picked, cs, cr);
+            }
             else
-                comboEstimate.Text = "请填写有效的轮数和每轮秒数";
+                comboEstimate.Text = L.T("Enter valid rounds and seconds per round");
             okBtn.Enabled = picked >= MultiTestSettings.MinComboTests;
         }
 
@@ -571,8 +577,8 @@ internal sealed partial class MainForm
 
             var roundsBox = new TextBox { Text = rows[i].Rounds };
             var secondsBox = new TextBox { Text = rows[i].Seconds };
-            AddFieldPair(row, "轮数", roundsBox, 50);
-            AddFieldPair(row, "每轮(秒)", secondsBox, 56);
+            AddFieldPair(row, L.T("Rounds"), roundsBox, 50);
+            AddFieldPair(row, L.T("Sec/round"), secondsBox, 56);
             roundsBox.TextChanged += (_, _) => { rows[i].Rounds = roundsBox.Text; UpdateEstimates(); };
             secondsBox.TextChanged += (_, _) => { rows[i].Seconds = secondsBox.Text; UpdateEstimates(); };
 
@@ -582,9 +588,9 @@ internal sealed partial class MainForm
             up.Enabled = i > 0;
             down.Enabled = i < rows.Count - 1;
             remove.Enabled = rows.Count > MultiTestSettings.MinSeqSteps;
-            _tips.SetToolTip(up, "上移");
-            _tips.SetToolTip(down, "下移");
-            _tips.SetToolTip(remove, "删除此步");
+            _tips.SetToolTip(up, L.T("Move up"));
+            _tips.SetToolTip(down, L.T("Move down"));
+            _tips.SetToolTip(remove, L.T("Remove step"));
             up.Click += (_, _) => { (rows[i - 1], rows[i]) = (rows[i], rows[i - 1]); Rebuild(); };
             down.Click += (_, _) => { (rows[i + 1], rows[i]) = (rows[i], rows[i + 1]); Rebuild(); };
             remove.Click += (_, _) => { rows.RemoveAt(i); Rebuild(); };
@@ -611,8 +617,9 @@ internal sealed partial class MainForm
             foreach (var (tab, sel) in new[] { (seqTab, seq), (comboTab, !seq) })
             {
                 tab.Normal = sel ? Theme.Accent : Theme.SurfaceAlt;
-                tab.Hover = sel ? Theme.AccentHover : Theme.Border;
-                tab.ForeColor = sel ? Theme.AccentText : Theme.TextHi;
+                tab.Hover = sel ? Theme.AccentHover : Theme.SurfaceHover;
+                tab.Outline = Color.Empty;
+                tab.ForeColor = sel ? Theme.AccentText : Theme.TextMid;
                 tab.Invalidate();
             }
         }
@@ -638,14 +645,14 @@ internal sealed partial class MainForm
             {
                 if (PositiveInt(rows[i].Rounds) is not int rd || PositiveInt(rows[i].Seconds) is not int sc)
                 {
-                    ThemedDialog.Show(dlg, $"顺序测试第 {i + 1} 步的轮数和每轮秒数必须是正整数。", "参数错误");
+                    ThemedDialog.Show(dlg, L.F("Rounds and seconds per round of step {0} must be positive integers.", i + 1), L.T("Invalid value"));
                     return;
                 }
                 plan.Sequence.Add(new SeqStep { Test = rows[i].Test, Rounds = rd, Seconds = sc });
             }
             if (PositiveInt(comboRoundsBox.Text) is not int cr || PositiveInt(comboSecondsBox.Text) is not int cs)
             {
-                ThemedDialog.Show(dlg, "组合测试的轮数和每轮秒数必须是正整数。", "参数错误");
+                ThemedDialog.Show(dlg, L.T("Combined test rounds and seconds per round must be positive integers."), L.T("Invalid value"));
                 return;
             }
             plan.ComboTests = names.Where(n => comboChecks[n].Checked).ToList();
@@ -661,6 +668,6 @@ internal sealed partial class MainForm
 
         _multi = result;
         RefreshMultiTips();
-        if (!_multi.Save()) SetStatus("多项测试设置保存失败，本次运行期间仍然生效", Theme.Accent);
+        if (!_multi.Save()) SetStatus(L.T("Failed to save the multi-test settings; they still apply until the program closes"), Theme.Danger);
     }
 }

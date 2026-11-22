@@ -27,8 +27,9 @@ per-core monitor panel remains visible at all times, grouped by CCD:
 - **Curve Shaper (CS)**: 5 frequency points × 3 temperature points
 - **PBO limits**: FMax, PPT, EDC, TDC, and PBO Scalar (1X–10X) applied in one step; options the CPU does not
   support are disabled
-- **Apply at startup**: applies the saved CO / CS at each Windows logon (FMax, PPT, EDC, TDC, and Scalar are
-  not changed). Make sure these settings have passed a stress test before enabling it; if the system restarts
+- **Apply at startup**: at each Windows logon, applies the saved CO / CS and the FMax, PPT, EDC, and TDC from the
+  last Apply on the PBO page; only PBO values that differ from the current values are written, and Scalar is not
+  changed. Make sure these settings have passed a stress test before enabling it; if the system restarts
   abnormally after they are applied, the next startup skips them automatically
 
 ### Single Core Boost and voltage alignment
@@ -41,6 +42,67 @@ Both features are on the **TESTING** page and require a CPU with AVX2 / FMA supp
   so that all cores need similar voltage at the same frequency, then determines the single-core frequency
   ceiling. The result is only entered into the CO editor and is not saved, and
   **it must pass a stress test before use**
+
+### Memory settings
+
+The **MEMORY** page hides the per-core monitor and shows the installed modules and three tables, each listing
+the current value and an editable target:
+
+- **Misc & voltages**: MCLK / FCLK / UCLK, BGS, GDM, Cmd2T, PowerDown, SOC, VDDP, VDDG, VDD_MISC, CPU VDDIO,
+  DRAM VDD / VDDQ / VPP, and the average DIMM temperature (SPD hub sensor) and power (PMIC); hovering over these
+  two shows each module's reading. SOC, VDDP, VDDG, and VDD_MISC are read from the PM table, and DRAM voltages
+  are measured by the PMIC on each module; all refresh every 2 seconds
+- **Timings**: the timings in use, read from the memory controller, in the order of the ASUS DRAM Timing Control
+  menu
+- **Signal control**: ProcODT, drive strengths, Rtt, Nitro, and other memory controller options, with current
+  values read from the ACPI AOD table
+
+Targets are written through the BIOS `AMD_ACPI` WMI interface (the same interface Ryzen Master uses). Which
+items are editable, and their ranges, depend on the motherboard and BIOS. Items the BIOS leaves on Auto show
+"Auto" and can be set to a value, but cannot be set back to Auto from the program. CPU VDDIO can be set up to
+1550 mV when the BIOS reports a 1400 mV limit.
+
+The installed modules section also shows the DRAM ICs and the EXPO profiles read from the SPD. Each **EXPO**
+button fills the targets with that profile's memory frequency, primary timings (tCL, tRCD, tRP, tRAS, tRC, tWR),
+tRFC values, and DRAM VDD / VDDQ, rounded up to the nearest value the BIOS accepts, and resets the other DRAM
+timings to their BIOS setting (Auto where the BIOS is on Auto, otherwise the current value); pressing it again
+restores the previous targets. Nothing is written until **Write to BIOS** is clicked. Those other timings are not
+written, so a timing set manually in the BIOS stays at that value; this is not identical to enabling EXPO in the
+BIOS. Pending changes are shown in blue.
+
+**Export config** saves the current targets as a memory config file (`.json`). Each entry names the AMD_ACPI
+function and holds either `"auto": true` or the raw BIOS `value` (MCLK in MHz for the memory clock, mV for
+voltages, the VID for SOC, the option code otherwise); `label` and `display` are only for reading:
+
+```json
+{
+  "format": "RyzenPboStudio.MemoryConfig",
+  "version": 1,
+  "source": "targets",
+  "memoryType": "DDR5",
+  "settings": [
+    { "function": "Set Mem Clock", "label": "Memory Frequency", "auto": false, "value": 3200, "display": "DDR5-6400" },
+    { "function": "Set VDDIO", "label": "DRAM VDD (V)", "auto": false, "value": 1400, "display": "1.400" },
+    { "function": "Set TrrdL", "label": "TrrdL", "auto": true, "display": "Auto" }
+  ]
+}
+```
+
+**Import config** fills the targets from such a file, or from a Cat-girl memoryOC configuration (a memory
+configuration or the memory part of a combined profile). Auto entries reset the target to its BIOS setting, and
+items this BIOS does not provide are listed in the status line. Like EXPO, it writes nothing by itself.
+**Revert changes** puts every target back to its BIOS setting.
+
+Changes are written to the BIOS and **take effect after a reboot and memory training**. Before writing, the
+program checks that the function IDs (and, for the memory clock, UCLK DIV1, and PowerDown, the current values)
+have not changed since they were read, then backs up the current values to
+`profiles\memory_backup_<time>.json` as a memory config file (`"source": "bios"`), which **Import config** can load. Each item is sent as its own
+command; sending stops if a command fails. After all items are sent, each one is read back and its status is
+shown; a matching readback does not guarantee that the setting takes effect after the reboot. Every command and
+its raw return are recorded in `logs\acpi-command-trace.jsonl`.
+
+**Wrong memory settings can prevent the system from booting.** If memory training fails, wait for the BIOS
+to fall back or clear the CMOS; the program cannot recover from this
 
 ### Automated CO testing
 
@@ -77,6 +139,18 @@ Offset adjustment:
 If the system freezes or loses power during a test, the program starts automatically after the restart,
 backs off the CO, and resumes the unfinished test; you can cancel at any time. For fully unattended
 operation, enable automatic logon in Windows.
+
+### Settings and languages
+
+The gear button in the title bar opens the settings: language, checking for updates at startup, the monitor
+refresh interval (100–10000 ms, 500 ms by default), and apply at startup.
+
+The program is written in English; translations are plain-text files in the `lang` folder next to the program,
+one `<culture>.ini` per language (`zh-Hans.ini` for Simplified Chinese, `zh-Hant.ini` for Traditional Chinese).
+By default the language follows the Windows display language and falls back to English. Each line maps the
+English text to its translation (`English text=translation`), keeping placeholders such as `{0}`; lines that are
+missing or no longer match show in English. A new language is added by copying a file, renaming it to the
+culture name (for example `ja.ini`), and setting `name=` under `[meta]`. Language changes apply after a restart.
 
 ## Requirements
 

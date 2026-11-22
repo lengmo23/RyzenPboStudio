@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Package bin\ into lite, net8contained, update and net8patch release archives.
+    Package the current branch's publish folder (e.g. beta\) into lite, net8contained, update and net8patch release archives.
 
 .DESCRIPTION
     lite          includes y-cruncher for first-time installation; needs .NET 8 installed.
@@ -21,13 +21,18 @@
     powershell -ExecutionPolicy Bypass -File Scripts\pack-release.ps1
 #>
 param(
-    [string]$BinDir = "bin",
+    [string]$BinDir = "",
     [string]$OutDir = "release"
 )
 
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+# Each branch publishes to a root folder named after it.
+if (-not $BinDir) {
+    $BinDir = "$(git -C $repoRoot branch --show-current)".Trim()
+    if (-not $BinDir) { throw "无法确定当前分支，请用 -BinDir 指定发布目录。" }
+}
 $bin = Join-Path $repoRoot $BinDir
 $out = Join-Path $repoRoot $OutDir
 
@@ -37,9 +42,9 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     throw "找不到 $exePath，请先执行 dotnet publish 输出到 $BinDir。"
 }
 
-# Normalize ProductVersion to three numeric parts without commit metadata.
+# Normalize ProductVersion to three numeric parts plus any prerelease label (4.0.0-beta), without commit metadata.
 $version = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
-if ($version -match '^([0-9]+\.[0-9]+\.[0-9]+)') { $version = $Matches[1] }
+if ($version -match '^([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)') { $version = $Matches[1] }
 elseif ($version -match '^([0-9]+\.[0-9]+)') { $version = "$($Matches[1]).0" }
 else { throw "无法从 ProductVersion 解析版本号: $version" }
 Write-Host "版本: $version"
@@ -72,7 +77,7 @@ function New-Package {
             Copy-Item -LiteralPath $tools -Destination $stage -Recurse -Force
         }
         else {
-            Write-Warning "bin\tools 不存在，$Kind 包将不含 y-cruncher。"
+            Write-Warning "$BinDir\tools 不存在，$Kind 包将不含 y-cruncher。"
         }
     }
 
@@ -120,6 +125,9 @@ try {
     New-Item -ItemType Directory -Force -Path $patchDir | Out-Null
     Get-ChildItem -LiteralPath $bin -File | ForEach-Object {
         Copy-Item -LiteralPath (Join-Path $net8Dir $_.Name) -Destination $patchDir
+    }
+    if (Test-Path -LiteralPath (Join-Path $net8Dir 'lang')) {
+        Copy-Item -LiteralPath (Join-Path $net8Dir 'lang') -Destination $patchDir -Recurse
     }
     # "update", "lite", "full" and "net8contained" must stay out of this name, see Updater.SelfContainedPatchTag.
     $patch = New-Package -Kind "net8patch-rt$rt" -IncludeTools $false -AppDir $patchDir

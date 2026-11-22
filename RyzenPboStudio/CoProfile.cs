@@ -19,12 +19,12 @@ internal sealed class CoProfile
         }
         catch (JsonException e)
         {
-            Log.Write($"CO 配置已损坏，丢弃: {e.Message}", "WARN");
+            Log.Write(L.F("CO profile is corrupt and was discarded: {0}", e.Message), "WARN");
             try { File.Delete(FilePath); } catch { }
         }
         catch (Exception e)
         {
-            Log.Write($"读取 CO 配置失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read the CO profile: {0}", e.Message), "WARN");
         }
         return new CoProfile();
     }
@@ -37,7 +37,7 @@ internal sealed class CoProfile
         }
         catch (Exception e)
         {
-            Log.Write($"保存 CO 配置失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to save the CO profile: {0}", e.Message), "WARN");
         }
     }
 }

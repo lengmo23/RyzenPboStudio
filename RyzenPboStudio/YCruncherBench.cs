@@ -38,17 +38,17 @@ internal static partial class YCruncher
         double gib = SystemInfo.TotalPhysicalBytes() / (1024d * 1024 * 1024);
         if (gib >= 46)
         {
-            Log.Write($"已安装内存 {gib:F1} GiB（≥ 48 GB），选用 Pi Benchmark 10b（约需 44.7 GiB 内存）");
+            Log.Write(L.F("Installed memory {0:F1} GiB (≥ 48 GB), using Pi Benchmark 10b (needs about 44.7 GiB)", gib));
             return "10b";
         }
         if (gib >= 30)
         {
-            Log.Write($"已安装内存 {gib:F1} GiB（≥ 32 GB），选用 Pi Benchmark 5b（约需 22.3 GiB 内存）");
+            Log.Write(L.F("Installed memory {0:F1} GiB (≥ 32 GB), using Pi Benchmark 5b (needs about 22.3 GiB)", gib));
             return "5b";
         }
         Log.Write(gib > 0
-            ? $"已安装内存 {gib:F1} GiB，不足 32 GB，回退到 Pi Benchmark 2.5b（约需 11.8 GiB 内存）"
-            : "无法读取已安装内存容量，回退到 Pi Benchmark 2.5b（约需 11.8 GiB 内存）", "WARN");
+            ? L.F("Installed memory {0:F1} GiB is under 32 GB, falling back to Pi Benchmark 2.5b (needs about 11.8 GiB)", gib)
+            : L.T("Cannot read the installed memory size, falling back to Pi Benchmark 2.5b (needs about 11.8 GiB)"), "WARN");
         return "2.5b";
     }
 
@@ -65,7 +65,7 @@ internal static partial class YCruncher
         string ycDir = Path.GetDirectoryName(yc)!;
         var current = new List<int>(offsets);
 
-        Log.Write("YC018 为固定规模的基准测试：始终使用全部核心，「轮数」即基准测试次数，「每轮(秒)」设置不生效");
+        Log.Write(L.T("YC018 is a fixed-size benchmark: it always uses all cores, Rounds is the number of runs, and Seconds per round is ignored"));
         string size = PickBenchSize();
 
         while (true)
@@ -73,27 +73,27 @@ internal static partial class YCruncher
             if (token.IsCancellationRequested)
                 return (false, current);
 
-            Log.Write($"=== 开始 {rounds} 轮 YC018 测试 · Pi Benchmark {size} · 范围 全部核心 ===");
+            Log.Write(L.F("=== Starting {0} rounds of YC018 · Pi Benchmark {1} · Scope all cores ===", rounds, size));
 
             var outcome = BenchOutcome.Pass;
             var failed = new SortedSet<int>();
             string reason = "";
             for (int round = 1; round <= rounds && outcome == BenchOutcome.Pass; round++)
             {
-                Log.Write($">>> YC018 第 {round}/{rounds} 轮");
+                Log.Write(L.F(">>> YC018 round {0}/{1}", round, rounds));
                 (outcome, failed, reason) = RunBenchOnce(yc, ycDir, size, token);
                 if (outcome == BenchOutcome.Pass)
-                    Log.Write($"YC018 第 {round}/{rounds} 轮通过");
+                    Log.Write(L.F("YC018 round {0}/{1} passed", round, rounds));
             }
 
             switch (outcome)
             {
                 case BenchOutcome.Pass:
-                    Log.Write($"✓ {rounds} 轮 YC018 测试全部通过");
+                    Log.Write(L.F("✓ All {0} rounds of YC018 passed", rounds));
                     return (true, current);
 
                 case BenchOutcome.Cancelled:
-                    Log.Write("用户手动终止测试");
+                    Log.Write(L.T("Test stopped by the user"));
                     return (false, current);
 
                 case BenchOutcome.CoreError:
@@ -107,14 +107,14 @@ internal static partial class YCruncher
                     break;
 
                 default:
-                    Log.Write($"YC018 基准测试失败：{reason}", "ERROR");
-                    Log.Write("该错误无法定位到具体核心，未调整任何 CO，测试停止。" +
-                              "原因可能是内存 / IF（FCLK）/ CO 不稳定，建议先单独验证内存与 FCLK 设置；" +
-                              "若日志显示内存分配失败，请关闭占用内存的程序后重试", "ERROR");
+                    Log.Write(L.F("YC018 benchmark failed: {0}", reason), "ERROR");
+                    Log.Write(L.T("This error cannot be traced to a core, so no CO was changed and the test stopped. " +
+                                  "Memory, IF (FCLK) or CO may be unstable; verify memory and FCLK on their own first. " +
+                                  "If the log shows a memory allocation failure, close memory-heavy programs and retry"), "ERROR");
                     return (false, current);
             }
 
-            Log.Write($"CO 已调整，3 秒后重新开始 {rounds} 轮测试...");
+            Log.Write(L.F("CO adjusted, restarting {0} rounds in 3 s...", rounds));
             if (token.WaitHandle.WaitOne(3000))
                 return (false, current);
         }
@@ -133,7 +133,7 @@ internal static partial class YCruncher
             "skip-warnings", "pause:-2", "status:none",
             "bench", size, "-od:0", "-o", Workspace.LogsDir,
         };
-        Log.Write($"运行: {yc} {string.Join(' ', args)}");
+        Log.Write(L.T("Run: ") + $"{yc} {string.Join(' ', args)}");
 
         var ycLog = new StringBuilder();
         var failed = new SortedSet<int>();
@@ -189,7 +189,7 @@ internal static partial class YCruncher
             proc.Start();
             IntPtr job = GetJob();
             if (job == IntPtr.Zero || !AssignProcessToJobObject(job, proc.Handle))
-                Log.Write($"y-cruncher 加入进程作业失败 (错误 {Marshal.GetLastWin32Error()})，结束测试时可能无法清理其子进程", "WARN");
+                Log.Write(L.F("Failed to add y-cruncher to the job object (error {0}); its child processes may survive the test", Marshal.GetLastWin32Error()), "WARN");
             proc.BeginOutputReadLine();
             proc.BeginErrorReadLine();
 
@@ -224,18 +224,19 @@ internal static partial class YCruncher
                 if (Handle(rest)) stopped = true;
 
             try { File.WriteAllText(Workspace.NewLogPath("y-cruncher", "log"), ycLog.ToString(), Encoding.UTF8); }
-            catch (Exception e) { Log.Write($"保存 y-cruncher 日志失败: {e.Message}", "WARN"); }
+            catch (Exception e) { Log.Write(L.F("Failed to save the y-cruncher log: {0}", e.Message), "WARN"); }
         }
         catch (Exception e)
         {
-            Log.Write($"运行 y-cruncher 失败: {e.Message}", "ERROR");
-            return (BenchOutcome.Failed, failed, $"无法运行 y-cruncher（{e.Message}）");
+            Log.Write(L.F("Failed to run y-cruncher: {0}", e.Message), "ERROR");
+            return (BenchOutcome.Failed, failed, L.F("cannot run y-cruncher ({0})", e.Message));
         }
 
         if (cancelled || token.IsCancellationRequested) return (BenchOutcome.Cancelled, failed, "");
         if (failed.Count > 0) return (BenchOutcome.CoreError, failed, "");
         if (crashed) return (BenchOutcome.Crash, failed, "");
-        if (errorLine != null) return (BenchOutcome.Failed, failed, $"y-cruncher 报告计算错误：{errorLine.Trim()}");
+        if (errorLine != null)
+            return (BenchOutcome.Failed, failed, L.F("y-cruncher reported a computation error: {0}", errorLine.Trim()));
 
         if (reachedEnd && spotGood && returncode == 0)
             return (BenchOutcome.Pass, failed, "");
@@ -243,9 +244,9 @@ internal static partial class YCruncher
         string full = ycLog.ToString();
         string tail = full.Length > 500 ? full[^500..] : full;
         Log.Write($"yc_log: {tail}");
-        string why = !reachedEnd ? "y-cruncher 未正常跑完"
-                   : !spotGood ? "未检测到结果校验通过（Spot Check: Good through …）"
-                   : "y-cruncher 退出码异常";
+        string why = !reachedEnd ? L.T("y-cruncher did not finish")
+                   : !spotGood ? L.T("no passing result check (Spot Check: Good through …)")
+                   : L.T("unexpected y-cruncher exit code");
         return (BenchOutcome.Failed, failed, $"{why} (code={returncode})");
     }
 }
