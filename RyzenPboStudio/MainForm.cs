@@ -1975,7 +1975,7 @@ internal sealed partial class MainForm : Form
     };
 
     /// <summary>Sets the width shared by CS row labels and the header spacer.</summary>
-    private const int CsRowLabelWidth = 40;
+    private const int CsRowLabelWidth = 50;
 
     private static Label CsRowLabel(string text) => new()
     {
