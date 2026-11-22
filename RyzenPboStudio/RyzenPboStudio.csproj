@@ -55,6 +55,31 @@
     <None Update="lang\*.ini" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <ProtectedMemOcNativePath>$(MSBuildProjectDirectory)\..\private\MemOc\out\MemOcNative.dll</ProtectedMemOcNativePath>
+    <PrebuiltMemOcNativePath>$(MSBuildProjectDirectory)\MemOcNative.dll</PrebuiltMemOcNativePath>
+    <ActiveMemOcNativePath Condition="Exists('$(ProtectedMemOcNativePath)')">$(ProtectedMemOcNativePath)</ActiveMemOcNativePath>
+    <ActiveMemOcNativePath Condition="'$(ActiveMemOcNativePath)' == '' and Exists('$(PrebuiltMemOcNativePath)')">$(PrebuiltMemOcNativePath)</ActiveMemOcNativePath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Prebuilt closed-source Memory OC native module; copied alongside the executable
+         for both builds and publishes (local private\MemOc\out builds override if present). -->
+    <None Remove="MemOcNative.dll" />
+    <None Include="$(ActiveMemOcNativePath)"
+          Link="MemOcNative.dll"
+          Condition="'$(ActiveMemOcNativePath)' != ''"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="ReportMemOcContractLock" BeforeTargets="Build">
+    <Message Condition="'$(ActiveMemOcNativePath)' != ''" Importance="high"
+             Text="[MemoryOC Contract Lock] Bundling prebuilt closed-source MemOcNative.dll ($(ActiveMemOcNativePath)). Its encrypted payload is contract-locked to MemoryOcBridge.cs (IMemoryOcHost, IMemoryOcButton, IMemoryOcPage, IMemoryOcEntry, and handshake constants). Modifying those bridge interfaces, signatures, or salts will break compatibility and cause Memory OC to fall back to unavailable." />
+    <Message Condition="'$(ActiveMemOcNativePath)' == ''" Importance="high"
+             Text="[MemoryOC Contract Lock] MemOcNative.dll not found; building with the built-in Memory OC unavailable placeholder." />
+  </Target>
+
   <Target Name="GenerateEmbeddedToolBundle"
           BeforeTargets="PrepareResources"
           Inputs="@(ToolBundleSource);..\Scripts\build-tool-bundle.ps1"
@@ -88,18 +113,6 @@
     <Copy Condition="'@(DramPresetFile)' != ''"
           SourceFiles="@(DramPresetFile)"
           DestinationFiles="@(DramPresetFile->'$(PublishDir)dram\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
-  </Target>
-
-  <!-- Publish the closed-source protected Memory OC native module when built locally;
-       open-source builds skip it cleanly and fall back to the built-in placeholder panel. -->
-  <Target Name="CopyProtectedMemOcToPublish" AfterTargets="Publish">
-    <PropertyGroup>
-      <ProtectedMemOcNativePath>$(MSBuildProjectDirectory)\..\private\MemOc\out\MemOcNative.dll</ProtectedMemOcNativePath>
-    </PropertyGroup>
-    <Copy Condition="Exists('$(ProtectedMemOcNativePath)')"
-          SourceFiles="$(ProtectedMemOcNativePath)"
-          DestinationFiles="$(PublishDir)MemOcNative.dll"
           SkipUnchangedFiles="true" />
   </Target>
 

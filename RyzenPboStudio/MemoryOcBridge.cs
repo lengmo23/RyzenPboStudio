@@ -8,6 +8,13 @@ using ZenStates.Core;
 
 namespace RyzenPboStudio;
 
+// CONTRACT LOCK NOTICE:
+// The prebuilt closed-source MemOcNative.dll embeds an encrypted managed module compiled against
+// the exact CLR type identities, member signatures, and handshake salts defined in this file
+// (IMemoryOcButton, IMemoryOcHost, IMemoryOcPage, IMemoryOcEntry, and MemoryOcLoader constants).
+// Do NOT rename, reorder, remove, or change the signatures of these interfaces/salts when
+// modifying the open-source host, or MemOcNative.dll will fail verification and fall back to unavailable.
+
 /// <summary>Minimal host-provided button abstraction for the closed-source Memory OC module.</summary>
 public interface IMemoryOcButton
 {
