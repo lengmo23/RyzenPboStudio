@@ -26,6 +26,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell's .NET Framework writes "\" in entry names by default; the zip spec requires "/".
+[AppContext]::SetSwitch('Switch.System.IO.Compression.ZipFile.UseBackslash', $false)
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 # Each branch publishes to a root folder named after it.
@@ -80,6 +83,10 @@ function New-Package {
             Write-Warning "$BinDir\tools 不存在，$Kind 包将不含 y-cruncher。"
         }
     }
+    $dram = Join-Path $bin 'dram'
+    if ((Test-Path -LiteralPath $dram) -and -not (Test-Path -LiteralPath (Join-Path $stage 'dram'))) {
+        Copy-Item -LiteralPath $dram -Destination $stage -Recurse -Force
+    }
 
     # Use repository documentation instead of the dependency's build output.
     Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $stage 'README.md') -Force
@@ -89,7 +96,9 @@ function New-Package {
     # Updater.CheckAsync selects assets by "update", then "lite" / "full" (older releases), or "net8contained".
     $zip = Join-Path $out "AMD-Ryzen-PBO-Studio-v$version-$Kind.zip"
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-    Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
+    # UTF-8 entry names preserve non-ASCII DRAM preset filenames across all Windows locales.
+    [IO.Compression.ZipFile]::CreateFromDirectory((Split-Path -Parent $stage), $zip,
+        [IO.Compression.CompressionLevel]::Optimal, $false, [Text.Encoding]::UTF8)
 
     $size = (Get-Item -LiteralPath $zip).Length / 1MB
     $count = (Get-ChildItem -LiteralPath $stage -Recurse -File).Count
