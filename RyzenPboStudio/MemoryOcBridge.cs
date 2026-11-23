@@ -248,7 +248,15 @@ internal static class MemoryOcLoader
         public MemOcLoadContext(string baseDir) : base(isCollectible: false) => _baseDir = baseDir;
 
         // Delegate managed references to Default so IMemoryOcHost, ZenStates.Core, and WinForms share exact type identity.
-        protected override Assembly? Load(AssemblyName assemblyName) => null;
+        // Also resolve host & ZenStates-Core by simple name so forks with different AssemblyVersion bind cleanly.
+        protected override Assembly? Load(AssemblyName assemblyName)
+        {
+            if (string.Equals(assemblyName.Name, typeof(IMemoryOcHost).Assembly.GetName().Name, StringComparison.OrdinalIgnoreCase))
+                return typeof(IMemoryOcHost).Assembly;
+            if (string.Equals(assemblyName.Name, typeof(Cpu).Assembly.GetName().Name, StringComparison.OrdinalIgnoreCase))
+                return typeof(Cpu).Assembly;
+            return null;
+        }
 
         // In-memory assemblies have no Location; resolve companion native DLLs from the application directory.
         protected override IntPtr LoadUnmanagedDll(string unmanagedDllName)

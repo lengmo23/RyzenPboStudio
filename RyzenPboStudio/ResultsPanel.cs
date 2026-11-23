@@ -151,22 +151,26 @@ internal sealed class ResultsPanel : Panel
             ReadOnly = true,
             ScrollBars = ScrollBars.None,   // UpdateSummaryScroll turns it on only when the text overflows
             BorderStyle = BorderStyle.None,
-            BackColor = Theme.WellBg,
+            BackColor = Theme.Surface,
             ForeColor = Theme.TextHi,
             Font = new Font(Theme.FontFamily, 8.75F),
         };
 
-        var summaryCard = new Card
+        var summaryHost = new Panel
         {
             Dock = DockStyle.Bottom,
             Height = 76,
-            Fill = Theme.WellBg,
-            Stroke = Theme.BorderSubtle,
-            Radius = 8,
             BackColor = Theme.Surface,
-            Padding = new Padding(12, 8, 8, 8),
+            Padding = new Padding(2, 8, 2, 0),
         };
-        summaryCard.Controls.Add(summary);
+        summaryHost.Controls.Add(summary);
+
+        var summaryDivider = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 1,
+            BackColor = Theme.BorderSubtle,
+        };
 
         var bottomGap = new Panel
         {
@@ -181,13 +185,14 @@ internal sealed class ResultsPanel : Panel
         foreach (var bar in grid.Controls.OfType<ScrollBar>())
             bar.HandleCreated += (_, _) => DarkTitleBar.ApplyScrollBars(bar.Handle);
 
-        // Dock order keeps header above and summary below the filling table.
+        // Dock order keeps header above and divider + summary below the filling table.
         Controls.Add(grid);
         Controls.Add(topGap);
         Controls.Add(headerDivider);
         Controls.Add(headerBar);
         Controls.Add(bottomGap);
-        Controls.Add(summaryCard);
+        Controls.Add(summaryDivider);
+        Controls.Add(summaryHost);
     }
 
     protected override void OnFontChanged(EventArgs e)

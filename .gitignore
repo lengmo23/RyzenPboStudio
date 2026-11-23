@@ -1,11 +1,8 @@
-# ── 闭源组件源码：绝不进入开源仓库 ────────────────────────────────────────
-# 授权/鉴权及闭源内存超频源码/混淆构建树仅存在于本地工作区；
-# 仓库内仅包含预编译并混淆加固的 RyzenPboStudio/MemOcNative.dll 二进制模块。
+# ── 闭源组件：绝不进入开源仓库 ────────────────────────────────────────────
+# 授权/鉴权相关项目仅存在于本地工作区，开源版已完全移除对它们的依赖。
 LicenseCore/
 KeygenApp/
 LicenseServer/
-private/
-dram-presets/
 # 私钥文件：泄露即可伪造激活码
 keygen-private-key.txt
 
@@ -33,6 +30,7 @@ bin/
 /beta/
 /memoc/
 /memoc-obfuscated/
+private/
 obj/
 *.user
 publish/

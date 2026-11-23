@@ -3,10 +3,12 @@ namespace RyzenPboStudio;
 /// <summary>PBO Tuning page BIOS persistence through the motherboard's AMD_ACPI (AOD) WMI interface.</summary>
 internal sealed partial class MainForm
 {
-    private Card _pboBiosCard = null!;
-    private PillButton _pboBiosBtn = null!;
+    private Card? _pboBiosCard;
+    private PillButton? _pboBiosBtn;
     private bool _pboBiosWriting;
     private bool? _pboBiosLaptop;
+    private bool _pboBiosStage1Armed;
+    private bool _pboBiosRestartPending;
 
     /// <summary>Builds the bottom-right card aligned with the PBO parameter bar.</summary>
     private Control BuildPboBiosBar()
@@ -46,7 +48,7 @@ internal sealed partial class MainForm
 
     private async Task OnPboBiosWriteAsync()
     {
-        if ((_pboBiosLaptop ??= SystemInfo.IsLaptop()) || !AppSettings.Current.ExpertMode || !_editorsReady
+        if (_pboBiosBtn == null || !AppSettings.Current.PboBiosUnlocked || (_pboBiosLaptop ??= SystemInfo.IsLaptop()) || !AppSettings.Current.ExpertMode || !_editorsReady
             || _pboBiosWriting || _coApplying || _pboApplying || _csApplying || _bootApplying || (_memOcPage?.IsWriting ?? false))
             return;
 

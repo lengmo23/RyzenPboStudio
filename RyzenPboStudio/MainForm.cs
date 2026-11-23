@@ -87,7 +87,7 @@ internal sealed partial class MainForm : Form
         (L.T("YC018 — Pi Benchmark 5b / 10b (memory-heavy, sized by installed memory)"), YCruncher.BenchMode, "bench"),
     };
 
-    public MainForm(bool autostartLaunch = false)
+    public MainForm(bool autostartLaunch = false, bool eggUnlocked = false)
     {
         _autostartLaunch = autostartLaunch;
         Config.StepOnError = _multi.BackoffStep; // Before crash recovery reads it.
@@ -112,6 +112,7 @@ internal sealed partial class MainForm : Form
         _logTimer.Start();
 
         Log.Write(L.T("Program started"));
+        if (eggUnlocked) Log.Write(L.T("Congratulations! Easter egg unlocked!"));
         if (Workspace.WasInterrupted())
         {
             var st = Workspace.LoadState();
@@ -275,7 +276,13 @@ internal sealed partial class MainForm : Form
         _sideRail.TestingClicked += (_, _) => ShowPage(Page.Testing);
         _sideRail.MemoryClicked += (_, _) => ShowPage(Page.Memory);
         _sideRail.LoggingClicked += (_, _) => ShowPage(Page.Logging);
-        _sideRail.InfoClicked += (_, _) => _infoDialog.ShowDialog(this);
+        _sideRail.VersionShattered += (_, _) => _pboBiosStage1Armed = true;
+        _sideRail.InfoClicked += (_, _) =>
+        {
+            _pboBiosRestartPending = false;
+            _infoDialog.ShowDialog(this);
+            if (_pboBiosRestartPending) RestartApp("--egg-unlocked");
+        };
         _sideRail.SettingsClicked += (_, _) => ShowSettingsDialog();
         _sideRail.UpdateClicked += (_, _) => _ = RunUpdateFlowAsync(manual: true);
         _sideRail.SponsorClicked += (_, _) =>
@@ -351,27 +358,34 @@ internal sealed partial class MainForm : Form
         left.Controls.Add(BuildParamBar(), 0, 1);
         left.Controls.Add(credit, 0, 2);
 
-        var right = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            BackColor = Theme.Bg,
-            Margin = new Padding(6, 0, 0, 0),
-        };
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));        // Run Log
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));         // Write to BIOS bar
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, PboFooterH)); // Aligns with attribution row
-
         var logCard = BuildLogCard(_logBoxPbo, L.T("Run Log"), L.T("Clear log"));
-        logCard.Margin = new Padding(0, 0, 0, 8);
         logCard.Padding = new Padding(14, 10, 14, 12);
 
-        right.Controls.Add(logCard, 0, 0);
-        right.Controls.Add(BuildPboBiosBar(), 0, 1);
-
         page.Controls.Add(left, 0, 0);
-        page.Controls.Add(right, 1, 0);
+        if (AppSettings.Current.PboBiosUnlocked)
+        {
+            var right = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = Theme.Bg,
+                Margin = new Padding(6, 0, 0, 0),
+            };
+            right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));        // Run Log
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));         // Write to BIOS bar
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, PboFooterH)); // Aligns with attribution row
+
+            logCard.Margin = new Padding(0, 0, 0, 8);
+            right.Controls.Add(logCard, 0, 0);
+            right.Controls.Add(BuildPboBiosBar(), 0, 1);
+            page.Controls.Add(right, 1, 0);
+        }
+        else
+        {
+            logCard.Margin = new Padding(6, 0, 0, 0);
+            page.Controls.Add(logCard, 1, 0);
+        }
         return page;
     }
 
@@ -970,16 +984,21 @@ internal sealed partial class MainForm : Form
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, contentWidth));
 
         // Anchor None centers each row in the fixed-width column.
-        void Line(string text, float size, Color color, bool bold = false, int top = 0) => content.Controls.Add(new Label
+        Label Line(string text, float size, Color color, bool bold = false, int top = 0)
         {
-            Text = text,
-            AutoSize = true,
-            Anchor = AnchorStyles.None,
-            ForeColor = color,
-            BackColor = Theme.Surface,
-            Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
-            Margin = new Padding(0, top, 0, 2),
-        });
+            var lbl = new Label
+            {
+                Text = text,
+                AutoSize = true,
+                Anchor = AnchorStyles.None,
+                ForeColor = color,
+                BackColor = Theme.Surface,
+                Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+                Margin = new Padding(0, top, 0, 2),
+            };
+            content.Controls.Add(lbl);
+            return lbl;
+        }
 
         PillButton LinkButton(string text, string url)
         {
@@ -1000,7 +1019,18 @@ internal sealed partial class MainForm : Form
             return b;
         }
 
-        Line("AMD Ryzen PBO Studio", 20F, Theme.Accent, bold: true);
+        var titleLbl = Line("AMD Ryzen PBO Studio", 20F, Theme.Accent, bold: true);
+        int aboutClicks = 0;
+        dialog.VisibleChanged += (_, _) => { if (dialog.Visible) aboutClicks = 0; };
+        titleLbl.MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || !_pboBiosStage1Armed || AppSettings.Current.PboBiosUnlocked) return;
+            if (++aboutClicks < 5) return;
+            AppSettings.Current.PboBiosUnlocked = true;
+            AppSettings.Current.Save();
+            _pboBiosRestartPending = true;
+            dialog.Close();
+        };
         Line(L.F("{0} · Build {1}", HeaderBar.DisplayVersion, buildDate), 9.5F, Theme.TextLo);
 
         var links = new FlowLayoutPanel
@@ -1802,8 +1832,8 @@ internal sealed partial class MainForm : Form
         };
         AddParamPair(flow, "FMax", _fmaxBox);
         AddParamPair(flow, "PPT (W)", _pptBox);
-        AddParamPair(flow, "EDC (A)", _edcBox);
         AddParamPair(flow, "TDC (A)", _tdcBox);
+        AddParamPair(flow, "EDC (A)", _edcBox);
         AddParamPair(flow, "Scalar", _scalarBox);
 
         var apply = Ghost(L.T("Apply"));

@@ -9,6 +9,7 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
         bool autostart = args.Any(a => string.Equals(a, AutoStart.Arg, StringComparison.OrdinalIgnoreCase));
+        bool eggUnlocked = args.Any(a => string.Equals(a, "--egg-unlocked", StringComparison.OrdinalIgnoreCase));
 
         // Migrate runtime files before reading state so upgrades preserve crash recovery.
         Workspace.EnsureLayout();
@@ -89,7 +90,7 @@ internal static class Program
 
         try
         {
-            Application.Run(new MainForm(autostart));
+            Application.Run(new MainForm(autostart, eggUnlocked));
         }
         finally
         {

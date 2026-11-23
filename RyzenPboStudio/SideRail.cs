@@ -26,6 +26,7 @@ internal sealed class SideRail : Panel
     public event EventHandler? SponsorClicked;
     public event EventHandler? InfoClicked;
     public event EventHandler? SettingsClicked;
+    public event EventHandler? VersionShattered;
 
     public string UpdateTip
     {
@@ -49,6 +50,7 @@ internal sealed class SideRail : Panel
                | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
 
         var brand = new BrandHeader { Dock = DockStyle.Top, Height = 72 };
+        brand.VersionShattered += (_, e) => VersionShattered?.Invoke(this, e);
 
         var navPanel = new TableLayoutPanel
         {
@@ -183,6 +185,21 @@ internal sealed class SideRail : Panel
         private readonly Bitmap? _icon;
         private Font? _titleFont;
         private Font? _verFont;
+        private Rectangle _pillRect;
+        private int _verClicks;
+        private bool _shattered;
+        private bool _pillBlack = AppSettings.Current.PboBiosUnlocked;
+        private System.Windows.Forms.Timer? _animTimer;
+        private long _animStartMs;
+        private Shard[]? _shards;
+
+        private const float WobbleMs = 340f;
+        private const float ShatterMs = 520f;
+        private const float TotalAnimMs = WobbleMs + ShatterMs;
+
+        private readonly record struct Shard(float X0, float Y0, float Vx, float Vy, float Rot0, float RotSpeed, PointF[] Poly, Color Color);
+
+        public event EventHandler? VersionShattered;
 
         public BrandHeader()
         {
@@ -279,14 +296,12 @@ internal sealed class SideRail : Panel
             if (pillW > 8)
             {
                 var pillRect = new Rectangle(textX, topY + titleSz.Height + gap, pillW, pillH);
-                using var pillPath = Theme.RoundRect(pillRect, pillH / 2);
-                using var pillBg = new SolidBrush(Theme.AccentSoft);
-                using var pillPen = new Pen(Color.FromArgb(95, Theme.Accent));
-                g.FillPath(pillBg, pillPath);
-                g.DrawPath(pillPen, pillPath);
-
-                TextRenderer.DrawText(g, ver, _verFont, pillRect, Theme.Accent,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                _pillRect = pillRect;
+                DrawVersionPill(g, pillRect, ver);
+            }
+            else
+            {
+                _pillRect = Rectangle.Empty;
             }
 
             int lineInset = (int)Math.Round(14 * s);
@@ -294,10 +309,161 @@ internal sealed class SideRail : Panel
             g.DrawLine(divider, lineInset, Height - 1, Math.Max(lineInset, Width - lineInset), Height - 1);
         }
 
+        private void DrawVersionPill(Graphics g, Rectangle pillRect, string ver)
+        {
+            float elapsed = _animTimer != null ? Environment.TickCount64 - _animStartMs : -1f;
+            if (elapsed >= 0f && elapsed < WobbleMs)
+            {
+                // Phase 1: wobble/twist the red pill and sketch hairline cracks right before shattering.
+                float p = elapsed / WobbleMs;
+                float angle = MathF.Sin(p * MathF.PI * 5f) * (6f + 9f * p);
+                float dx = MathF.Sin(p * MathF.PI * 7f) * (1.2f + 1.8f * p);
+                float dy = MathF.Cos(p * MathF.PI * 6f) * (0.8f + 1.0f * p);
+                float cx = pillRect.X + pillRect.Width * 0.5f;
+                float cy = pillRect.Y + pillRect.Height * 0.5f;
+
+                var state = g.Save();
+                g.TranslateTransform(cx + dx, cy + dy);
+                g.RotateTransform(angle);
+                g.TranslateTransform(-cx, -cy);
+
+                using var pillPath = Theme.RoundRect(pillRect, pillRect.Height / 2);
+                using var pillBg = new SolidBrush(Theme.AccentSoft);
+                using var pillPen = new Pen(Color.FromArgb(140, Theme.Accent), 1.15f);
+                g.FillPath(pillBg, pillPath);
+                g.DrawPath(pillPen, pillPath);
+
+                using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap };
+                using var tb = new SolidBrush(Theme.Accent);
+                g.DrawString(ver, _verFont!, tb, pillRect, sf);
+
+                if (p > 0.48f)
+                {
+                    int alpha = Math.Clamp((int)(230 * (p - 0.48f) / 0.52f), 0, 230);
+                    using var crack = new Pen(Color.FromArgb(alpha, 255, 200, 195), 1.1f);
+                    float yMid = pillRect.Y + pillRect.Height * 0.5f;
+                    g.DrawLines(crack, new[]
+                    {
+                        new PointF(pillRect.X + pillRect.Width * 0.28f, pillRect.Y + 1),
+                        new PointF(pillRect.X + pillRect.Width * 0.36f, yMid),
+                        new PointF(pillRect.X + pillRect.Width * 0.31f, pillRect.Bottom - 1),
+                    });
+                    g.DrawLines(crack, new[]
+                    {
+                        new PointF(pillRect.X + pillRect.Width * 0.68f, pillRect.Y + 1),
+                        new PointF(pillRect.X + pillRect.Width * 0.61f, yMid + 1),
+                        new PointF(pillRect.X + pillRect.Width * 0.72f, pillRect.Bottom - 1),
+                    });
+                }
+
+                g.Restore(state);
+                return;
+            }
+
+            bool black = _pillBlack || elapsed >= WobbleMs;
+            using (var pillPath = Theme.RoundRect(pillRect, pillRect.Height / 2))
+            {
+                Color bg = black ? Color.FromArgb(0x06, 0x07, 0x0A) : Theme.AccentSoft;
+                Color border = black ? Color.FromArgb(0x2B, 0x31, 0x3E) : Color.FromArgb(95, Theme.Accent);
+                Color fg = black ? Color.FromArgb(0x8A, 0x94, 0xA6) : Theme.Accent;
+                using var pillBg = new SolidBrush(bg);
+                using var pillPen = new Pen(border);
+                g.FillPath(pillBg, pillPath);
+                g.DrawPath(pillPen, pillPath);
+
+                TextRenderer.DrawText(g, ver, _verFont!, pillRect, fg,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            }
+
+            // Phase 2: flying red fragments bursting off the newly blackened pill.
+            if (elapsed >= WobbleMs && _shards != null)
+            {
+                float q = Math.Clamp((elapsed - WobbleMs) / ShatterMs, 0f, 1f);
+                float t = (elapsed - WobbleMs) / 1000f;
+                int alpha = Math.Clamp((int)(255 * MathF.Pow(1f - q, 1.35f)), 0, 255);
+                if (alpha > 0)
+                {
+                    foreach (var sh in _shards)
+                    {
+                        float x = sh.X0 + sh.Vx * t;
+                        float y = sh.Y0 + sh.Vy * t + 145f * t * t;
+                        var state = g.Save();
+                        g.TranslateTransform(x, y);
+                        g.RotateTransform(sh.Rot0 + sh.RotSpeed * t);
+                        using var sb = new SolidBrush(Color.FromArgb(alpha, sh.Color));
+                        g.FillPolygon(sb, sh.Poly);
+                        g.Restore(state);
+                    }
+                }
+            }
+        }
+
+        private void TriggerVersionShatter()
+        {
+            _shattered = true;
+            _animStartMs = Environment.TickCount64;
+            _shards = CreateShards(_pillRect);
+            _animTimer?.Stop();
+            _animTimer?.Dispose();
+            _animTimer = new System.Windows.Forms.Timer { Interval = 16 };
+            _animTimer.Tick += (_, _) =>
+            {
+                if (Environment.TickCount64 - _animStartMs >= TotalAnimMs)
+                {
+                    _pillBlack = true;
+                    _shards = null;
+                    _animTimer?.Stop();
+                    _animTimer?.Dispose();
+                    _animTimer = null;
+                }
+                Invalidate();
+            };
+            _animTimer.Start();
+            Invalidate();
+            VersionShattered?.Invoke(this, EventArgs.Empty);
+        }
+
+        private static Shard[] CreateShards(Rectangle r)
+        {
+            var rng = new Random(0x52595A4E);
+            Color[] palette = { Theme.Accent, Theme.AccentHover, Color.FromArgb(0x9E, 0x1B, 0x18), Theme.AccentSoft };
+            const int count = 18;
+            var shards = new Shard[count];
+            float cx = r.X + r.Width * 0.5f;
+            float cy = r.Y + r.Height * 0.5f;
+            for (int i = 0; i < count; i++)
+            {
+                float fx = (float)(r.X + rng.NextDouble() * Math.Max(1, r.Width));
+                float fy = (float)(r.Y + rng.NextDouble() * Math.Max(1, r.Height));
+                float dx = fx - cx;
+                float dy = fy - cy;
+                float len = MathF.Max(1f, MathF.Sqrt(dx * dx + dy * dy));
+                float speed = 42f + (float)rng.NextDouble() * 68f;
+                float vx = dx / len * speed + ((float)rng.NextDouble() - 0.5f) * 24f;
+                float vy = dy / len * speed - 18f - (float)rng.NextDouble() * 34f;
+                float sz = 2.4f + (float)rng.NextDouble() * 3.2f;
+                var poly = new[]
+                {
+                    new PointF(-sz, -sz * 0.55f),
+                    new PointF(sz * 0.85f, -sz * 0.35f),
+                    new PointF(sz * 0.25f, sz * 0.9f),
+                };
+                shards[i] = new Shard(fx, fy, vx, vy, (float)(rng.NextDouble() * 360.0), ((float)rng.NextDouble() - 0.5f) * 540f, poly, palette[i % palette.Length]);
+            }
+            return shards;
+        }
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (e.Button != MouseButtons.Left || FindForm() is not { } form) return;
+            if (e.Button != MouseButtons.Left) return;
+            if (!_pillRect.IsEmpty && Rectangle.Inflate(_pillRect, 4, 4).Contains(e.Location))
+            {
+                if (!_pillBlack && !_shattered && ++_verClicks >= 5)
+                    TriggerVersionShatter();
+                return;
+            }
+            if (FindForm() is not { } form) return;
             ReleaseCapture();
             SendMessage(form.Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
         }
@@ -306,6 +472,9 @@ internal sealed class SideRail : Panel
         {
             if (disposing)
             {
+                _animTimer?.Stop();
+                _animTimer?.Dispose();
+                _animTimer = null;
                 _titleFont?.Dispose();
                 _verFont?.Dispose();
                 _titleFont = _verFont = null;

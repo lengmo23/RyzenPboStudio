@@ -12,6 +12,9 @@ internal sealed class AppSettings
     [JsonPropertyName("confirm_exit")] public bool ConfirmExit { get; set; }
     /// <summary>Test, recovery and boot-apply prompts are logged instead of shown, and their questions take a fixed answer.</summary>
     [JsonPropertyName("expert_mode")] public bool ExpertMode { get; set; }
+    /// <summary>Hidden easter egg: reveals the PBO page Write to BIOS button after the two-stage unlock.</summary>
+    [JsonPropertyName("pbo_bios_unlocked"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool PboBiosUnlocked { get; set; }
 
     /// <summary>Range of the monitor sampling window entered in the settings dialog.</summary>
     public const int MinMonitorIntervalMs = 100, MaxMonitorIntervalMs = 10000;

@@ -313,7 +313,7 @@ internal sealed partial class MainForm
 
     /// <summary>Closes through the normal exit path (which asks while a test is running) and starts a new instance.
     /// The new instance waits for this one's single-instance mutex.</summary>
-    private void RestartApp()
+    private void RestartApp(string? arg = null)
     {
         _skipExitConfirm = true;
         Close();
@@ -322,7 +322,12 @@ internal sealed partial class MainForm
             _skipExitConfirm = false;
             return;
         }
-        try { Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false }); }
+        try
+        {
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false };
+            if (!string.IsNullOrEmpty(arg)) psi.ArgumentList.Add(arg);
+            Process.Start(psi);
+        }
         catch (Exception e) { Log.Write(L.F("Restart failed: {0}", e.Message), "ERROR"); }
     }
 }
