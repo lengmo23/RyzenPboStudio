@@ -17,6 +17,10 @@
   AMD Ryzen 5000 / 7000 / 9000 시리즈 프로세서를 위한 PBO 튜닝, Curve Optimizer(CO) 자동 테스트 및 메모리 오버클럭 도구입니다.
 </p>
 
+<p align="center">
+  <a href="https://lengmo23.github.io/RyzenPboStudio/en/"><strong>사용 가이드 (영어)</strong></a>
+</p>
+
 ![PBO 튜닝](pbotuning.png)
 
 ## 기능

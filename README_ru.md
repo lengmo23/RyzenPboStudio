@@ -17,6 +17,10 @@
   Инструмент для настройки PBO, автоматического тестирования Curve Optimizer (CO) и разгона памяти для процессоров AMD Ryzen серий 5000 / 7000 / 9000.
 </p>
 
+<p align="center">
+  <a href="https://lengmo23.github.io/RyzenPboStudio/en/"><strong>Руководство пользователя (на английском)</strong></a>
+</p>
+
 ![Настройка PBO](pbotuning.png)
 
 ## Возможности

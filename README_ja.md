@@ -17,6 +17,10 @@
   AMD Ryzen 5000 / 7000 / 9000 シリーズ向けの PBO 調整・Curve Optimizer（CO）自動テスト・メモリオーバークロックツール。
 </p>
 
+<p align="center">
+  <a href="https://lengmo23.github.io/RyzenPboStudio/en/"><strong>ユーザーガイド（英語）</strong></a>
+</p>
+
 ![PBO 調整](pbotuning.png)
 
 ## 機能

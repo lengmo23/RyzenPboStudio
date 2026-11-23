@@ -17,6 +17,10 @@
   Ein Werkzeug für PBO-Tuning, automatisierte Curve-Optimizer-(CO)-Tests und Speicherübertaktung für AMD Ryzen 5000 / 7000 / 9000 Prozessoren.
 </p>
 
+<p align="center">
+  <a href="https://lengmo23.github.io/RyzenPboStudio/en/"><strong>Benutzerhandbuch (Englisch)</strong></a>
+</p>
+
 ![PBO-Tuning](pbotuning.png)
 
 ## Funktionen

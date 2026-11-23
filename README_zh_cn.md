@@ -17,6 +17,10 @@
   面向 AMD Ryzen 5000 / 7000 / 9000 系处理器的 PBO 调节、Curve Optimizer（CO）自动测试与内存超频工具。
 </p>
 
+<p align="center">
+  <a href="https://lengmo23.github.io/RyzenPboStudio/"><strong>使用指南</strong></a>
+</p>
+
 ![PBO 调参](pbotuning.png)
 
 ## 功能

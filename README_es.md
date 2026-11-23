@@ -17,6 +17,10 @@
   Herramienta de ajuste PBO, pruebas automáticas de Curve Optimizer (CO) y overclocking de memoria para procesadores AMD Ryzen series 5000 / 7000 / 9000.
 </p>
 
+<p align="center">
+  <a href="https://lengmo23.github.io/RyzenPboStudio/en/"><strong>Guía de uso (en inglés)</strong></a>
+</p>
+
 ![Ajuste PBO](pbotuning.png)
 
 ## Funciones
