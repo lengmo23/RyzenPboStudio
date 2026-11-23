@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AMD Ryzen PBO Studio MEMOC 4.0 中文手册。从安装 PawnIO 到填写 EXPO、写入 BIOS、验证内存稳定性与恢复。">
+  <meta name="theme-color" content="#f8f7f4">
+  <title>MEMOC 4.0 使用说明 · AMD Ryzen PBO Studio</title>
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="site-header" id="top">
+    <div class="header-inner">
+      <a class="brand" href="./">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <span>AMD Ryzen PBO Studio</span>
+      </a>
+      <div class="header-links">
+        <a href="https://github.com/lengmo23/RyzenPboStudio">GitHub</a>
+        <a class="header-download" href="#install">下载与安装</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <p class="nav-label">MEMOC 4.0 手册</p>
+      <nav aria-label="手册导航">
+        <a href="#main">概览</a>
+        <a href="#install">下载与安装</a>
+        <a href="#memory">内存超频</a>
+        <a href="#testing">稳定性测试</a>
+        <a href="#recovery">排查与恢复</a>
+      </nav>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <section class="hero" aria-labelledby="title">
+        <p class="eyebrow"><span aria-hidden="true"></span> <span class="version">V4.0.0 Beta</span></p>
+        <h1 id="title">MEMOC 4.0<br>使用说明</h1>
+        <p class="intro">在 Windows 查看内存 SPD 和实时读数，填写 EXPO 或导入配置，再将目标参数写入 BIOS。重启完成内存训练后，验证系统稳定性。</p>
+        <div class="hero-links">
+          <a class="button primary" href="#install">下载与安装</a>
+          <a class="button secondary" href="#memory">查看超频流程</a>
+        </div>
+      </section>
+
+      <figure class="screenshot">
+        <a href="memory-oc.png" aria-label="查看内存超频界面大图">
+          <img src="memory-oc.png" alt="MEMOC 4.0 中文界面。上方是内存 SPD 信息和配置按钮，下方三栏分别显示电压、内存时序和信号控制。"
+               width="1420" height="790">
+        </a>
+        <figcaption>MEMOC 4.0 Beta 的「内存超频」页。图中读数来自示例机器。</figcaption>
+      </figure>
+
+      <section class="chapter" id="install" aria-labelledby="install-title">
+        <h2 id="install-title">下载与安装</h2>
+        <p>手册对应 V4.0.0 Beta。请核对下载包或程序「关于」中的版本号。若 GitHub Releases 只列出 3.x，可使用手头已有的 4.0 Beta 安装包，或等待 4.0 发布。</p>
+        <h3 id="requirements">运行要求</h3>
+        <dl class="specs">
+          <div><dt>系统</dt><dd>Windows 10 / 11 x64，管理员权限</dd></div>
+          <div><dt>PBO / CO</dt><dd>AMD Ryzen 5000 / 7000 / 9000 系</dd></div>
+          <div><dt>内存超频</dt><dd>本手册以 AM5 / DDR5 为例。可写项目由主板及当前 BIOS 暴露的 AMD Overclocking 接口决定。</dd></div>
+          <div><dt>驱动</dt><dd><a href="https://pawnio.eu/">PawnIO</a>，启动前必须安装</dd></div>
+        </dl>
+
+        <h3 id="package">选择发布包</h3>
+        <p>如果发布页列有以下文件，首次安装选择 <code>lite</code> 或 <code>net8contained</code>。</p>
+        <dl class="specs">
+          <div><dt><code>-lite.zip</code></dt><dd>含 y-cruncher，需要系统已安装 <a href="https://dotnet.microsoft.com/download/dotnet/8.0">.NET 8 Desktop Runtime x64</a>。</dd></div>
+          <div><dt><code>-net8contained.zip</code></dt><dd>内置 .NET 8 和 y-cruncher，免装 .NET 8 Desktop Runtime。</dd></div>
+          <div><dt><code>-update.zip</code><br><code>-net8patch-rt*.zip</code></dt><dd>供程序内自动更新使用。</dd></div>
+        </dl>
+        <p><a href="https://github.com/lengmo23/RyzenPboStudio/releases">查看 GitHub Releases</a></p>
+        <ol>
+          <li>安装 PawnIO。如果选择了 <code>lite</code> 包，确认已安装 .NET 8 Desktop Runtime x64。</li>
+          <li>完整解压软件包，保留 EXE、随附 DLL 和子目录。</li>
+          <li>以管理员身份运行 <code>AMD Ryzen PBO Studio.exe</code>。先确认「PBO 调参」页能显示 CPU 监控读数，再打开「内存超频」。</li>
+        </ol>
+      </section>
+
+      <section class="chapter" id="memory" aria-labelledby="memory-title">
+        <h2 id="memory-title">内存超频</h2>
+        <aside class="notice">
+          <strong>写入前先确认主板的恢复方法</strong>
+          <p>内存参数不稳定可能导致数据错误、死机或开机黑屏。保存重要资料，查阅本机手册中的清除 CMOS 或 BIOS 恢复说明，再开始修改。</p>
+        </aside>
+
+        <h3 id="targets">读取 SPD，填写目标值</h3>
+        <ol>
+          <li>打开「内存超频」，查看内存型号、颗粒、EXPO 配置和已加载的可调项目。表格并排显示「当前」和「目标」，蓝色目标值表示待写入修改。</li>
+          <li>可以点击 SPD 区的 <strong>EXPO</strong> 填入频率、主要时序与相关电压，或点击「导入配置」载入本程序的 JSON 或 Cat-girl memoryOC 的内存配置。也可以逐项编辑目标值。</li>
+          <li>核对目标频率、时序、电压和导入时跳过的项目。再次点击同一 EXPO 可撤销这次填充。「重置目标」将编辑区恢复为当前 BIOS 设置。</li>
+          <li>需要留存这组参数时，点击「导出配置」。默认目录为 <code>dram\</code>。</li>
+        </ol>
+        <p>EXPO、导入和编辑都只更新目标值。预设能否稳定运行取决于处理器、主板、BIOS 和内存条组合。</p>
+
+        <h3 id="write">写入 BIOS 并重启</h3>
+        <ol>
+          <li>打开左下角齿轮「设置」，在「常规」中开启「专家模式」。</li>
+          <li>如果 <code>CPU VDDIO</code> 目标仍是 <code>Auto</code>，先按本机配置指定目标值。点击「写入 BIOS」，核对确认弹窗中的变更后再确认。程序会先校验并备份当前 BIOS 参数，再逐项写入和回读。</li>
+          <li>确认写入结果后重启电脑，等待内存训练完成。回到软件查看频率、时序等实时读数，再进行稳定性测试。</li>
+        </ol>
+        <p>若中途报错，之前的部分项目可能已写入。先根据「运行日志」和回读结果确认状态，再决定如何恢复。</p>
+      </section>
+
+      <section class="chapter" id="testing" aria-labelledby="testing-title">
+        <h2 id="testing-title">稳定性测试</h2>
+        <h3 id="memory-test">检查内存配置</h3>
+        <p>重新进入 Windows 后，先确认实时频率与时序，再运行适用于内存的稳定性测试。程序内可以在「稳定性测试」选择 y-cruncher 测试项目。若只排查内存设置，建议保持 CO 固定并选择「手动模式」。一次通过只能说明当前测试条件下未观察到错误。</p>
+
+        <h3 id="co">测试 Curve Optimizer</h3>
+        <p>如需同时使用 CPU 调参功能，先在「PBO 调参」应用 CO，再切到「稳定性测试」。可以选择单项、顺序或组合测试，并设置核心范围。</p>
+        <dl class="specs">
+          <div><dt>手动模式</dt><dd>检测到错误后提示并停止，保留当前 CO。</dd></div>
+          <div><dt>自动模式</dt><dd>将错误映射至物理核心，回退该核心的 CO 后重新测试。</dd></div>
+        </dl>
+        <p>调参完成后使用全核测试验证。最终 CO 可在「运行日志」及 <code>profiles\final_offsets.txt</code> 中查看。确认稳定后再启用「开机自动应用 PBO」。</p>
+      </section>
+
+      <section class="chapter" id="recovery" aria-labelledby="recovery-title">
+        <h2 id="recovery-title">排查与恢复</h2>
+        <div class="faq">
+          <details>
+            <summary>软件无法启动</summary>
+            <p>确认使用 Windows x64，已安装 PawnIO，并以管理员身份运行。若使用 <code>lite</code>，确认安装的是 .NET 8 <strong>Desktop Runtime x64</strong>。若缺少 DLL，请完整重新解压。</p>
+          </details>
+          <details>
+            <summary>写入按钮不可用，或可调项目为零</summary>
+            <p>先确认已开启「专家模式」。若仍无可调项目，请查看状态栏与「运行日志」中的 BIOS 接口探测结果，核对主板型号与 BIOS 版本。不同主板及固件可写项目不同。</p>
+          </details>
+          <details>
+            <summary>写入后还能开机，如何恢复原配置？</summary>
+            <p>在「导入配置」选择 <code>profiles\memory_backup_*.json</code>，核对可恢复的数值后再写入并重启。已写入为手动值的参数如需恢复成 <code>Auto</code>，请进入主板 BIOS 恢复。</p>
+          </details>
+          <details>
+            <summary>重启后黑屏，无法进入 BIOS 或 Windows</summary>
+            <p>先按主板手册预留内存训练时间。若仍无法完成开机自检，按主板或整机厂商的说明清除 CMOS 或恢复 BIOS 默认设置。笔记本没有外部恢复入口时，请按整机手册处理或联系厂商。软件恢复需要能进入 Windows。</p>
+          </details>
+        </div>
+
+        <h3 id="logs">日志与反馈</h3>
+        <p>「运行日志」记录测试与 BIOS 写入结果。BIOS 写入追踪可在 <code>logs\acpi-command-trace.jsonl</code> 中查看。反馈时请提供软件版本、CPU、主板、BIOS 版本、复现步骤及相关日志片段。</p>
+        <p><a href="https://github.com/lengmo23/RyzenPboStudio/issues">在 GitHub Issues 反馈</a></p>
+      </section>
+
+      <footer class="footer">
+        <p>内存超频功能由 <a href="https://v.douyin.com/yMpmAidKqdY/">Cat-girl-memoryOC（@纯爱出演小猪）</a> 提供支持。</p>
+        <a href="#top">返回顶部</a>
+      </footer>
+    </main>
+
+    <aside class="on-page">
+      <p class="nav-label">本页目录</p>
+      <nav aria-label="本页目录">
+        <a href="#requirements">运行要求</a>
+        <a href="#package">选择发布包</a>
+        <a href="#targets">读取 SPD 与填写目标</a>
+        <a href="#write">写入 BIOS 并重启</a>
+        <a href="#memory-test">检查内存配置</a>
+        <a href="#co">测试 Curve Optimizer</a>
+        <a href="#logs">日志与反馈</a>
+      </nav>
+    </aside>
+  </div>
+</body>
+</html>
