@@ -150,29 +150,38 @@ internal static class Updater
         return hex.Length == 64 && hex.All(Uri.IsHexDigit) ? hex : null;
     }
 
-    // Release section that explains which archive to download by hand; meaningless inside the app.
-    private const string DownloadGuideHeading = "下载哪个";
-
-    /// <summary>Splits Release Markdown into one note per heading, dropping the download guide.
-    /// Text before the first heading becomes a note without a title.</summary>
-    internal static List<ReleaseNote> ParseNotes(string markdown)
+    // Release sections that explain which archive to download by hand; meaningless inside the app.
+    private static readonly HashSet<string> DownloadGuideHeadings = new(StringComparer.OrdinalIgnoreCase)
     {
+        "下载哪个",
+        "Which download",
+    };
+
+    private static readonly Regex LangMarkerPattern = new(@"^<!--\s*lang:([a-zA-Z0-9_-]+)\s*-->$", RegexOptions.IgnoreCase);
+
+    /// <summary>Splits Release Markdown into one note per heading, selecting the language block matching
+    /// <paramref name="langCode"/> (Chinese → zh, all other languages → en) when <c>&lt;!-- lang:xx --&gt;</c>
+    /// markers are present, and dropping the manual download guide.</summary>
+    internal static List<ReleaseNote> ParseNotes(string markdown, string? langCode = null)
+    {
+        string body = SelectLanguageBlock(markdown, langCode ?? L.Code);
         var notes = new List<ReleaseNote>();
         string title = "";
         var detail = new List<string>();
 
         void Flush()
         {
-            if (title != DownloadGuideHeading && (title.Length > 0 || detail.Count > 0))
+            if (!DownloadGuideHeadings.Contains(title) && (title.Length > 0 || detail.Count > 0))
                 notes.Add(new ReleaseNote(title, string.Join("\n", detail)));
             detail.Clear();
         }
 
-        foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        foreach (string raw in body.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
         {
             string line = raw.Trim();
             if (line.Length == 0 || line.StartsWith("```")) continue;
-            if (line.All(c => c == '-' || c == '=')) continue;
+            if (line.StartsWith("<!--") && line.EndsWith("-->")) continue;
+            if (line.All(c => c is '-' or '=' or '*')) continue;
             if (line.StartsWith('#'))
             {
                 Flush();
@@ -186,6 +195,40 @@ internal static class Updater
         }
         Flush();
         return notes;
+    }
+
+    private static string SelectLanguageBlock(string markdown, string langCode)
+    {
+        var blocks = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        string? current = null;
+
+        foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            var m = LangMarkerPattern.Match(raw.Trim());
+            if (m.Success)
+            {
+                string tag = m.Groups[1].Value;
+                if (tag.Equals("end", StringComparison.OrdinalIgnoreCase))
+                {
+                    current = null;
+                }
+                else
+                {
+                    current = tag;
+                    if (!blocks.ContainsKey(current)) blocks[current] = new List<string>();
+                }
+                continue;
+            }
+            if (current != null) blocks[current].Add(raw);
+        }
+
+        if (blocks.Count == 0) return markdown;
+
+        string preferred = langCode.StartsWith("zh", StringComparison.OrdinalIgnoreCase) ? "zh" : "en";
+        string fallback = preferred == "zh" ? "en" : "zh";
+        if (blocks.TryGetValue(preferred, out var lines) && lines.Count > 0) return string.Join("\n", lines);
+        if (blocks.TryGetValue(fallback, out lines) && lines.Count > 0) return string.Join("\n", lines);
+        return markdown;
     }
 
     private static string CleanMarkdown(string text)
