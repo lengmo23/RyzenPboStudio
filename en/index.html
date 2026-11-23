@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="The AMD Ryzen PBO Studio user guide. Learn how to monitor Ryzen CPUs, tune PBO, CO and CS, run stability tests, overclock memory, and recover after a crash.">
+  <meta name="theme-color" content="#f8f7f4">
+  <title>AMD Ryzen PBO Studio · User Guide</title>
+  <link rel="icon" href="../studio.ico">
+  <link rel="stylesheet" href="../site.css">
+  <link rel="alternate" hreflang="zh-CN" href="../">
+  <script src="../language.js" defer></script>
+</head>
+<body id="top">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="./">
+        <img class="brand-mark" src="../studio.ico" alt="" width="32" height="32">
+        <span>AMD Ryzen PBO Studio</span>
+      </a>
+      <div class="header-links">
+        <a href="https://github.com/lengmo23/RyzenPboStudio">GitHub</a>
+        <a class="header-download" href="#install">Download &amp; install</a>
+        <details class="language-picker">
+          <summary aria-label="Documentation language, currently English">
+            <span class="language-symbol" aria-hidden="true">文/A</span>
+            <span>English</span>
+          </summary>
+          <div class="language-options">
+            <a href="../" lang="zh-CN" hreflang="zh-CN">简体中文</a>
+            <a href="./" lang="en" hreflang="en" aria-current="page">English</a>
+          </div>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <p class="nav-label">User Guide</p>
+      <nav aria-label="Guide navigation">
+        <a href="#main">Overview</a>
+        <a href="#install">Download &amp; install</a>
+        <a href="#monitor">Live monitoring</a>
+        <a href="#pbo">PBO tuning</a>
+        <a href="#testing">Stability testing</a>
+        <a href="#memory">Memory overclocking</a>
+        <a href="#recovery">Logs &amp; recovery</a>
+        <a href="#settings">Settings &amp; updates</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <section class="hero" aria-labelledby="title">
+        <p class="eyebrow"><span aria-hidden="true"></span> <span class="version">V4.0.0 Beta</span></p>
+        <h1 id="title">AMD Ryzen<br>PBO Studio</h1>
+        <p class="intro">Tune AMD Ryzen 5000, 7000, and 9000 series processors on Windows. Monitor your CPU and memory, adjust PBO, Curve Optimizer, and Curve Shaper, run y-cruncher stability tests, or edit memory settings and write them to BIOS.</p>
+        <div class="hero-links">
+          <a class="button primary" href="#install">Download &amp; install</a>
+          <a class="button secondary" href="#pbo">Explore PBO tuning</a>
+        </div>
+      </section>
+
+      <figure class="screenshot">
+        <a href="../pbo-tuning.png" aria-label="View the full-size PBO Tuning screenshot">
+          <img src="../pbo-tuning.png" alt="AMD Ryzen PBO Studio's PBO Tuning page, with live monitoring grouped by CCD above the CO, Curve Shaper, PBO settings, and run log panels." width="1420" height="790">
+        </a>
+        <figcaption>The PBO Tuning page in the Simplified Chinese interface. The screenshots show one example system.</figcaption>
+      </figure>
+
+      <section class="chapter" id="install" aria-labelledby="install-title">
+        <h2 id="install-title">Download and install</h2>
+        <p>This guide covers V4.0.0 Beta. Check your version in <strong>About</strong>. GitHub Releases lists the publicly available versions. Version 3.x has a different interface and feature set.</p>
+        <h3 id="requirements">System requirements</h3>
+        <dl class="specs">
+          <div><dt>Operating system</dt><dd>Windows 10 or 11 x64 with administrator privileges.</dd></div>
+          <div><dt>PBO / CO</dt><dd>AMD Ryzen 5000, 7000, or 9000 series.</dd></div>
+          <div><dt>Memory overclocking</dt><dd>This guide uses AM5 and DDR5 examples. Writable settings depend on the AMD Overclocking interface exposed by your motherboard and BIOS version.</dd></div>
+          <div><dt>Driver</dt><dd>Install <a href="https://pawnio.eu/">PawnIO</a> before launching the program.</dd></div>
+        </dl>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="CPU feature support table">
+          <table>
+            <caption>CPU tuning features by Ryzen generation</caption>
+            <thead>
+              <tr><th scope="col">Feature</th><th scope="col">5000 · Zen 3</th><th scope="col">7000 · Zen 4</th><th scope="col">9000 · Zen 5</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Curve Optimizer</th><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">Curve Shaper</th><td>—</td><td>—</td><td>Yes</td></tr>
+              <tr><th scope="row">PPT / EDC / TDC</th><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">Adjust FMax</th><td>—</td><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">CPPC core ranking</th><td>Enable CPPC in BIOS</td><td>Yes</td><td>Yes</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="package">Choose a release package</h3>
+        <p>For a first-time installation, choose <code>lite</code> or <code>net8contained</code> when those packages are available on the release page.</p>
+        <dl class="specs">
+          <div><dt><code>-lite.zip</code></dt><dd>Includes y-cruncher and requires <a href="https://dotnet.microsoft.com/download/dotnet/8.0">.NET 8 Desktop Runtime x64</a>.</dd></div>
+          <div><dt><code>-net8contained.zip</code></dt><dd>Bundles .NET 8 and y-cruncher, so you can skip installing the runtime separately.</dd></div>
+          <div><dt><code>-update.zip</code><br><code>-net8patch-rt*.zip</code></dt><dd>Used by the in-app updater.</dd></div>
+        </dl>
+        <p><a href="https://github.com/lengmo23/RyzenPboStudio/releases">View GitHub Releases</a></p>
+        <ol>
+          <li>Install PawnIO. If you chose the <code>lite</code> package, confirm that .NET 8 Desktop Runtime x64 is installed.</li>
+          <li>Extract the whole archive. Keep the executable, DLLs, and subfolders together.</li>
+          <li>Run <code>AMD Ryzen PBO Studio.exe</code> as administrator. Check that CPU readings appear on <strong>PBO Tuning</strong>.</li>
+        </ol>
+      </section>
+
+      <section class="chapter" id="monitor" aria-labelledby="monitor-title">
+        <h2 id="monitor-title">Live monitoring</h2>
+        <p><strong>System Overview</strong> in the sidebar shows the CPU, memory capacity, live FCLK and UCLK, motherboard model, BIOS and AGESA versions, GPU and driver, and Windows version. The live monitor appears at the top of <strong>PBO Tuning</strong>, <strong>Stability Test</strong>, and <strong>Run Log</strong>. It collapses on <strong>Memory OC</strong>.</p>
+        <dl class="specs">
+          <div><dt>Power, current, and temperature</dt><dd>Current readings and limits for PPT (package power), TDC (sustained current), EDC (peak current), and THM (temperature).</dd></div>
+          <div><dt>Voltage and frequency</dt><dd>TEL, VID, Vdroop, FMax, and BCLK. Systems with asynchronous base clocks show BCLK and BCLK2 separately.</dd></div>
+          <div><dt>CCD and per-core readings</dt><dd>Each CCD shows average utilization and hotspot temperature. Each core shows its CPPC rank (with gold and silver markers), frequency, effective frequency (EFF), CO, and Core VID.</dd></div>
+        </dl>
+        <p>Use <strong>EFF</strong> to see a core's effective frequency during a test. If CPPC rankings are blank on Ryzen 5000, check whether CPPC is enabled in BIOS.</p>
+      </section>
+
+      <section class="chapter" id="pbo" aria-labelledby="pbo-title">
+        <h2 id="pbo-title">PBO tuning</h2>
+        <h3 id="curves">Curve Optimizer and Curve Shaper</h3>
+        <p><strong>Curve Optimizer (CO)</strong> adjusts the curve offset for each physical core. Edit individual cores, or use <code>+</code> and <code>−</code> to adjust a whole column. On supported Ryzen 9000 series CPUs, <strong>Curve Shaper (CS)</strong> lets you adjust the curve across five frequency bands (MIN, LOW, MED, HIGH, MAX) and three temperature bands (LOW, MED, HIGH).</p>
+        <dl class="specs">
+          <div><dt>Apply</dt><dd>Apply the values in the editor to the running system.</dd></div>
+          <div><dt>Refresh</dt><dd>Read the current values from the hardware.</dd></div>
+          <div><dt>Save</dt><dd>Save the edited values to <code>profiles\co_profile.json</code> or <code>profiles\cs_state.json</code>.</dd></div>
+          <div><dt>Load</dt><dd>Load a saved profile into the editor. Click <strong>Apply</strong> to activate it.</dd></div>
+        </dl>
+
+        <h3 id="limits">Frequency, power, current, and Scalar</h3>
+        <p>At the bottom of the page, set FMax (MHz), PPT (W), EDC (A), TDC (A), and PBO Scalar (1X–10X), then click <strong>Apply</strong> on the same row. FMax and Scalar availability depends on the CPU and firmware. The program records FMax, PPT, EDC, and TDC when a test starts or you apply the limits manually, so it can restore them when resuming a test.</p>
+
+        <h3 id="boot-apply">Apply PBO at startup</h3>
+        <p>After passing a stability test, save a CO profile matching the current CPU's core count and save a CS profile if needed. Then turn on <strong>Apply PBO at startup</strong> in the sidebar. At each Windows sign-in, the program applies the saved CO and supported CS values, along with the last FMax, PPT, EDC, and TDC limits applied on the PBO page. It writes only limits that differ from the current values and retains the firmware's Scalar setting.</p>
+        <p>If the system restarts unexpectedly soon after applying settings at startup, the program skips the next startup apply. Check <strong>Run Log</strong> for the reason and review your saved settings.</p>
+
+        <h3 id="pbo-bios">Write PBO settings to BIOS</h3>
+        <p><strong>Write to BIOS</strong> on the <strong>PBO Tuning</strong> page is available on desktops only. Unlock the feature in the program, enable <strong>Expert mode</strong>, and stop any running test or measurement. The program checks the motherboard interface, previews the PBO, CO, and CS settings it can write, and explains any skipped items. After confirmation it sends the settings one at a time. They take effect after a restart. Firmware support varies, and the program flags support as experimental on platforms other than Zen 5.</p>
+        <p>Some firmware may lose the sign of a positive CO offset after a restart. If a write fails partway through, earlier writes may still take effect. Check <strong>Run Log</strong> and the BIOS before trying again.</p>
+      </section>
+
+      <section class="chapter" id="testing" aria-labelledby="testing-title">
+        <h2 id="testing-title">Stability testing</h2>
+        <figure class="screenshot chapter-shot">
+          <a href="../stability-test.png" aria-label="View the full-size Stability Test screenshot">
+            <img src="../stability-test.png" alt="The Stability Test page shows test settings on the left and per-core voltage alignment results and a summary on the right." width="1420" height="790" loading="lazy">
+          </a>
+          <figcaption>On <strong>Stability Test</strong>, choose a test plan, CO adjustment mode, and core scope, then click <strong>Start</strong>.</figcaption>
+        </figure>
+
+        <h3 id="test-plans">y-cruncher test plans</h3>
+        <dl class="specs">
+          <div><dt>Single test</dt><dd>Choose VT3, BKT, SVT, BBP, SFTv4, SNT, FFTv4, N63, or YC018. For regular stress tests, set the round count and duration per round.</dd></div>
+          <div><dt>Sequential</dt><dd>Complete all rounds of one test before starting the next. The default is VT3 for 20 rounds, BKT for 10, then SVT for 10. You can edit the tests, order, round counts, and duration per round.</dd></div>
+          <div><dt>Combined</dt><dd>Run each selected test in turn within every round. The default rotates VT3, BKT, and SVT for 10 rounds. You can change the tests, total rounds, and the common duration per round.</dd></div>
+        </dl>
+        <p>Choose <strong>All cores</strong> or select individual physical cores under <strong>Custom</strong>. On a multi-CCD processor, select one CCD or use <strong>Each CCD</strong> to run the full test on each CCD in turn. The multi-test plan and the CO backoff step have separate settings buttons. Click <strong>Stop</strong> to end a run.</p>
+
+        <h3 id="co">Automatic and manual CO adjustment</h3>
+        <p>Apply the CO values you want to validate in <strong>PBO Tuning</strong>, then open <strong>Stability Test</strong>.</p>
+        <dl class="specs">
+          <div><dt>Auto</dt><dd>When y-cruncher identifies a failing logical core, the application maps it to its physical core, increases that core's CO by the configured backoff step (default +2, adjustable from +1 to +5), and reruns the current test or combined plan. CO backoff stops at +30 if the test keeps failing.</dd></div>
+          <div><dt>Manual</dt><dd>The application reports the error and stops, preserving the current CO values so you can troubleshoot the CPU or memory settings manually.</dd></div>
+        </dl>
+        <p>After all rounds pass, <strong>Run Log</strong> shows the final CO and available Curve Shaper data. <code>profiles\final_offsets.txt</code> records the test plan, scope, and passing per-core CO values. After a single-CCD test passes, run an all-core test to validate the full configuration.</p>
+
+        <h3 id="measure">Single Core Boost and Voltage Alignment</h3>
+        <p>Both tools are on the right side of <strong>Stability Test</strong> and require AVX2 and FMA. Stop any running stress test before starting a measurement.</p>
+        <dl class="specs">
+          <div><dt>Single Core Boost</dt><dd>Loads one core at a time with the current CO and records its frequency, effective frequency, VID, and Core VID. Your tuning settings stay in effect.</dd></div>
+          <div><dt>Voltage Alignment</dt><dd>Starts each core at the same CO, then picks a reference core for each CCD. It adjusts other cores toward similar voltages at the same frequency and looks for the CCD's single-core frequency plateau. Cores that produce computation errors are backed off. The program applies CO changes during the run and fills the editor with the resulting values. Stress-test the result before saving it manually.</dd></div>
+        </dl>
+        <p>At the standard base clock, alignment starts at CO 0. When the application detects a raised CPU base clock, the confirmation dialog lets you set the starting CO. The result table and log show per-core measurements and alignment status. Click <strong>Stop</strong> to end the run.</p>
+
+        <h3 id="memory-test">YC018 and memory validation</h3>
+        <p>YC018 is a memory-intensive Pi benchmark available as a single test. It selects 2.5, 5, or 10 billion digits based on installed memory and uses all cores. The round count sets the number of runs. YC018 ignores the duration and core scope settings. To isolate memory changes, keep CO fixed, choose <strong>Manual</strong>, confirm the live frequency and timings after restarting, then validate with suitable memory stability tests.</p>
+      </section>
+
+      <section class="chapter" id="memory" aria-labelledby="memory-title">
+        <h2 id="memory-title">Memory overclocking</h2>
+        <figure class="screenshot chapter-shot">
+          <a href="../memory-oc.png" aria-label="View the full-size Memory OC screenshot">
+            <img src="../memory-oc.png" alt="The Memory OC page shows SPD information and profile controls above the voltage, DRAM timing, and signal control panels." width="1420" height="790" loading="lazy">
+          </a>
+          <figcaption><strong>Memory OC</strong> displays current and target values side by side. Blue text marks pending changes.</figcaption>
+        </figure>
+        <aside class="notice">
+          <strong>Check your motherboard's recovery procedure before writing</strong>
+          <p>Unstable memory settings can cause data errors, freezes, or a black screen at boot. Save important work and check your system manual for CMOS reset or BIOS recovery instructions before making changes.</p>
+        </aside>
+
+        <h3 id="memory-readings">Readings and configurable settings</h3>
+        <dl class="specs">
+          <div><dt>Memory SPD Info</dt><dd>Capacity, channel count, frequency, primary timings, Cmd2T, each slot's module model and capacity, DRAM IC vendor, and EXPO profiles read from SPD.</dd></div>
+          <div><dt>Misc &amp; Voltages</dt><dd>SoC, VDDP, VDDG CCD / IOD, VDD MISC, CPU VDDIO, DRAM VDD / VDDQ / VPP, and FCLK OC Mode. This panel also shows the read-only BGS, BGS Alt, GDM, and Cmd2T values, plus average DIMM temperature and power when supported. Hover to see individual DIMM readings.</dd></div>
+          <div><dt>DRAM Timing Control</dt><dd>Memory Frequency, FCLK, UCLK DIV1 MODE, PowerDown Enable, Refresh Mode, and primary, secondary, and other timings read from the memory controller. BIOS support determines which settings you can edit.</dd></div>
+          <div><dt>Signal Control</dt><dd>ProcODT, drive strengths, Rtt termination, Nitro RX / TX / Ctrl Line, Robust Training, Interleave, and related settings.</dd></div>
+        </dl>
+        <p>The page refreshes about every two seconds and displays live voltage and DIMM data when the hardware supplies it. <strong>Memory Write &amp; Profiles</strong> shows the number of configurable settings and the current operation status.</p>
+
+        <h3 id="targets">Read SPD and set target values</h3>
+        <ol>
+          <li>Open <strong>Memory OC</strong> to see the modules, DRAM ICs, EXPO profiles, and available controls. <strong>Current</strong> and <strong>Target</strong> are shown side by side. Blue targets are pending changes.</li>
+          <li>Click an <strong>EXPO</strong> profile in the SPD panel to fill supported targets for frequency, primary and refresh timings, DRAM VDD and VDDQ, CPU VDDIO, and Nitro. Click the same profile again to undo that fill.</li>
+          <li>Edit values individually or click <strong>Import</strong> to load a JSON file exported by this program, a standalone Cat-girl memoryOC profile, or the memory section of a combined profile. The status line lists skipped items. Click <strong>Revert</strong> to reset the targets to the current BIOS settings.</li>
+          <li>Click <strong>Export</strong> to save the targets to a JSON file. The default directory is <code>dram\</code>. The filename includes the platform, frequency, CL, and DRAM IC vendor when available.</li>
+        </ol>
+        <p>EXPO, imports, and manual edits change the targets in the editor. Whether a preset runs reliably depends on your CPU, motherboard, BIOS, and memory modules.</p>
+
+        <h3 id="write">Write to BIOS and restart</h3>
+        <ol>
+          <li>Open <strong>Settings</strong> with the gear icon at the bottom left. Under <strong>General</strong>, enable <strong>Expert mode</strong>.</li>
+          <li>If the <code>CPU VDDIO</code> target is still <code>Auto</code>, set a value appropriate for your system. The program caps CPU VDDIO at <code>1.500 V</code>. Click <strong>Write to BIOS</strong> and review the changes and flagged values in the confirmation dialog.</li>
+          <li>After confirmation, the application checks the firmware interface and relevant settings, saves <code>profiles\memory_backup_&lt;time&gt;.json</code>, then writes and reads back each item through the motherboard's AMD_ACPI WMI interface. A failed validation or backup stops the process before any writes.</li>
+          <li>Review the result, restart your computer, and give it time to complete memory training. Open the program again to check live frequency and timings, then run a stability test.</li>
+        </ol>
+        <p>If the write fails partway through, some settings may already have been written. Review <strong>Run Log</strong> and the values read back from firmware before deciding how to recover.</p>
+      </section>
+
+      <section class="chapter" id="recovery" aria-labelledby="recovery-title">
+        <h2 id="recovery-title">Logs and recovery</h2>
+        <h3 id="logs">Find logs and configuration files</h3>
+        <p><strong>Run Log</strong> shows the full log, also mirrored on the right side of <strong>PBO Tuning</strong>. It records y-cruncher rounds, timings and speeds, failing-core mappings, CO backoffs, and BIOS writes. <strong>Clear log</strong> clears the displayed log. Files in <code>logs\</code> remain available.</p>
+        <dl class="specs">
+          <div><dt><code>logs\</code></dt><dd>Application sessions, y-cruncher output, and firmware commands and responses in <code>acpi-command-trace.jsonl</code>.</dd></div>
+          <div><dt><code>profiles\</code></dt><dd>CO and CS profiles, test plans and results, write history, recovery state, program settings, and memory BIOS backups.</dd></div>
+          <div><dt><code>dram\</code></dt><dd>Default folder for importing and exporting memory JSON files. Bundled presets, when included, are also stored here.</dd></div>
+        </dl>
+
+        <h3 id="resume">Resume after an unexpected restart</h3>
+        <p>The program saves the test plan, stage, core scope, and CO history. After a freeze or power loss, a startup task attempts to resume testing when you sign in to Windows. It prioritizes the interrupted test, restores the recorded PBO limits and supported CS values, and backs off the CO of each enabled core by one step. If you apply CO manually after restarting, the test resumes with your manual values.</p>
+        <p>In standard mode, you can cancel during the 30-second countdown before automatic resume. After 10 consecutive automatic resume attempts followed by unexpected restarts, the program requires manual intervention. Canceling preserves the recovery state, so you can resume later with <strong>Start</strong> on <strong>Stability Test</strong>. Unattended recovery requires Windows automatic sign-in.</p>
+      </section>
+
+      <section class="chapter" id="settings" aria-labelledby="settings-title">
+        <h2 id="settings-title">Settings and updates</h2>
+        <h3 id="preferences">General, Monitor, and Data</h3>
+        <p>Click the gear icon at the bottom left to open <strong>Settings</strong>.</p>
+        <dl class="specs">
+          <div><dt>General</dt><dd>Choose a language and whether to confirm before exiting. <strong>Expert mode</strong> skips routine test, recovery, and startup apply prompts and unlocks <strong>Write to BIOS</strong> on <strong>Memory OC</strong>. BIOS writes still require confirmation.</dd></div>
+          <div><dt>Monitor</dt><dd>Set the CPU monitor refresh interval from 100 to 10,000 ms. The default is 500 ms.</dd></div>
+          <div><dt>Data</dt><dd>Open the <code>profiles</code> and <code>logs</code> folders.</dd></div>
+        </dl>
+        <p>The application follows the Windows display language by default and falls back to built-in English. It ships with Simplified Chinese, Traditional Chinese, Japanese, Korean, German, Spanish, French, Brazilian Portuguese, and Russian translations. Restart the program after changing the language.</p>
+
+        <h3 id="updates">Update checks and toolbar</h3>
+        <p>Enable <strong>Check for updates at startup</strong> in Settings, or click the download icon at the bottom left to check manually. The application reads the latest stable release and notes from GitHub. You can install the update or skip that version. The updater selects a package based on whether your installation bundles .NET 8, restarts the program, and keeps your logs and profiles. If replacing files fails, it attempts to restore the backup.</p>
+        <p><strong>About</strong> shows the version and author information. The coffee cup icon opens the optional sponsorship panel.</p>
+      </section>
+
+      <section class="chapter" id="faq" aria-labelledby="faq-title">
+        <h2 id="faq-title">Frequently asked questions</h2>
+        <div class="faq">
+          <details>
+            <summary>The program won't start</summary>
+            <p>Confirm you use Windows x64, have installed PawnIO, and are running as administrator. For <code>lite</code>, check that you installed .NET 8 <strong>Desktop Runtime x64</strong>. If a DLL is missing, extract the entire package again.</p>
+          </details>
+          <details>
+            <summary>Memory BIOS writing is disabled or there are no adjustable settings</summary>
+            <p>Enable <strong>Expert mode</strong> first. If there are still no adjustable settings, check the status line and firmware detection entries in <strong>Run Log</strong>. Check your motherboard model and BIOS version, since writable settings vary by firmware.</p>
+          </details>
+          <details>
+            <summary>Windows still boots. How do I restore the previous memory settings?</summary>
+            <p>Click <strong>Import</strong> and select <code>profiles\memory_backup_*.json</code>. Review the values that can be restored, write them, and restart. To return a setting you wrote manually to <code>Auto</code>, make the change in your motherboard's BIOS.</p>
+          </details>
+          <details>
+            <summary>The screen is black after restarting, and I can't reach BIOS or Windows</summary>
+            <p>Allow the time your motherboard manual specifies for memory training. If the system still cannot complete its power-on self-test, follow the motherboard or system manufacturer's instructions to clear CMOS or restore BIOS defaults. For laptops without an external reset option, consult the service manual or contact the manufacturer. Recovery through the program requires Windows to boot.</p>
+          </details>
+        </div>
+
+        <h3 id="feedback">Report a problem</h3>
+        <p>Include the software version, CPU, motherboard, BIOS version, steps to reproduce the issue, and relevant log excerpts.</p>
+        <p><a href="https://github.com/lengmo23/RyzenPboStudio/issues">Report an issue on GitHub</a></p>
+      </section>
+
+      <footer class="footer">
+        <p>Developed by <a href="https://github.com/lengmo23">@lengmo23</a>. Memory overclocking with support from <a href="https://v.douyin.com/yMpmAidKqdY/">Cat-girl-memoryOC (<span lang="zh-CN">@纯爱出演小猪</span>)</a>. <a href="https://github.com/lengmo23/RyzenPboStudio/blob/main/LICENSE">GPL-3.0</a>.</p>
+        <a href="#top">Back to top</a>
+      </footer>
+    </main>
+
+    <aside class="on-page">
+      <p class="nav-label">On this page</p>
+      <nav aria-label="On this page">
+        <a href="#requirements">System requirements</a>
+        <a href="#curves">CO &amp; Curve Shaper</a>
+        <a href="#boot-apply">Apply PBO at startup</a>
+        <a href="#pbo-bios">Write PBO to BIOS</a>
+        <a href="#test-plans">y-cruncher test plans</a>
+        <a href="#measure">Single Core Boost &amp; Voltage Alignment</a>
+        <a href="#targets">SPD &amp; target values</a>
+        <a href="#write">Write memory to BIOS</a>
+        <a href="#resume">Resume after a crash</a>
+        <a href="#updates">Check for updates</a>
+      </nav>
+    </aside>
+  </div>
+</body>
+</html>
