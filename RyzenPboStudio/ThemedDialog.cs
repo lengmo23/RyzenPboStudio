@@ -33,7 +33,9 @@ internal static class DarkTitleBar
 /// <summary>Dark message and confirmation dialog matching the main window.</summary>
 internal sealed class ThemedDialog : Form
 {
-    private ThemedDialog(string text, string title, string acceptText, string? cancelText)
+    private CheckBox? _check;
+
+    private ThemedDialog(string text, string title, string acceptText, string? cancelText, string? checkText = null, string? warning = null)
     {
         Text = title;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -61,7 +63,7 @@ internal sealed class ThemedDialog : Form
             Text = label,
             Size = new Size(96, 34),
             Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
-            Hover = primary ? Theme.AccentHover : Theme.Border,
+            Hover = primary ? Theme.AccentHover : Theme.SurfaceHover,
             ForeColor = primary ? Theme.AccentText : Theme.TextHi,
             BackColor = Theme.Surface,
             Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold),
@@ -92,13 +94,39 @@ internal sealed class ThemedDialog : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            RowCount = 2,
             BackColor = Theme.Surface,
             Padding = new Padding(18, 16, 18, 14),
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.Controls.Add(message, 0, 0);
-        layout.Controls.Add(buttons, 0, 1);
+        if (warning != null)
+        {
+            layout.Controls.Add(new Label
+            {
+                Text = warning,
+                AutoSize = true,
+                MaximumSize = new Size(460, 0),
+                ForeColor = Theme.Danger,
+                BackColor = Theme.Surface,
+                Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold),
+                Margin = new Padding(0, 0, 0, 12),
+            });
+        }
+        layout.Controls.Add(message);
+        if (checkText != null)
+        {
+            _check = new CheckBox
+            {
+                Text = checkText,
+                AutoSize = true,
+                ForeColor = Theme.TextMid,
+                BackColor = Theme.Surface,
+                Margin = new Padding(0, 0, 0, 12),
+            };
+            // The checkbox answers with the cancel button, so the accept button is off while it is ticked.
+            _check.CheckedChanged += (_, _) => ok.Enabled = !_check.Checked;
+            layout.Controls.Add(_check);
+        }
+        layout.Controls.Add(buttons);
 
         Controls.Add(layout);
         AcceptButton = ok;
@@ -113,14 +141,25 @@ internal sealed class ThemedDialog : Form
 
     public static void Show(IWin32Window? owner, string text, string title)
     {
-        using var dlg = new ThemedDialog(text, title, "确定", null);
+        using var dlg = new ThemedDialog(text, title, L.T("OK"), null);
         if (owner == null) dlg.StartPosition = FormStartPosition.CenterScreen;
         if (owner == null) dlg.ShowDialog(); else dlg.ShowDialog(owner);
     }
 
-    public static bool Ask(IWin32Window owner, string text, string title, string acceptText, string cancelText)
+    /// <summary>Asks with an optional warning shown in red above the message.</summary>
+    public static bool Ask(IWin32Window owner, string text, string title, string acceptText, string cancelText, string? warning = null)
     {
-        using var dlg = new ThemedDialog(text, title, acceptText, cancelText);
+        using var dlg = new ThemedDialog(text, title, acceptText, cancelText, warning: warning);
         return dlg.ShowDialog(owner) == DialogResult.Yes;
+    }
+
+    /// <summary>Ask with a checkbox under the message; ticking it disables the accept button.</summary>
+    public static bool Ask(IWin32Window owner, string text, string title, string acceptText, string cancelText,
+        string checkText, out bool isChecked)
+    {
+        using var dlg = new ThemedDialog(text, title, acceptText, cancelText, checkText);
+        bool yes = dlg.ShowDialog(owner) == DialogResult.Yes;
+        isChecked = dlg._check!.Checked;
+        return yes;
     }
 }

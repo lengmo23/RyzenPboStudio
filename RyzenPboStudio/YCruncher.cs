@@ -25,13 +25,14 @@ internal static partial class YCruncher
         foreach (var c in candidates)
             if (File.Exists(c)) return c;
 
+        string exe = Path.Combine(appDir, "tools", "y-cruncher", "y-cruncher.exe");
         throw new FileNotFoundException(
-            "未找到 y-cruncher，无法执行压力测试。\n\n" +
-            "本软件不附带 y-cruncher，请自行下载：\n" +
-            "  https://www.numberworld.org/y-cruncher/\n\n" +
-            "解压后放到程序目录下的 tools 文件夹，使结构为：\n" +
-            $"  {Path.Combine(appDir, "tools", "y-cruncher", "y-cruncher.exe")}\n\n" +
-            "放好后重新点击开始测试。");
+            L.F("y-cruncher not found, so the stress test cannot run.\n\n" +
+                "y-cruncher is not bundled with this program. Download it from:\n" +
+                "  https://www.numberworld.org/y-cruncher/\n\n" +
+                "Extract it into the tools folder next to the program so that this file exists:\n" +
+                "  {0}\n\n" +
+                "Then click Start again.", exe));
     }
 
     /// <summary>
@@ -146,7 +147,7 @@ internal static partial class YCruncher
         if (job == IntPtr.Zero) return job;
         var limit = new JobExtendedLimit { LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE };
         if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limit, Marshal.SizeOf<JobExtendedLimit>()))
-            Log.Write($"设置 y-cruncher 进程作业随程序退出失败 (错误 {Marshal.GetLastWin32Error()})", "WARN");
+            Log.Write(L.F("Failed to tie y-cruncher to the program's lifetime (error {0})", Marshal.GetLastWin32Error()), "WARN");
         return job;
     }
 
@@ -194,7 +195,8 @@ internal static partial class YCruncher
             if (token.IsCancellationRequested)
                 return (false, current);
 
-            Log.Write($"=== 开始 {iterations} 轮 {algoLabel} 测试 · 每轮 {durationSeconds} 秒 · 范围 {scopeLabel ?? "全部核心"} ===");
+            string scope = scopeLabel ?? L.T("all cores");
+            Log.Write(L.F("=== Starting {0} rounds of {1} · {2} s per round · Scope {3} ===", iterations, algoLabel, durationSeconds, scope));
             List<string> args;
             if (logicalCores is { Count: > 0 })
             {
@@ -208,7 +210,7 @@ internal static partial class YCruncher
                 args = new List<string> { "skip-warnings", "stress", $"-D:{durationSeconds}" };
                 args.AddRange(algorithms);
             }
-            Log.Write($"运行: {yc} {string.Join(' ', args)}");
+            Log.Write(L.T("Run: ") + $"{yc} {string.Join(' ', args)}");
 
             var ycLog = new StringBuilder();
             bool testStarted = false;
@@ -238,7 +240,7 @@ internal static partial class YCruncher
                 proc.Start();
                 IntPtr job = GetJob();
                 if (job == IntPtr.Zero || !AssignProcessToJobObject(job, proc.Handle))
-                    Log.Write($"y-cruncher 加入进程作业失败 (错误 {Marshal.GetLastWin32Error()})，结束测试时可能无法清理其子进程", "WARN");
+                    Log.Write(L.F("Failed to add y-cruncher to the job object (error {0}); its child processes may survive the test", Marshal.GetLastWin32Error()), "WARN");
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
 
@@ -262,7 +264,7 @@ internal static partial class YCruncher
                     if (!testStarted && line.Contains("Iteration:"))
                     {
                         testStarted = true;
-                        Log.Write("=== 压力测试开始 ===");
+                        Log.Write(L.T("=== Stress test started ==="));
                     }
 
                     if (line.Contains("Test Finished") || line.Contains("Test finished"))
@@ -294,7 +296,7 @@ internal static partial class YCruncher
                         currentIter = int.Parse(mIter.Groups[1].Value);
                         if (currentIter >= iterations)
                         {
-                            Log.Write($"达到目标 {iterations} 轮，终止测试");
+                            Log.Write(L.F("Reached {0} rounds, stopping the test", iterations));
                             testFinished = true;
                             TryKill(proc);
                             break;
@@ -309,11 +311,11 @@ internal static partial class YCruncher
                 returncode = proc.HasExited ? proc.ExitCode : -1;
 
                 try { File.WriteAllText(Workspace.NewLogPath("y-cruncher", "log"), ycLog.ToString(), Encoding.UTF8); }
-                catch (Exception e) { Log.Write($"保存 y-cruncher 日志失败: {e.Message}", "WARN"); }
+                catch (Exception e) { Log.Write(L.F("Failed to save the y-cruncher log: {0}", e.Message), "WARN"); }
             }
             catch (Exception e)
             {
-                Log.Write($"运行 y-cruncher 失败: {e.Message}", "ERROR");
+                Log.Write(L.F("Failed to run y-cruncher: {0}", e.Message), "ERROR");
                 return (false, current);
             }
 
@@ -322,7 +324,7 @@ internal static partial class YCruncher
                 if (!BackoffFailedCores(failed, current, mode, algoLabel, autoAdjust, onManualError))
                     return (false, current);
 
-                Log.Write($"CO 已调整，3 秒后重新开始 {iterations} 轮测试...");
+                Log.Write(L.F("CO adjusted, restarting {0} rounds in 3 s...", iterations));
                 if (token.WaitHandle.WaitOne(3000))
                     return (false, current); // Cancelled while waiting.
                 continue;
@@ -333,7 +335,7 @@ internal static partial class YCruncher
                 if (!BackoffAfterCrash(current, scopeCores, mode, algoLabel, autoAdjust, onManualError))
                     return (false, current);
 
-                Log.Write($"CO 已调整，3 秒后重新开始 {iterations} 轮测试...");
+                Log.Write(L.F("CO adjusted, restarting {0} rounds in 3 s...", iterations));
                 if (token.WaitHandle.WaitOne(3000))
                     return (false, current);
                 continue;
@@ -341,7 +343,7 @@ internal static partial class YCruncher
 
             if (testFinished)
             {
-                Log.Write($"✓ {iterations} 轮测试全部通过");
+                Log.Write(L.F("✓ All {0} rounds passed", iterations));
                 return (true, current);
             }
 
@@ -349,20 +351,20 @@ internal static partial class YCruncher
             {
                 if (token.IsCancellationRequested)
                 {
-                    Log.Write("用户手动终止测试");
+                    Log.Write(L.T("Test stopped by the user"));
                     return (false, current);
                 }
-                Log.Write($"y-cruncher 异常退出 (code={returncode})，未检测到报错核心", "WARN");
+                Log.Write(L.F("y-cruncher exited abnormally (code={0}) without reporting a failing core", returncode), "WARN");
                 string full = ycLog.ToString();
                 string tail = full.Length > 500 ? full[^500..] : full;
                 Log.Write($"yc_log: {tail}");
-                Log.Write($"3 秒后重新开始 {iterations} 轮测试...");
+                Log.Write(L.F("Restarting {0} rounds in 3 s...", iterations));
                 if (token.WaitHandle.WaitOne(3000))
                     return (false, current);
                 continue;
             }
 
-            Log.Write("测试未完成");
+            Log.Write(L.T("Test not completed"));
             return (false, current);
         }
     }
@@ -380,13 +382,13 @@ internal static partial class YCruncher
             .Select(RyzenSmu.OsCoreToSlot)
             .Distinct().OrderBy(x => x).ToList();
 
-        Log.Write($"报错逻辑核心: [{string.Join(", ", crashedLogical)}]", "WARN");
-        Log.Write($"对应物理核心: [{string.Join(", ", crashedSlots)}]", "WARN");
+        Log.Write(L.F("Failing logical cores: [{0}]", string.Join(", ", crashedLogical)), "WARN");
+        Log.Write(L.F("Physical cores: [{0}]", string.Join(", ", crashedSlots)), "WARN");
 
         if (!autoAdjust)
         {
             // Manual mode reports an error without changing offsets.
-            Log.Write("手动模式：检测到报错核心，未调整 CO，测试停止", "WARN");
+            Log.Write(L.T("Manual mode: failing core detected, CO not changed, test stopped"), "WARN");
             onManualError?.Invoke(crashedSlots);
             return false;
         }
@@ -397,19 +399,19 @@ internal static partial class YCruncher
         var atMax = crashedSlots.Where(s => s >= 0 && s < current.Count && current[s] >= Config.CoMax).ToList();
         if (atMax.Count > 0)
         {
-            Log.Write($"报错核心 [{string.Join(", ", atMax)}] 的 CO 已达上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止本阶段测试", "ERROR");
+            Log.Write(L.F("CO of failing cores [{0}] is already at the +{1} limit (no room to back off); the cause is most likely not CO, stopping this stage", string.Join(", ", atMax), Config.CoMax), "ERROR");
             return false;
         }
 
         var before = new List<int>(current);
         foreach (int slot in crashedSlots)
             if (slot >= 0 && slot < current.Count) current[slot] = Math.Min(Config.CoMax, current[slot] + Config.StepOnError);
-        Log.WriteCo($"报错核心 CO +{Config.StepOnError}：", current, before);
+        Log.WriteCo(L.F("Failing cores CO +{0}:", Config.StepOnError), current, before);
 
         // Persist offsets before applying them so crash recovery can recover the write.
         if (!Tuning.Apply(current, mode, phase, "backoff"))
         {
-            Log.Write("应用 CO 失败", "ERROR");
+            Log.Write(L.T("Failed to apply CO"), "ERROR");
             return false;
         }
         return true;
@@ -427,7 +429,7 @@ internal static partial class YCruncher
         if (!autoAdjust)
         {
             // A process crash in manual mode also leaves CO unchanged.
-            Log.Write("手动模式：y-cruncher 崩溃（视为 CO 不稳定），未调整 CO，测试停止", "WARN");
+            Log.Write(L.T("Manual mode: y-cruncher crashed (treated as CO instability), CO not changed, test stopped"), "WARN");
             onManualError?.Invoke(new List<int>());
             return false;
         }
@@ -450,27 +452,29 @@ internal static partial class YCruncher
         if (!anyRaised)
         {
             Log.Write(scopeCores is { Count: > 0 }
-                ? $"y-cruncher 崩溃，但本次测试范围内的核心 CO 已全部达到上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止本阶段测试"
-                : $"y-cruncher 崩溃，但所有核心 CO 已达上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止本阶段测试", "ERROR");
+                ? L.F("y-cruncher crashed, but every core in the test scope is already at the +{0} CO limit (no room to back off); the cause is most likely not CO, stopping this stage", Config.CoMax)
+                : L.F("y-cruncher crashed, but every core is already at the +{0} CO limit (no room to back off); the cause is most likely not CO, stopping this stage", Config.CoMax), "ERROR");
             return false;
         }
 
-        Log.WriteCo($"y-cruncher 崩溃，相关核心 CO +{Config.StepOnError}：", current, before, "WARN");
+        Log.WriteCo(L.F("y-cruncher crashed, affected cores CO +{0}:", Config.StepOnError), current, before, "WARN");
         if (!Tuning.Apply(current, mode, phase, "yc-crash-backoff"))
         {
-            Log.Write("应用 CO 失败", "ERROR");
+            Log.Write(L.T("Failed to apply CO"), "ERROR");
             return false;
         }
         return true;
     }
 
     /// <summary>Refreshes offsets from CPU before backoff to include manual changes during the test.
-    /// Rejects an all-zero readback against nonzero cached offsets and leaves fused-off slots alone.</summary>
-    private static void RefreshBaselineFromCpu(List<int> current)
+    /// Rejects an all-zero readback against nonzero cached offsets, unless all zeros were applied manually,
+    /// and leaves fused-off slots alone.</summary>
+    public static void RefreshBaselineFromCpu(List<int> current, bool log = true)
     {
         var live = RyzenSmu.ReadOffsets(current.Count);
         if (live.Count != current.Count) return;
-        if (live.All(v => v == 0) && current.Any(v => v != 0)) return; // Reject an anomalous all-zero readback.
+        // Reject an anomalous all-zero readback unless the last CO write was a manual all-zero apply.
+        if (live.All(v => v == 0) && current.Any(v => v != 0) && !LastWriteWasManualZero()) return;
 
         bool changed = false;
         for (int i = 0; i < current.Count; i++)
@@ -478,9 +482,13 @@ internal static partial class YCruncher
             if (RyzenSmu.IsSlotDisabled(i)) continue;
             if (current[i] != live[i]) { current[i] = live[i]; changed = true; }
         }
-        if (changed)
-            Log.WriteCo("CPU 当前 CO：", current, level: "WARN");
+        if (changed && log)
+            Log.WriteCo(L.T("Current CPU CO:"), current, level: "WARN");
     }
+
+    private static bool LastWriteWasManualZero() =>
+        Journal.ReadLastEntry() is { Reason: Journal.ManualInTest or Journal.ManualTakeover } last
+        && last.Offsets.All(v => v == 0);
 
     private static void TryKill(Process proc)
     {

@@ -21,11 +21,16 @@ MonitorTest/
 legacy-runtime-backup-*/
 runtime-backup-*/
 
-# ── 发布包（由 bin\ 打包而来，走 GitHub Release 分发，不入库）──────────────
+# ── 发布包（由分支发布目录打包而来，走 GitHub Release 分发，不入库）────────
 AMD-Ryzen-PBO-Studio-*.zip
 
-# ── C# 构建产物 ───────────────────────────────────────────────────────────
+# ── C# 构建产物；仓库根下按分支名的发布目录 ──────────────────────────────
 bin/
+/main/
+/beta/
+/memoc/
+/memoc-obfuscated/
+private/
 obj/
 *.user
 publish/

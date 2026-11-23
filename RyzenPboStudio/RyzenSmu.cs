@@ -31,7 +31,7 @@ internal static class RyzenSmu
             if (_cpu != null) return _cpu;
 
             if (!PawnIo.IsInstalled)
-                throw new InvalidOperationException("未检测到 PawnIO 驱动。");
+                throw new InvalidOperationException(L.T("PawnIO driver not found."));
 
             // IODriver loads inpoutx64.dll by bare name, so include the protected bundle directory
             // in the DLL search path while initializing ZenStates-Core.
@@ -173,7 +173,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"读取 CO 失败: {e.Message}，使用默认值 0", "WARN");
+            Log.Write(L.F("Failed to read CO: {0}, using 0", e.Message), "WARN");
             return Enumerable.Repeat(0, numCores).ToList();
         }
     }
@@ -184,7 +184,7 @@ internal static class RyzenSmu
         try { lock (IoLock) return GetCpu().GetFMax(); }
         catch (Exception e)
         {
-            Log.Write($"读取 FMax 失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read FMax: {0}", e.Message), "WARN");
             return 0;
         }
     }
@@ -195,7 +195,7 @@ internal static class RyzenSmu
         try { lock (IoLock) return GetCpu().SetFMax(frequency); }
         catch (Exception e)
         {
-            Log.Write($"设置 FMax 异常: {e.Message}", "ERROR");
+            Log.Write(L.F("Error setting FMax: {0}", e.Message), "ERROR");
             return false;
         }
     }
@@ -206,7 +206,7 @@ internal static class RyzenSmu
         try { lock (IoLock) return GetCpu().GetPBOScalar(); }
         catch (Exception e)
         {
-            Log.Write($"读取 PBO Scalar 失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read PBO Scalar: {0}", e.Message), "WARN");
             return 0;
         }
     }
@@ -219,13 +219,13 @@ internal static class RyzenSmu
             lock (IoLock)
             {
                 var status = GetCpu().SetPBOScalar(scalar);
-                if (status != SMU.Status.OK) Log.Write($"设置 PBO Scalar 返回 {status}", "WARN");
+                if (status != SMU.Status.OK) Log.Write(L.F("Setting PBO Scalar returned {0}", status), "WARN");
                 return status == SMU.Status.OK;
             }
         }
         catch (Exception e)
         {
-            Log.Write($"设置 PBO Scalar 异常: {e.Message}", "ERROR");
+            Log.Write(L.F("Error setting PBO Scalar: {0}", e.Message), "ERROR");
             return false;
         }
     }
@@ -243,7 +243,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"检测 PBO Scalar 写入支持失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to check PBO Scalar write support: {0}", e.Message), "WARN");
             return false;
         }
     }
@@ -279,16 +279,18 @@ internal static class RyzenSmu
 
     /// <summary>Probes Zen4/Zen5 and then Zen3 PM Table layouts; returns null on failure.
     /// An incomplete per-core layout retains a negative index so callers can retry.
+    /// <paramref name="bclk"/> is the CPU-domain BCLK in MHz, used to match CORE_FREQ against FREQEFF.
     /// </summary>
-    internal static PtLayout? ProbePtLayout(float[]? t, int cores)
+    internal static PtLayout? ProbePtLayout(float[]? t, int cores, double bclk = 100)
     {
         if (t == null || cores <= 0 || t.Length < 70) return null;
 
         var lay = ProbeZen4Header(t) ?? ProbeZen3Header(t);
         if (lay == null) return null;
 
-        lay.PerCoreVoltIdx = ProbePerCoreVolt(t, cores);
-        lay.PerCoreFreqIdx = ProbePerCoreFreq(t, lay.PerCoreVoltIdx, cores);
+        float scale = bclk is > 50 and < 200 ? (float)(bclk / 100.0) : 1f;
+        lay.PerCoreVoltIdx = ProbePerCoreVolt(t, cores, scale);
+        lay.PerCoreFreqIdx = ProbePerCoreFreq(t, lay.PerCoreVoltIdx, cores, scale);
         return lay;
     }
 
@@ -353,25 +355,30 @@ internal static class RyzenSmu
         };
     }
 
-    /// <summary>Finds a per-core voltage segment followed by an equal-length temperature segment.
-    /// Skips fused-off slots and returns -1 when absent.</summary>
-    private static int ProbePerCoreVolt(float[] t, int cores)
+    /// <summary>Finds a per-core voltage segment followed by an equal-length temperature segment, preferring the first
+    /// candidate whose frequency segment is also found. Constant blocks can pass the voltage/temperature test alone
+    /// (9800X3D: 0.624 V then 25 °C), and idle per-core power below 1.6 W directly before the real segment looks
+    /// like a voltage. Skips fused-off slots and returns -1 when absent.</summary>
+    private static int ProbePerCoreVolt(float[] t, int cores, float bclkScale)
     {
+        int voltOnly = -1;
         for (int i = 24; i + 2 * cores <= t.Length; i++)
         {
-            if (IsPtVolt(t[i - 1])) continue; // Require a segment boundary to avoid matching inside a longer voltage range.
             bool ok = true;
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtVolt(t[i + k]);
             for (int k = 0; k < cores && ok; k++) ok = IsSlotMaskedNoLock(k) || IsPtTemp(t[i + cores + k]);
-            if (ok) return i;
+            if (!ok) continue;
+            if (ProbePerCoreFreq(t, i, cores, bclkScale) >= 0) return i;
+            if (voltOnly < 0 && !IsPtVolt(t[i - 1])) voltOnly = i;   // fallback for tables without a frequency segment
         }
-        return -1;
+        return voltOnly;
     }
 
     /// <summary>Finds per-core frequency and effective-frequency segments after temperature.
-    /// Allows 10% sampling slack when comparing the adjacent segments;
-    /// skips fused-off slots and returns -1 when absent.</summary>
-    private static int ProbePerCoreFreq(float[] t, int voltIdx, int cores)
+    /// Allows 10% sampling slack when comparing the adjacent segments; CORE_FREQ is reported at 100 MHz BCLK and
+    /// FREQEFF at the actual BCLK, so CORE_FREQ is scaled by <paramref name="bclkScale"/> first.
+    /// Skips fused-off slots and returns -1 when absent.</summary>
+    private static int ProbePerCoreFreq(float[] t, int voltIdx, int cores, float bclkScale)
     {
         if (voltIdx < 0) return -1;
         for (int seg = 2; seg <= 6; seg++)
@@ -383,7 +390,7 @@ internal static class RyzenSmu
             {
                 if (IsSlotMaskedNoLock(k)) continue;
                 float freq = t[f + k], eff = t[f + cores + k];
-                ok = freq is >= 0.2f and <= 7.5f && eff >= -0.01f && eff <= freq * 1.10f;
+                ok = freq is >= 0.2f and <= 7.5f && eff >= -0.01f && eff <= freq * bclkScale * 1.10f;
             }
             if (ok) return f;
         }
@@ -394,7 +401,7 @@ internal static class RyzenSmu
     public static bool SetPptLimit(uint watts)
     {
         try { lock (IoLock) return GetCpu().SetPPTLimit(watts) == SMU.Status.OK; }
-        catch (Exception e) { Log.Write($"设置 PPT 异常: {e.Message}", "ERROR"); return false; }
+        catch (Exception e) { Log.Write(L.F("Error setting PPT: {0}", e.Message), "ERROR"); return false; }
     }
 
     /// <summary>Sets the sustained TDC current limit in amperes.</summary>
@@ -409,7 +416,7 @@ internal static class RyzenSmu
                 return ok;
             }
         }
-        catch (Exception e) { Log.Write($"设置 TDC 异常: {e.Message}", "ERROR"); return false; }
+        catch (Exception e) { Log.Write(L.F("Error setting TDC: {0}", e.Message), "ERROR"); return false; }
     }
 
     /// <summary>Sets the peak EDC current limit in amperes.</summary>
@@ -424,7 +431,7 @@ internal static class RyzenSmu
                 return ok;
             }
         }
-        catch (Exception e) { Log.Write($"设置 EDC 异常: {e.Message}", "ERROR"); return false; }
+        catch (Exception e) { Log.Write(L.F("Error setting EDC: {0}", e.Message), "ERROR"); return false; }
     }
 
     /// <summary>Reads configured PPT and thermal limits; returns (0, 0) on failure.</summary>
@@ -438,7 +445,7 @@ internal static class RyzenSmu
                 return lim.HasValue ? (lim.Value.PowerLimit, lim.Value.TemperatureLimit) : (0, 0);
             }
         }
-        catch (Exception e) { Log.Write($"读取系统功率/温度上限失败: {e.Message}", "WARN"); return (0, 0); }
+        catch (Exception e) { Log.Write(L.F("Failed to read the system power / temperature limits: {0}", e.Message), "WARN"); return (0, 0); }
     }
 
     /// <summary>Reads fused PPT and TDC defaults for the editor; returns (0, 0) on failure.</summary>
@@ -452,7 +459,7 @@ internal static class RyzenSmu
                 return f.HasValue ? (f.Value.PowerLimit, f.Value.VrmVddTdcCurrent) : (0, 0);
             }
         }
-        catch (Exception e) { Log.Write($"读取熔丝默认限制失败: {e.Message}", "WARN"); return (0, 0); }
+        catch (Exception e) { Log.Write(L.F("Failed to read the fused default limits: {0}", e.Message), "WARN"); return (0, 0); }
     }
 
     /// <summary>Reads current PPT, EDC, and TDC limits; Granite Ridge prefers live PM Table values.</summary>
@@ -481,7 +488,7 @@ internal static class RyzenSmu
                         LastTdcLimit ?? fused?.VrmVddTdcCurrent ?? 0);
             }
         }
-        catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return (0, 0, 0); }
+        catch (Exception e) { Log.Write(L.F("Failed to read the PBO limits: {0}", e.Message), "WARN"); return (0, 0, 0); }
     }
 
     /// <summary>Reads PPT, EDC, and TDC limits live from the PM Table only, since the fallbacks in ReadPboLimits are not
@@ -504,7 +511,7 @@ internal static class RyzenSmu
                 return (Limit(tbl[lay.PptLimitIdx]), Limit(tbl[lay.EdcLimitIdx]), Limit(tbl[lay.TdcLimitIdx]));
             }
         }
-        catch (Exception e) { Log.Write($"读取 PBO 上限失败: {e.Message}", "WARN"); return null; }
+        catch (Exception e) { Log.Write(L.F("Failed to read the PBO limits: {0}", e.Message), "WARN"); return null; }
     }
 
     private const int CoReadbackPolls = 3;          // readbacks after each write
@@ -513,7 +520,7 @@ internal static class RyzenSmu
     private const int CoCoreTimeoutMs = 20_000;     // per core; a busy SMU clears long before this
 
     /// <summary>
-    /// Writes each active core's CO and verifies its readback. A busy SMU mailbox makes writes or readbacks fail for
+    /// Writes each active core whose CO readback differs from the target and verifies it. A busy SMU mailbox makes writes or readbacks fail for
     /// a while, so a core is rewritten with a growing wait until its readback matches; only a core that still does not
     /// match after CoCoreTimeoutMs fails the call. Retries are not logged; the caller reports a failure.
     /// </summary>
@@ -545,7 +552,12 @@ internal static class RyzenSmu
                 }
 
                 for (int i = 0; i < offsets.Count; i++)
-                    if (!IsSlotDisabledNoLock(cpu, i) && !WriteVerified(i)) return false;
+                {
+                    if (IsSlotDisabledNoLock(cpu, i)) continue;
+                    var (ccd, core) = MapIndex(cpu, i);
+                    if (TryReadMargin(cpu, ccd, core) == offsets[i]) continue;   // already at target
+                    if (!WriteVerified(i)) return false;
+                }
 
                 // Final pass: a core that drifted while the others were written is written again the same way
                 for (int i = 0; i < offsets.Count; i++)
@@ -559,7 +571,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"设置 CO 异常: {e.Message}", "ERROR");
+            Log.Write(L.F("Error setting CO: {0}", e.Message), "ERROR");
             return false;
         }
     }
@@ -586,7 +598,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"读取 CCD{ccd} 温度失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read the CCD{0} temperature: {1}", ccd, e.Message), "WARN");
             return 0;
         }
     }
@@ -606,7 +618,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"检测 FMax 写入支持失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to check FMax write support: {0}", e.Message), "WARN");
             return false;
         }
     }
@@ -642,7 +654,7 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"读取 Curve Shaper 失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read Curve Shaper: {0}", e.Message), "WARN");
         }
         return grid;
     }
@@ -670,7 +682,7 @@ internal static class RyzenSmu
                     if (st != SMU.Status.OK)
                     {
                         ok = false;
-                        Log.Write($"Curve Shaper 写入失败: 频率档 {t} 返回 {st}", "WARN");
+                        Log.Write(L.F("Curve Shaper write failed: frequency band {0} returned {1}", t, st), "WARN");
                     }
                 }
                 return ok;
@@ -678,7 +690,82 @@ internal static class RyzenSmu
         }
         catch (Exception e)
         {
-            Log.Write($"设置 Curve Shaper 异常: {e.Message}", "ERROR");
+            Log.Write(L.F("Error setting Curve Shaper: {0}", e.Message), "ERROR");
+            return false;
+        }
+    }
+
+    // Granite Ridge SMN fuse storing the stock FMax boost baseline in 25 MHz units at bits [26:19].
+    private const uint GraniteRidgeBoostFuse = 0x0005D584;
+
+    /// <summary>True on Zen 5 desktop (Granite Ridge), where FMax fuse decoding is verified.</summary>
+    public static bool IsGraniteRidge()
+    {
+        try { lock (IoLock) return GetCpu().info.codeName == Cpu.CodeName.GraniteRidge; }
+        catch { return false; }
+    }
+
+    /// <summary>Reads the Granite Ridge stock boost baseline in MHz for converting FMax to BIOS Boost Override.</summary>
+    public static bool TryReadBoostBaseline(out int baselineMHz)
+    {
+        baselineMHz = 0;
+        try
+        {
+            lock (IoLock)
+            {
+                var cpu = GetCpu();
+                if (cpu.info.codeName != Cpu.CodeName.GraniteRidge) return false;
+                uint raw = 0;
+                if (!cpu.ReadDwordEx(GraniteRidgeBoostFuse, ref raw)) return false;
+                if (raw is 0 or uint.MaxValue) return false;
+                int mhz = (int)(((raw >> 19) & 0xFF) * 25);
+                if (mhz <= 0) return false;
+                baselineMHz = mhz;
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Maps enabled SMU physical slots to compact 0-based BIOS AOD CO indices in ascending slot order.</summary>
+    public static bool TryGetBiosCoreTargets(out List<(int Slot, int TargetIndex)> map, out string? error)
+    {
+        map = new List<(int, int)>();
+        error = null;
+        try
+        {
+            lock (IoLock)
+            {
+                var cpu = GetCpu();
+                EnsureSlotMap(cpu);
+                for (int s = 0; s < _slotDisabled!.Length; s++)
+                {
+                    if (!_slotDisabled[s])
+                        map.Add((s, _slotOsCore![s]));
+                }
+                uint enabledCores = cpu.info.topology.cores;
+                if (map.Count == 0 || map.Count > 256)
+                {
+                    error = L.T("Cannot determine enabled physical cores for BIOS CO mapping");
+                    map.Clear();
+                    return false;
+                }
+                if (enabledCores > 0 && map.Count != enabledCores)
+                {
+                    error = L.T("Core fuse map disagrees with enabled core count; CO was skipped for safety");
+                    map.Clear();
+                    return false;
+                }
+                return true;
+            }
+        }
+        catch (Exception e)
+        {
+            error = e.Message;
+            map.Clear();
             return false;
         }
     }

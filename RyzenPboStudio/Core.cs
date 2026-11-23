@@ -51,7 +51,7 @@ internal static class Log
                 if (!_writeFailureReported)
                 {
                     _writeFailureReported = true;
-                    OnLine?.Invoke($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [WARN] 保存运行日志失败: {e.Message}");
+                    OnLine?.Invoke($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [WARN] " + L.F("Failed to save the run log: {0}", e.Message));
                 }
             }
             OnLine?.Invoke(line);
@@ -69,7 +69,7 @@ internal static class Log
             .ToList();
         if (before != null && slots.Count == 0)
         {
-            Write($"{title}无变化", level);
+            Write(L.F("{0} unchanged", title), level);
             return;
         }
         Write(title, level);
@@ -165,6 +165,9 @@ internal static class Workspace
     /// <summary>Directory for CO history, recovery state, CS settings, and calibration.</summary>
     public static string ProfilesDir => Path.Combine(BaseDir, "profiles");
 
+    /// <summary>Directory for bundled and user DRAM OC configurations (import/export default).</summary>
+    public static string DramDir => Path.Combine(BaseDir, "dram");
+
     public static string StateFile => Path.Combine(ProfilesDir, "test_state.json");
     public static string InProgressFlag => Path.Combine(ProfilesDir, "test_in_progress");
     public static string FinalOffsets => Path.Combine(ProfilesDir, "final_offsets.txt");
@@ -190,6 +193,7 @@ internal static class Workspace
     {
         try { Directory.CreateDirectory(LogsDir); } catch { /* Report directory errors when writing. */ }
         try { Directory.CreateDirectory(ProfilesDir); } catch { /* Report directory errors when writing. */ }
+        try { Directory.CreateDirectory(DramDir); } catch { /* Report directory errors when writing. */ }
 
         foreach (string name in LegacyProfileFiles)
             MoveLegacy(Path.Combine(BaseDir, name), Path.Combine(ProfilesDir, name));
@@ -240,7 +244,7 @@ internal static class Workspace
         }
         catch (Exception e)
         {
-            Log.Write($"保存状态失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to save the state: {0}", e.Message), "WARN");
         }
     }
 
@@ -257,7 +261,7 @@ internal static class Workspace
         }
         catch (Exception e)
         {
-            Log.Write($"读取状态失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read the state: {0}", e.Message), "WARN");
         }
         return null;
     }
@@ -355,7 +359,7 @@ internal static class Journal
         }
         catch (Exception e)
         {
-            Log.Write($"写入 CO 日志失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to write the CO log: {0}", e.Message), "WARN");
         }
     }
 
@@ -447,7 +451,7 @@ internal static class PboJournal
         }
         catch (Exception e)
         {
-            Log.Write($"写入 PBO 日志失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to write the PBO log: {0}", e.Message), "WARN");
         }
     }
 
@@ -477,7 +481,7 @@ internal static class CsJournal
         }
         catch (Exception e)
         {
-            Log.Write($"写入 CS 日志失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to write the CS log: {0}", e.Message), "WARN");
         }
     }
 
@@ -496,7 +500,7 @@ internal static class Tuning
             // A failed write may leave some cores changed; preserve the observed state for crash recovery.
             var observed = RyzenSmu.ReadOffsets(offsets.Count);
             Journal.Record(observed, mode, phase, "write-verification-failed");
-            Log.WriteCo("CO 写入失败，当前读数（读取失败记为 0）：", observed, level: "WARN");
+            Log.WriteCo(L.T("CO write failed, current readings (0 where unreadable):"), observed, level: "WARN");
         }
         return ok;
     }

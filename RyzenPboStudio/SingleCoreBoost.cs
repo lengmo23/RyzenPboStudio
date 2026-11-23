@@ -130,7 +130,7 @@ internal sealed class SingleCoreBoost : IDisposable
     {
         if (!IsSupported)
         {
-            Log.Write("CPU 不支持 AVX2 / FMA，无法运行 Single Core Boost", "ERROR");
+            Log.Write(L.T("The CPU does not support AVX2 / FMA, so Single Core Boost cannot run"), "ERROR");
             return null;
         }
 
@@ -139,20 +139,26 @@ internal sealed class SingleCoreBoost : IDisposable
         try
         {
             scb = new SingleCoreBoost(monitor);
-            for (int k = 0; k < 5 && !scb.ProbeLayout(); k++) Thread.Sleep(300);
+            // Retry until the frequency and power segments are found; a sleeping core can hide one for a frame.
+            for (int k = 0; k < 5; k++)
+            {
+                scb.ProbeLayout();
+                if (scb.layout is { PerCoreVoltIdx: >= 0, PerCoreFreqIdx: >= 0 } && scb.powIdx >= 0) break;
+                if (k < 4) Thread.Sleep(300);
+            }
             if (scb.layout == null)
             {
-                Log.Write("PM Table 读取失败，无法测量", "ERROR");
+                Log.Write(L.T("Failed to read the PM table, cannot measure"), "ERROR");
                 scb.Dispose();
                 return null;
             }
             if (scb.powIdx < 0)
-                Log.Write("未读到每核功耗，改为固定等待", "WARN");
+                Log.Write(L.T("No per-core power reading, using a fixed wait"), "WARN");
             return scb;
         }
         catch (Exception e)
         {
-            Log.Write($"单核测量初始化失败：{e.Message}", "ERROR");
+            Log.Write(L.F("Failed to initialize the single-core measurement: {0}", e.Message), "ERROR");
             if (scb != null) scb.Dispose();
             else monitor?.EndQuiet();
             return null;
@@ -188,14 +194,14 @@ internal sealed class SingleCoreBoost : IDisposable
             for (int attempt = 0; attempt < 2 && !ct.IsCancellationRequested; attempt++)
             {
                 if (!WaitForLoad(slot, ct) && !ct.IsCancellationRequested)
-                    Log.Write($"Core {slot}：负载就绪超时", "WARN");
+                    Log.Write(L.F("Core {0}: timed out waiting for the load", slot), "WARN");
                 long err0 = load.Errors;
                 if (ct.WaitHandle.WaitOne(SettleMs)) break;
                 r = Sample(slot, ct);
                 if (ct.IsCancellationRequested) { r = null; break; }
                 r = r with { Errors = load.Errors - err0 };
                 if (r.Valid || attempt == 1) break;
-                Log.Write($"Core {slot}：采样无效，重测", "WARN");
+                Log.Write(L.F("Core {0}: invalid sample, measuring again", slot), "WARN");
             }
             if (r == null) break;
 
@@ -220,20 +226,25 @@ internal sealed class SingleCoreBoost : IDisposable
     }
 
     /// <summary>Probes the PM table via RyzenSmu.ProbePtLayout and derives the per-core power segment (directly before
-    /// per-core voltage) and C0 segment (two segments after per-core frequency), as measured on Granite Ridge.</summary>
+    /// per-core voltage) and C0 segment (two segments after per-core frequency), as measured on Granite Ridge.
+    /// Returns true once per-core voltage, frequency and power are all found.</summary>
     private bool ProbeLayout()
     {
         var t = ReadTable();
         if (t == null) return false;
-        var lay = RyzenSmu.ProbePtLayout(t, SlotCount);
+        var lay = RyzenSmu.ProbePtLayout(t, SlotCount, bclk);
         if (lay == null) return false;
-        if (layout is { PerCoreVoltIdx: >= 0 } && lay.PerCoreVoltIdx < 0) return true;   // keep the complete layout
+        // Keep the more complete layout
+        if (layout is { PerCoreVoltIdx: >= 0 } && lay.PerCoreVoltIdx < 0) return LayoutComplete;
+        if (layout is { PerCoreFreqIdx: >= 0 } && lay.PerCoreFreqIdx < 0) return LayoutComplete;
 
         layout = lay;
         powIdx = lay.PerCoreVoltIdx >= 0 ? Segment(t, lay.PerCoreVoltIdx - SlotCount, 0f, 120f) : -1;
         c0Idx = lay.PerCoreFreqIdx >= 0 ? Segment(t, lay.PerCoreFreqIdx + 2 * SlotCount, 0f, 100f) : -1;
-        return true;
+        return LayoutComplete;
     }
+
+    private bool LayoutComplete => layout is { PerCoreVoltIdx: >= 0, PerCoreFreqIdx: >= 0 } && powIdx >= 0;
 
     /// <summary>Returns start if it holds a slot-long segment within [lo, hi] (fused-off slots ignored), else -1.</summary>
     private int Segment(float[] t, int start, float lo, float hi)
@@ -247,7 +258,7 @@ internal sealed class SingleCoreBoost : IDisposable
     /// <summary>Waits until the target core is actually loaded; moving the thread takes a scheduler tick or two.</summary>
     private bool WaitForLoad(int slot, CancellationToken ct)
     {
-        if (powIdx < 0) ProbeLayout();
+        if (powIdx < 0 || layout is not { PerCoreFreqIdx: >= 0 }) ProbeLayout();
         if (powIdx < 0) return !ct.WaitHandle.WaitOne(1000);
 
         var sw = Stopwatch.StartNew();
@@ -259,14 +270,12 @@ internal sealed class SingleCoreBoost : IDisposable
         return false;
     }
 
-    /// <summary>Loaded = power above the floor and at least twice any other core, which rejects a busy machine.</summary>
+    /// <summary>Loaded = the target core draws power above the floor and, when the C0 segment exists, is busy.
+    /// Other cores are not compared: a background thread on another core would otherwise block readiness.</summary>
     private bool IsLoaded(float[] t, int slot)
     {
-        if (powIdx < 0 || t.Length < powIdx + SlotCount) return false;
-        double me = t[powIdx + slot], other = 0;
-        for (int k = 0; k < SlotCount; k++)
-            if (k != slot && !slotDisabled[k] && t[powIdx + k] > other) other = t[powIdx + k];
-        return me >= MinLoadW && me >= other * 2;
+        if (powIdx < 0 || t.Length < powIdx + SlotCount || t[powIdx + slot] < MinLoadW) return false;
+        return c0Idx < 0 || t.Length < c0Idx + SlotCount || t[c0Idx + slot] >= MinOcc;
     }
 
     /// <summary>Reads APERF / MPERF / TSC in one affinity binding so the three form one snapshot.</summary>
@@ -395,9 +404,9 @@ internal sealed class SingleCoreBoost : IDisposable
     }
 
     private static string InvalidReason(ScbRow r) =>
-        r.BusiestSlot >= 0 && r.BusiestSlot != r.Slot ? $"负载在 Core {r.BusiestSlot}"
-        : r.Occ < MinOcc ? $"占用 {r.Occ:F0}%"
-        : $"功耗 {r.Power:F1} W";
+        r.BusiestSlot >= 0 && r.BusiestSlot != r.Slot ? L.F("load on Core {0}", r.BusiestSlot)
+        : r.Occ < MinOcc ? L.F("load {0:F0}%", r.Occ)
+        : L.F("power {0:F1} W", r.Power);
 
     public static string RankLabel(int rank) => rank switch { 1 or 2 => "#1", > 0 => $"#{rank}", _ => "-" };
 
@@ -423,14 +432,14 @@ internal sealed class SingleCoreBoost : IDisposable
                                    $"FREQ {r.Freq,5:F0}  EFF {r.EffFreq,5:F0}  VID {r.Vid:F3}  TEL {r.Tel:F3}  CORE VID {r.CoreVid:F3}  " +
                                    $"TEMP {r.Temp,4:F1}  PWR {r.Power,4:F1}W");
         if (r.Errors > 0) sb.Append($"  ERR {r.Errors}");
-        if (!r.Valid) sb.Append($"  无效（{InvalidReason(r)}）");
+        if (!r.Valid) sb.Append(L.F("  invalid ({0})", InvalidReason(r)));
         Log.Write(sb.ToString(), r.Valid && r.Errors == 0 ? "INFO" : "WARN");
     }
 
     /// <summary>Button flow: measure every usable core once, fill the window and log a summary.</summary>
     public static bool Run(MonitorView? monitor, ResultsPanel win, CancellationToken ct)
     {
-        Log.Write("Single Core Boost 开始");
+        Log.Write(L.T("Single Core Boost started"));
         using var scb = Open(monitor);
         if (scb == null) return false;
 
@@ -438,7 +447,7 @@ internal sealed class SingleCoreBoost : IDisposable
         win.SetTable(Columns);
         int done = 0;
         var rows = scb.Measure(slots,
-            s => win.SetStatus($"测量中：Core {s}（{done + 1}/{slots.Count}）"),
+            s => win.SetStatus(L.F("Measuring Core {0} ({1}/{2})", s, done + 1, slots.Count)),
             r =>
             {
                 done++;
@@ -458,7 +467,8 @@ internal sealed class SingleCoreBoost : IDisposable
         var sb = new StringBuilder();
         var valid = rows.Where(r => r.Valid).ToList();
         int total = Enumerable.Range(0, SlotCount).Count(IsUsable);
-        sb.Append($"Single Core Boost {(cancelled ? "已取消" : "完成")}：有效 {valid.Count}/{total} 核");
+        sb.Append(cancelled ? L.F("Single Core Boost cancelled: {0}/{1} cores valid", valid.Count, total)
+                            : L.F("Single Core Boost finished: {0}/{1} cores valid", valid.Count, total));
         foreach (var g in valid.GroupBy(r => r.Ccd).OrderBy(g => g.Key))
         {
             // Fall back to the global VID when the per-core voltage segment was not found.
@@ -466,15 +476,16 @@ internal sealed class SingleCoreBoost : IDisposable
             Func<ScbRow, double> volt = perCore ? r => r.CoreVid : r => r.Vid;
             var lo = g.MinBy(volt)!;
             var hi = g.MaxBy(volt)!;
-            sb.Append($"\nCCD{g.Key}：频率 {g.Min(r => r.Freq):F0}–{g.Max(r => r.Freq):F0} MHz，" +
-                      $"{(perCore ? "Core VID" : "VID")} {volt(lo):F3} V（Core {lo.Slot}）– {volt(hi):F3} V（Core {hi.Slot}）");
+            string vid = perCore ? "Core VID" : "VID";
+            double fMin = g.Min(r => r.Freq), fMax = g.Max(r => r.Freq), vLo = volt(lo), vHi = volt(hi);
+            sb.Append(L.F("\nCCD{0}: frequency {1:F0}–{2:F0} MHz, {3} {4:F3} V (Core {5}) – {6:F3} V (Core {7})", g.Key, fMin, fMax, vid, vLo, lo.Slot, vHi, hi.Slot));
         }
         var errs = rows.Where(r => r.Errors > 0).ToList();
         if (errs.Count > 0)
-            sb.Append($"\n计算错误：{string.Join("、", errs.Select(r => $"Core {r.Slot} ×{r.Errors}"))}");
+            sb.Append(L.T("\nComputation errors: ") + string.Join(L.T(", "), errs.Select(r => $"Core {r.Slot} ×{r.Errors}")));
         var invalid = rows.Where(r => !r.Valid).Select(r => r.Slot).ToList();
         if (invalid.Count > 0)
-            sb.Append($"\n无效：Core {string.Join("、", invalid)}");
+            sb.Append(L.T("\nInvalid: Core ") + string.Join(L.T(", "), invalid));
         return sb.ToString();
     }
 

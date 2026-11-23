@@ -98,9 +98,18 @@ namespace ZenStates.Core.DRAM
             if (Type != MemType.DDR5 && Type != MemType.LPDDR5)
                 return;
 
-            // Only read partial info needed for initialization as reading whole SPD data is expensive
-            SpdInfo = Ddr5SpdReader.ReadDdr5SpdInitInfoAll();
+            // The SMBus scan can wait seconds for the bus mutex, so the SPD is left to RefreshSpdInfo,
+            // which the caller runs in the background.
+            SpdInfo = new Dictionary<byte, Ddr5SpdInfo>();
 
+            //Ddr5SpdReader.DumpDdr5SpdToFiles(Directory.GetCurrentDirectory());
+
+            // Populate PMIC data for telemetry
+            //RefreshTelemetry();
+        }
+
+        private void UpdateManufacturersFromSpd()
+        {
             try
             {
                 int moduleIndex = 0;
@@ -122,11 +131,6 @@ namespace ZenStates.Core.DRAM
             {
                 Debug.WriteLine($"MemoryConfig: Failed to update manufacturer info from SPD: {ex.Message}");
             }
-
-            //Ddr5SpdReader.DumpDdr5SpdToFiles(Directory.GetCurrentDirectory());
-
-            // Populate PMIC data for telemetry
-            //RefreshTelemetry();
         }
 
         internal static MemType SMBiosDramTypeToMemType(MemoryType type)
@@ -196,6 +200,7 @@ namespace ZenStates.Core.DRAM
                         SpdInfo.Add(entry.Key, entry.Value);
                     }
                 }
+                UpdateManufacturersFromSpd();
                 return true;
             }
             catch (Exception ex)

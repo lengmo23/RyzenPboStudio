@@ -4,6 +4,10 @@
     {
         public Zen5Settings()
         {
+            // Curve Shaper (Zen 5 only; Zen 4 / Ryzen 7000 does not support it)
+            Rsmu.SMU_MSG_SetCurveShaperMargin = 0xA6;
+            Rsmu.SMU_MSG_GetCurveShaperMargin = 0x84;
+
             // HSMP
             Hsmp.SMU_ADDR_MSG = 0x3B10934; // The only difference from Zen 4
             Hsmp.SMU_ADDR_RSP = 0x3B10980;

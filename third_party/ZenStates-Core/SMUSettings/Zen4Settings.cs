@@ -39,10 +39,6 @@
             Rsmu.SMU_MSG_GetDldoPsmMargin = 0xD5;
             Rsmu.SMU_MSG_GetGpuPsmMargin = 0xD7;
 
-            // Curve Shaper
-            Rsmu.SMU_MSG_SetCurveShaperMargin = 0xA6;
-            Rsmu.SMU_MSG_GetCurveShaperMargin = 0x84;
-
             // Debug
             Rsmu.SMU_MSG_GetPboFusedPowerLimit = 0xDC; // Can be locked on some Zen 4 motherboards, Zen 5 not affected
             Rsmu.SMU_MSG_GetPboFusedApuSlowLimit = 0xDA;

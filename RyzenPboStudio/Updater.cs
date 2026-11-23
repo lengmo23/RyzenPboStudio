@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -76,9 +77,18 @@ internal static class Updater
     public static Version CurrentVersion =>
         typeof(Updater).Assembly.GetName().Version is { } v ? new Version(v.Major, v.Minor, v.Build) : new Version(0, 0, 0);
 
+    /// <summary>True for a prerelease build such as 4.0.0-beta, whose CurrentVersion equals the final 4.0.0.</summary>
+    private static bool IsPrerelease =>
+        typeof(Updater).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion is { } v
+        && v.Split('+')[0].Contains('-');
+
     // Asset-name marker of the self-contained package; it must never contain "update", "lite" or "full", which installs
     // without bundled .NET (including older versions) select by.
     private const string SelfContainedTag = "net8contained";
+
+    // Asset-name marker of the self-contained app-only package, named "...-net8patch-rt<runtime>.zip". Besides the words
+    // above it must not contain "net8contained", which 3.0.3–3.0.5 self-contained installs select by.
+    private const string SelfContainedPatchTag = "net8patch";
 
     /// <summary>True when .NET 8 is bundled next to the executable rather than installed on the system.</summary>
     private static bool IsSelfContained => File.Exists(Path.Combine(AppContext.BaseDirectory, "coreclr.dll"));
@@ -97,7 +107,8 @@ internal static class Updater
         if (release == null || release.Draft || release.Prerelease) return (null, null);
 
         if (!TryParseTag(release.TagName, out Version latest)) return (null, null);
-        if (latest == CurrentVersion) return (null, ParseNotes(release.Body));
+        // Release tags carry no prerelease label, so a prerelease build still updates to the final release of its number.
+        if (latest == CurrentVersion && !IsPrerelease) return (null, ParseNotes(release.Body));
         if (latest < CurrentVersion) return (null, null);
 
         var zips = release.Assets
@@ -106,14 +117,19 @@ internal static class Updater
         GhAsset? zip;
         if (IsSelfContained)
         {
-            // update.zip relies on an installed .NET 8, so a bundled-runtime install takes the self-contained package.
-            zip = zips.FirstOrDefault(a => a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase))
-                  ?? throw new InvalidOperationException($"{release.TagName} 没有内置 .NET 8 的安装包，请到项目主页手动下载。");
+            // update.zip relies on an installed .NET 8, so a bundled-runtime install takes the self-contained packages.
+            // The app-only package keeps the installed runtime and fits only the runtime it was built against.
+            var rt = Environment.Version;
+            string patchSuffix = $"-{SelfContainedPatchTag}-rt{rt.Major}.{rt.Minor}.{rt.Build}.zip";
+            zip = zips.FirstOrDefault(a => a.Name.EndsWith(patchSuffix, StringComparison.OrdinalIgnoreCase))
+                  ?? zips.FirstOrDefault(a => a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase))
+                  ?? throw new InvalidOperationException(L.F("{0} has no package with .NET 8 included; download it from the project page.", release.TagName));
         }
         else
         {
             // Prefer the smaller update archive; use lite (named full before 3.0.3) only when update is absent.
-            var plain = zips.Where(a => !a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase)).ToList();
+            var plain = zips.Where(a => !a.Name.Contains(SelfContainedTag, StringComparison.OrdinalIgnoreCase)
+                                        && !a.Name.Contains(SelfContainedPatchTag, StringComparison.OrdinalIgnoreCase)).ToList();
             zip = plain.FirstOrDefault(a => a.Name.Contains("update", StringComparison.OrdinalIgnoreCase))
                   ?? plain.FirstOrDefault(a => a.Name.Contains("lite", StringComparison.OrdinalIgnoreCase)
                                             || a.Name.Contains("full", StringComparison.OrdinalIgnoreCase))
@@ -134,29 +150,38 @@ internal static class Updater
         return hex.Length == 64 && hex.All(Uri.IsHexDigit) ? hex : null;
     }
 
-    // Release section that explains which archive to download by hand; meaningless inside the app.
-    private const string DownloadGuideHeading = "下载哪个";
-
-    /// <summary>Splits Release Markdown into one note per heading, dropping the download guide.
-    /// Text before the first heading becomes a note without a title.</summary>
-    internal static List<ReleaseNote> ParseNotes(string markdown)
+    // Release sections that explain which archive to download by hand; meaningless inside the app.
+    private static readonly HashSet<string> DownloadGuideHeadings = new(StringComparer.OrdinalIgnoreCase)
     {
+        "下载哪个",
+        "Which download",
+    };
+
+    private static readonly Regex LangMarkerPattern = new(@"^<!--\s*lang:([a-zA-Z0-9_-]+)\s*-->$", RegexOptions.IgnoreCase);
+
+    /// <summary>Splits Release Markdown into one note per heading, selecting the language block matching
+    /// <paramref name="langCode"/> (Chinese → zh, all other languages → en) when <c>&lt;!-- lang:xx --&gt;</c>
+    /// markers are present, and dropping the manual download guide.</summary>
+    internal static List<ReleaseNote> ParseNotes(string markdown, string? langCode = null)
+    {
+        string body = SelectLanguageBlock(markdown, langCode ?? L.Code);
         var notes = new List<ReleaseNote>();
         string title = "";
         var detail = new List<string>();
 
         void Flush()
         {
-            if (title != DownloadGuideHeading && (title.Length > 0 || detail.Count > 0))
+            if (!DownloadGuideHeadings.Contains(title) && (title.Length > 0 || detail.Count > 0))
                 notes.Add(new ReleaseNote(title, string.Join("\n", detail)));
             detail.Clear();
         }
 
-        foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        foreach (string raw in body.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
         {
             string line = raw.Trim();
             if (line.Length == 0 || line.StartsWith("```")) continue;
-            if (line.All(c => c == '-' || c == '=')) continue;
+            if (line.StartsWith("<!--") && line.EndsWith("-->")) continue;
+            if (line.All(c => c is '-' or '=' or '*')) continue;
             if (line.StartsWith('#'))
             {
                 Flush();
@@ -170,6 +195,40 @@ internal static class Updater
         }
         Flush();
         return notes;
+    }
+
+    private static string SelectLanguageBlock(string markdown, string langCode)
+    {
+        var blocks = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        string? current = null;
+
+        foreach (string raw in markdown.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            var m = LangMarkerPattern.Match(raw.Trim());
+            if (m.Success)
+            {
+                string tag = m.Groups[1].Value;
+                if (tag.Equals("end", StringComparison.OrdinalIgnoreCase))
+                {
+                    current = null;
+                }
+                else
+                {
+                    current = tag;
+                    if (!blocks.ContainsKey(current)) blocks[current] = new List<string>();
+                }
+                continue;
+            }
+            if (current != null) blocks[current].Add(raw);
+        }
+
+        if (blocks.Count == 0) return markdown;
+
+        string preferred = langCode.StartsWith("zh", StringComparison.OrdinalIgnoreCase) ? "zh" : "en";
+        string fallback = preferred == "zh" ? "en" : "zh";
+        if (blocks.TryGetValue(preferred, out var lines) && lines.Count > 0) return string.Join("\n", lines);
+        if (blocks.TryGetValue(fallback, out lines) && lines.Count > 0) return string.Join("\n", lines);
+        return markdown;
     }
 
     private static string CleanMarkdown(string text)
@@ -228,12 +287,13 @@ internal static class Updater
         {
             token.ThrowIfCancellationRequested();
             onSource?.Invoke(name);
-            onStage?.Invoke($"正在连接 {name}…");
+            onStage?.Invoke(L.F("Connecting to {0}…", name));
             try
             {
                 await FetchAsync(prefix.Length == 0 ? info.DownloadUrl : prefix + info.DownloadUrl,
                     zipPath, info.Size, info.Sha256, progress, onStage, name, token);
-                Log.Write(info.Sha256 != null ? $"更新包下载完成（{name}，SHA-256 校验通过）" : $"更新包下载完成（{name}）");
+                Log.Write(info.Sha256 != null ? L.F("Update downloaded ({0}, SHA-256 verified)", name)
+                                              : L.F("Update downloaded ({0})", name));
                 return zipPath;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -242,13 +302,13 @@ internal static class Updater
             }
             catch (Exception e)
             {
-                Log.Write($"从 {name} 下载更新包失败：{e.Message}", "WARN");
-                errors.Add($"{name}：{e.Message}");
-                onStage?.Invoke($"{name} {ShortReason(e)}，正在换源…");
+                Log.Write(L.F("Failed to download the update from {0}: {1}", name, e.Message), "WARN");
+                errors.Add($"{name}: {e.Message}");
+                onStage?.Invoke(L.F("{0} {1}, trying another source…", name, ShortReason(e)));
             }
         }
 
-        throw new IOException("所有下载源均失败。\n" + string.Join("\n", errors));
+        throw new IOException(L.T("All download sources failed.\n") + string.Join("\n", errors));
     }
 
     /// <summary>Checks the download against GitHub metadata: SHA-256 when the Release publishes a digest, otherwise
@@ -276,14 +336,14 @@ internal static class Updater
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
-            throw new TimeoutException($"{ConnectTimeout.TotalSeconds:0} 秒无响应");
+            throw new TimeoutException(L.F("no response for {0:0} s", ConnectTimeout.TotalSeconds));
         }
 
         using (resp)
         {
             resp.EnsureSuccessStatusCode();
             long total = resp.Content.Headers.ContentLength ?? expectedSize;
-            onStage?.Invoke($"正在从 {sourceName} 下载…");
+            onStage?.Invoke(L.F("Downloading from {0}…", sourceName));
 
             using Stream src = await resp.Content.ReadAsStreamAsync(token);
             using var dst = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
@@ -301,7 +361,7 @@ internal static class Updater
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    throw new TimeoutException($"传输停滞 {IdleTimeout.TotalSeconds:0} 秒");
+                    throw new TimeoutException(L.F("transfer stalled for {0:0} s", IdleTimeout.TotalSeconds));
                 }
                 if (read <= 0) break;
                 idleCts.CancelAfter(IdleTimeout); // Reset idle timeout after each chunk.
@@ -313,13 +373,13 @@ internal static class Updater
 
         long actual = new FileInfo(zipPath).Length;
         if (expectedSize > 0 && actual != expectedSize)
-            throw new IOException($"文件大小不符，应为 {expectedSize} 字节、实际 {actual} 字节");
+            throw new IOException(L.F("File size mismatch: expected {0} bytes, got {1}", expectedSize, actual));
         if (expectedSha256 != null)
         {
             string hash;
             using (var fs = File.OpenRead(zipPath)) hash = Convert.ToHexString(await SHA256.HashDataAsync(fs, token));
             if (!hash.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException($"SHA-256 不符，应为 {expectedSha256.ToLowerInvariant()}、实际 {hash.ToLowerInvariant()}");
+                throw new InvalidDataException(L.F("SHA-256 mismatch: expected {0}, got {1}", expectedSha256.ToLowerInvariant(), hash.ToLowerInvariant()));
         }
     }
 
@@ -327,11 +387,11 @@ internal static class Updater
     private static string ShortReason(Exception e) => e switch
     {
         TimeoutException => e.Message,
-        HttpRequestException { StatusCode: { } code } => $"返回 {(int)code}",
-        HttpRequestException => "连接失败",
-        IOException => "内容不完整",
-        InvalidDataException => "校验不符",
-        _ => "失败",
+        HttpRequestException { StatusCode: { } code } => L.F("returned {0}", (int)code),
+        HttpRequestException => L.T("connection failed"),
+        IOException => L.T("incomplete download"),
+        InvalidDataException => L.T("verification failed"),
+        _ => L.T("failed"),
     };
 
     /// <summary>
@@ -354,7 +414,7 @@ internal static class Updater
             string[] subDirs = Directory.GetDirectories(root);
             string? match = subDirs.FirstOrDefault(d => File.Exists(Path.Combine(d, exeName)));
             if (match == null)
-                throw new InvalidDataException($"更新包结构不符：其中找不到 {exeName}。");
+                throw new InvalidDataException(L.F("Unexpected update package layout: {0} not found.", exeName));
             root = match;
         }
         return root;
@@ -381,32 +441,32 @@ internal static class Updater
         var sb = new StringBuilder();
         sb.AppendLine("@echo off");
         sb.AppendLine("chcp 65001 >nul");
-        sb.AppendLine("echo 正在等待 AMD Ryzen PBO Studio 退出...");
+        sb.AppendLine("echo " + L.T("Waiting for AMD Ryzen PBO Studio to exit..."));
         sb.AppendLine(":waitloop");
         sb.AppendLine($"tasklist /FI \"PID eq {Environment.ProcessId}\" 2>nul | find \"{Environment.ProcessId}\" >nul");
         sb.AppendLine("if not errorlevel 1 (");
         sb.AppendLine("  timeout /t 1 /nobreak >nul");
         sb.AppendLine("  goto waitloop");
         sb.AppendLine(")");
-        sb.AppendLine("echo 正在备份当前版本...");
+        sb.AppendLine("echo " + L.T("Backing up the current version..."));
         sb.AppendLine($"rd /s /q \"{backupDir}\" 2>nul");   // a leftover from an earlier failed update
         sb.AppendLine($"robocopy \"{installDir}\" \"{backupDir}\" /E /XD {excludeDirs} /R:2 /W:1 >nul");
         sb.AppendLine("if errorlevel 8 (");
-        sb.AppendLine("  echo 备份当前版本失败，已取消更新，原有版本未做任何改动。");
+        sb.AppendLine("  echo " + L.T("Backup failed. The update was cancelled and the installed version is unchanged."));
         sb.AppendLine($"  start \"\" \"{exePath}\"");
         sb.AppendLine("  goto failed");
         sb.AppendLine(")");
-        sb.AppendLine("echo 正在覆盖安装目录...");
+        sb.AppendLine("echo " + L.T("Replacing the installed files..."));
         sb.AppendLine($"robocopy \"{newVersionRoot}\" \"{installDir}\" /E /IS /IT /XD logs profiles /R:5 /W:2 >nul");
         sb.AppendLine("if errorlevel 8 (");
-        sb.AppendLine("  echo 覆盖安装失败，正在还原原有版本...");
+        sb.AppendLine("  echo " + L.T("Install failed, restoring the previous version..."));
         sb.AppendLine($"  robocopy \"{backupDir}\" \"{installDir}\" /E /IS /IT /XD logs profiles /R:5 /W:2 >nul");
         sb.AppendLine("  if errorlevel 8 (");
         // Quoted: a ")" in an unquoted path, e.g. "Program Files (x86)", would end the if block early.
-        sb.AppendLine($"    echo 还原失败。备份保存在 \"{backupDir}\"，请手动复制回 \"{installDir}\"。");
+        sb.AppendLine("    echo " + L.F("Restore failed. The backup is in \"{0}\"; copy it back to \"{1}\" manually.", backupDir, installDir));
         sb.AppendLine("    goto failed");
         sb.AppendLine("  )");
-        sb.AppendLine("  echo 已还原原有版本。");
+        sb.AppendLine("  echo " + L.T("The previous version was restored."));
         sb.AppendLine($"  start \"\" \"{exePath}\"");
         sb.AppendLine("  goto failed");
         sb.AppendLine(")");
@@ -415,7 +475,7 @@ internal static class Updater
         sb.AppendLine($"rd /s /q \"{workDir}\" 2>nul");
         sb.AppendLine("exit /b 0");
         sb.AppendLine(":failed");
-        sb.AppendLine($"echo 如需获取最新版本，请加入 QQ 群 {QqGroup}。按任意键关闭。");
+        sb.AppendLine("echo " + L.F("For the latest version, join QQ group {0}. Press any key to close.", QqGroup));
         sb.AppendLine("pause >nul");
         sb.AppendLine("exit /b 1");
 

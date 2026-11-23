@@ -101,7 +101,7 @@ internal static class AutoStart
         }
         catch (Exception e)
         {
-            Log.Write($"写入开机应用保护标记失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to write the boot-apply guard flag: {0}", e.Message), "WARN");
             return false;
         }
         _stableTimer?.Dispose();
@@ -132,8 +132,8 @@ internal static class AutoStart
             }
             catch (Exception e)
             {
-                Log.Write($"同步开机自启任务失败: {e.Message}", "WARN");
-                return "开机自启任务同步失败，详见日志";
+                Log.Write(L.F("Failed to sync the startup task: {0}", e.Message), "WARN");
+                return L.T("Failed to sync the startup task, see the log");
             }
         }
     }
@@ -164,9 +164,9 @@ internal static class AutoStart
     private static string? Register()
     {
         string exe = Environment.ProcessPath
-            ?? throw new InvalidOperationException("无法获取程序路径");
+            ?? throw new InvalidOperationException(L.T("Cannot get the program path"));
         string sid = WindowsIdentity.GetCurrent().User?.Value
-            ?? throw new InvalidOperationException("无法获取当前用户 SID");
+            ?? throw new InvalidOperationException(L.T("Cannot get the current user SID"));
 
         // Admin-only directory, so a non-elevated process cannot swap the XML before schtasks reads it
         string dir = Path.GetDirectoryName(ToolBundle.RootDirectory)!;
@@ -186,8 +186,8 @@ internal static class AutoStart
 
         if (code != 0)
         {
-            Log.Write($"注册开机自启任务失败（schtasks 返回 {code}）: {output.Trim()}", "WARN");
-            return "开机自启任务注册失败，详见日志";
+            Log.Write(L.F("Failed to register the startup task (schtasks returned {0}): {1}", code, output.Trim()), "WARN");
+            return L.T("Failed to register the startup task, see the log");
         }
         return null;
     }
@@ -197,8 +197,8 @@ internal static class AutoStart
         var (code, output) = ProcUtil.Capture(Schtasks, new[] { "/Delete", "/TN", TaskName, "/F" }, null, 15000);
         if (code != 0)
         {
-            Log.Write($"移除开机自启任务失败（schtasks 返回 {code}）: {output.Trim()}", "WARN");
-            return "开机自启任务移除失败，详见日志";
+            Log.Write(L.F("Failed to remove the startup task (schtasks returned {0}): {1}", code, output.Trim()), "WARN");
+            return L.T("Failed to remove the startup task, see the log");
         }
         return null;
     }
@@ -274,7 +274,7 @@ internal static class AutoStart
         }
         catch (Exception e)
         {
-            Log.Write($"读取 {Path.GetFileName(path)} 失败，按默认值处理: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to read {0}, using defaults: {1}", Path.GetFileName(path), e.Message), "WARN");
         }
         return null;
     }
@@ -288,7 +288,7 @@ internal static class AutoStart
         }
         catch (Exception e)
         {
-            Log.Write($"保存 {Path.GetFileName(path)} 失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to save {0}: {1}", Path.GetFileName(path), e.Message), "WARN");
             return false;
         }
     }
@@ -313,7 +313,7 @@ internal sealed class ResumePromptDialog : Form
         const int width = 440;
         _remaining = attempt != null ? AutoStart.ResumeCountdownSeconds : 0;
 
-        Text = "检测到中断的测试";
+        Text = L.T("Interrupted test detected");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
@@ -343,21 +343,21 @@ internal sealed class ResumePromptDialog : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            BackColor = Theme.SurfaceAlt,
+            BackColor = Theme.WellBg,
             Location = new Point(pad, pad - 2),
             Margin = new Padding(0),
         };
         info.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, inner));
-        info.Controls.Add(Line("中断的测试", 8.5F, Theme.TextLo, bottom: 4, back: Theme.SurfaceAlt, max: inner));
-        info.Controls.Add(Line(test, 14F, Theme.TextHi, bold: true, bottom: 2, back: Theme.SurfaceAlt, max: inner));
-        info.Controls.Add(Line(scope, 10F, Theme.TextHi, bottom: 10, back: Theme.SurfaceAlt, max: inner));
+        info.Controls.Add(Line(L.T("Interrupted test"), 8.5F, Theme.TextLo, bottom: 4, back: Theme.WellBg, max: inner));
+        info.Controls.Add(Line(test, 14F, Theme.TextHi, bold: true, bottom: 2, back: Theme.WellBg, max: inner));
+        info.Controls.Add(Line(scope, 10F, Theme.TextHi, bottom: 10, back: Theme.WellBg, max: inner));
         info.Controls.Add(new Panel { Size = new Size(inner, 1), BackColor = Theme.Border, Margin = new Padding(0, 0, 0, 8) });
-        info.Controls.Add(Line(manualTakeover ? "CO 处理：沿用手动应用的 CO 继续"
-                                              : $"CO 处理：所有核心回退 +{Config.StepOnError} 后继续",
-            9.5F, Theme.TextHi, back: Theme.SurfaceAlt, max: inner));
+        info.Controls.Add(Line(manualTakeover ? L.T("CO: continue with the manually applied CO")
+                                              : L.F("CO: back off all cores by +{0}, then continue", Config.StepOnError),
+            9.5F, Theme.TextHi, back: Theme.WellBg, max: inner));
         var card = new Card
         {
-            Fill = Theme.SurfaceAlt,
+            Fill = Theme.WellBg,
             Stroke = Theme.Accent,
             Radius = 8,
             Width = width,
@@ -375,15 +375,15 @@ internal sealed class ResumePromptDialog : Form
             Padding = new Padding(20, 18, 20, 16),
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
-        layout.Controls.Add(Line("检测到中断的测试任务，是否继续？", 12F, Theme.TextHi, bold: true, bottom: 12));
+        layout.Controls.Add(Line(L.T("An interrupted test was found. Continue it?"), 12F, Theme.TextHi, bold: true, bottom: 12));
         layout.Controls.Add(card);
         if (attempt != null)
-            layout.Controls.Add(Line($"连续第 {attempt}/{AutoStart.MaxAutoResumes} 次自动恢复，倒计时结束将自动继续。\n" +
-                                     "完全无人值守需在 Windows 中开启自动登录。", 8.5F, Theme.TextLo, bottom: 4));
+            layout.Controls.Add(Line(L.F("Auto-resume {0}/{1}; the test continues when the countdown ends.\n" +
+                                         "Fully unattended runs need automatic sign-in enabled in Windows.", attempt, AutoStart.MaxAutoResumes), 8.5F, Theme.TextLo, bottom: 4));
 
-        _continueBtn = NewButton("继续测试", 132, primary: true);
+        _continueBtn = NewButton(L.T("Continue"), 132, primary: true);
         _continueBtn.DialogResult = DialogResult.OK;
-        var laterBtn = NewButton("暂不继续", 96, primary: false);
+        var laterBtn = NewButton(L.T("Not now"), 96, primary: false);
         laterBtn.DialogResult = DialogResult.Cancel;
         var btnRow = new FlowLayoutPanel
         {
@@ -418,7 +418,7 @@ internal sealed class ResumePromptDialog : Form
     }
 
     private void UpdateCountdown() =>
-        _continueBtn.Text = _remaining > 0 ? $"继续测试（{_remaining}）" : "继续测试";
+        _continueBtn.Text = _remaining > 0 ? L.F("Continue ({0})", _remaining) : L.T("Continue");
 
     protected override void OnShown(EventArgs e)
     {
@@ -445,13 +445,13 @@ internal sealed class ResumePromptDialog : Form
         DarkTitleBar.Apply(Handle);
     }
 
-    /// <summary>Same pill buttons as the main window: primary = accent red, otherwise grey.</summary>
+    /// <summary>Same pill buttons as the main window: primary = accent, otherwise dark surface.</summary>
     private static PillButton NewButton(string text, int width, bool primary) => new()
     {
         Text = text,
         Size = new Size(width, 34),
         Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
-        Hover = primary ? Theme.AccentHover : Theme.Border,
+        Hover = primary ? Theme.AccentHover : Theme.SurfaceHover,
         ForeColor = primary ? Theme.AccentText : Theme.TextHi,
         BackColor = Theme.Surface,
         Font = new Font(Theme.FontFamily, 10F, primary ? FontStyle.Bold : FontStyle.Regular),

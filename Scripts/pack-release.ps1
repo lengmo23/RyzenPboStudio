@@ -1,14 +1,17 @@
 ﻿<#
 .SYNOPSIS
-    Package bin\ into lite, net8contained and update release archives.
+    Package the current branch's publish folder (e.g. beta\) into lite, net8contained, update and net8patch release archives.
 
 .DESCRIPTION
     lite          includes y-cruncher for first-time installation; needs .NET 8 installed.
     net8contained is lite with the .NET 8 runtime bundled (self-contained), for machines without .NET 8.
                   It is published from the same source into a temporary folder, and is also the in-app
-                  update package of such installs.
+                  update package of such installs when their runtime differs from this build's.
     update        contains only the application and dependencies for in-app updates of the lite package.
-    Updater prefers assets whose names contain "update"; a self-contained install takes "net8contained".
+    net8patch     contains only the self-contained build's application files (no runtime, no tools), named
+                  with its runtime version, for in-app updates of self-contained installs on that runtime.
+    Updater prefers assets whose names contain "update"; a self-contained install takes the net8patch
+    matching its runtime, otherwise "net8contained".
 
     All archives use the same fixed top-level folder. Updater.ExtractAndVerify
     locates it by the main executable. README and notices come from the repository
@@ -18,13 +21,21 @@
     powershell -ExecutionPolicy Bypass -File Scripts\pack-release.ps1
 #>
 param(
-    [string]$BinDir = "bin",
+    [string]$BinDir = "",
     [string]$OutDir = "release"
 )
 
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell's .NET Framework writes "\" in entry names by default; the zip spec requires "/".
+[AppContext]::SetSwitch('Switch.System.IO.Compression.ZipFile.UseBackslash', $false)
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+# Each branch publishes to a root folder named after it.
+if (-not $BinDir) {
+    $BinDir = "$(git -C $repoRoot branch --show-current)".Trim()
+    if (-not $BinDir) { throw "无法确定当前分支，请用 -BinDir 指定发布目录。" }
+}
 $bin = Join-Path $repoRoot $BinDir
 $out = Join-Path $repoRoot $OutDir
 
@@ -34,9 +45,9 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     throw "找不到 $exePath，请先执行 dotnet publish 输出到 $BinDir。"
 }
 
-# Normalize ProductVersion to three numeric parts without commit metadata.
+# Normalize ProductVersion to three numeric parts plus any prerelease label (4.0.0-beta), without commit metadata.
 $version = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
-if ($version -match '^([0-9]+\.[0-9]+\.[0-9]+)') { $version = $Matches[1] }
+if ($version -match '^([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)') { $version = $Matches[1] }
 elseif ($version -match '^([0-9]+\.[0-9]+)') { $version = "$($Matches[1]).0" }
 else { throw "无法从 ProductVersion 解析版本号: $version" }
 Write-Host "版本: $version"
@@ -69,8 +80,12 @@ function New-Package {
             Copy-Item -LiteralPath $tools -Destination $stage -Recurse -Force
         }
         else {
-            Write-Warning "bin\tools 不存在，$Kind 包将不含 y-cruncher。"
+            Write-Warning "$BinDir\tools 不存在，$Kind 包将不含 y-cruncher。"
         }
+    }
+    $dram = Join-Path $bin 'dram'
+    if ((Test-Path -LiteralPath $dram) -and -not (Test-Path -LiteralPath (Join-Path $stage 'dram'))) {
+        Copy-Item -LiteralPath $dram -Destination $stage -Recurse -Force
     }
 
     # Use repository documentation instead of the dependency's build output.
@@ -81,7 +96,9 @@ function New-Package {
     # Updater.CheckAsync selects assets by "update", then "lite" / "full" (older releases), or "net8contained".
     $zip = Join-Path $out "AMD-Ryzen-PBO-Studio-v$version-$Kind.zip"
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-    Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
+    # UTF-8 entry names preserve non-ASCII DRAM preset filenames across all Windows locales.
+    [IO.Compression.ZipFile]::CreateFromDirectory((Split-Path -Parent $stage), $zip,
+        [IO.Compression.CompressionLevel]::Optimal, $false, [Text.Encoding]::UTF8)
 
     $size = (Get-Item -LiteralPath $zip).Length / 1MB
     $count = (Get-ChildItem -LiteralPath $stage -Recurse -File).Count
@@ -107,6 +124,22 @@ try {
     $upd  = New-Package -Kind 'update' -IncludeTools $false
     # "update", "lite" and "full" must stay out of this name: installs without bundled .NET select by them.
     $net8 = New-Package -Kind 'net8contained' -IncludeTools $true -AppDir $net8Dir
+
+    # Application files are the names the framework-dependent publish holds; taking them from the self-contained
+    # build keeps its runtimeconfig.json and deps.json, which match only the runtime version in the name.
+    $runtimeConfig = Get-Content -LiteralPath (Join-Path $net8Dir 'AMD Ryzen PBO Studio.runtimeconfig.json') -Raw | ConvertFrom-Json
+    $rt = ($runtimeConfig.runtimeOptions.includedFrameworks | Where-Object { $_.name -eq 'Microsoft.NETCore.App' }).version
+    if (-not $rt) { throw "无法从含 .NET 8 版本的 runtimeconfig.json 读取运行时版本。" }
+    $patchDir = Join-Path $stageRoot 'publish-net8patch'
+    New-Item -ItemType Directory -Force -Path $patchDir | Out-Null
+    Get-ChildItem -LiteralPath $bin -File | ForEach-Object {
+        Copy-Item -LiteralPath (Join-Path $net8Dir $_.Name) -Destination $patchDir
+    }
+    if (Test-Path -LiteralPath (Join-Path $net8Dir 'lang')) {
+        Copy-Item -LiteralPath (Join-Path $net8Dir 'lang') -Destination $patchDir -Recurse
+    }
+    # "update", "lite", "full" and "net8contained" must stay out of this name, see Updater.SelfContainedPatchTag.
+    $patch = New-Package -Kind "net8patch-rt$rt" -IncludeTools $false -AppDir $patchDir
 }
 finally {
     if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }

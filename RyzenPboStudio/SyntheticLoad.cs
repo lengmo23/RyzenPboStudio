@@ -50,7 +50,7 @@ internal sealed class SyntheticLoad : IDisposable
     /// <param name="heavy">Time share (%) of brute-force testing, the rest is BVH traversal. 0 = pure BVH (lightest), 100 = pure brute force (heaviest).</param>
     public SyntheticLoad(ulong mask, int heavy)
     {
-        if (!IsSupported) throw new NotSupportedException("CPU 不支持 AVX2 / FMA");
+        if (!IsSupported) throw new NotSupportedException(L.T("The CPU does not support AVX2 / FMA"));
         BuildScene();
         this.heavy = heavy;
         targetMask = (long)mask;

@@ -17,21 +17,17 @@ internal sealed partial class MainForm : Form
     private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 120 };
     private readonly TextBox _durationBox = new();
     private readonly TextBox _roundsBox = new();
-    private readonly PillButton _startBtn = Primary("▶  开始测试");
-    private readonly PillButton _stopBtn = Ghost("■  停止测试");
-    private readonly Label _statusLabel = new() { Text = "就绪", AutoSize = true };
-    private readonly Label _initialOffsetsLabel = new() { Text = "初始 CO: 未读取", AutoSize = true };
-    private readonly Label _offsetsLabel = new() { Text = "当前 CO: 未读取", AutoSize = true };
+    private readonly PillButton _startBtn = Primary(L.T("▶  Start"));
+    private readonly PillButton _stopBtn = Ghost(L.T("■  Stop"));
     private readonly TextBox _logBox = new(); // Log textbox on the LOGGING page.
-    private readonly TextBox _logBoxPbo = new(); // Mirrors log content on the AMD PBO page.
+    private readonly TextBox _logBoxPbo = new(); // Mirrors log content on the PBO Tuning page.
     private readonly System.Windows.Forms.Timer _logTimer = new() { Interval = 100 };
-    private readonly System.Windows.Forms.Timer _offsetTimer = new() { Interval = 1000 };
     private Form _infoDialog = null!;
     private bool _updateBusy; // Prevent concurrent update attempts.
     private Version? _knownNewVersion; // Keep a declined update visible on the update button.
 
     // Align test controls and the combined Start/Stop buttons to one width.
-    private const int TestRowWidth = 370;
+    private const int TestRowWidth = 368;
 
     // Curve Optimizer editor
     private const int CoDisplaySlotCount = 16;
@@ -63,13 +59,14 @@ internal sealed partial class MainForm : Form
     private readonly ConcurrentQueue<string> _logQueue = new();
     private CancellationTokenSource? _cts;
     private volatile bool _stopRequested;
+    private volatile bool _restartRequested; // A manual CO or CS change during the test asked to rerun it from the start.
+    private volatile string? _restartReason; // What was changed: "CO" or "Curve Shaper".
     private Task? _testTask;
     private bool _testCompletedNormally;
     private string _testMode = "VT3";
     private string _selectedMode = "VT3";
     private int _durationSeconds = Config.DefaultDuration;
     private int _singleRounds = Config.DefaultBkt;
-    private List<int> _initialOffsets = new();
 
     // CCD, EACH, and CUSTOM scopes use a y-cruncher config to restrict logical cores.
     private string _testScope = "ALL";
@@ -87,15 +84,15 @@ internal sealed partial class MainForm : Form
         ("FFTv4 — Fast Fourier Transform v4 (AVX512 Float)", "FFTv4", "FFTv4"),
         ("N63 — Classic NTT v2 (AVX512 Integer)", "N63", "N63"),
         ("VT3 — Vector Transform v3 (AVX512 Integer)", "VT3", "VSTv3"),
-        ("YC018 — Pi Benchmark 5b / 10b（内存密集，按内存容量自动选择）", YCruncher.BenchMode, "bench"),
+        (L.T("YC018 — Pi Benchmark 5b / 10b (memory-heavy, sized by installed memory)"), YCruncher.BenchMode, "bench"),
     };
 
-    public MainForm(bool autostartLaunch = false)
+    public MainForm(bool autostartLaunch = false, bool eggUnlocked = false)
     {
         _autostartLaunch = autostartLaunch;
         Config.StepOnError = _multi.BackoffStep; // Before crash recovery reads it.
         Text = "AMD Ryzen PBO Studio";
-        ClientSize = new Size(1280, 854);
+        ClientSize = new Size(1420, 790);
         FormBorderStyle = FormBorderStyle.None;
         Padding = new Padding(1);
         MaximizeBox = false;
@@ -106,53 +103,70 @@ internal sealed partial class MainForm : Form
         TrySetIcon();
         BuildUi();
         FormClosed += (_, _) => _infoDialog.Dispose();
-        SetStatus("就绪", Theme.Success);
-        Shown += (_, _) => InitCoEditor();
-        // After editor init, before the silent update check (which skips itself once a resumed test runs)
-        Shown += (_, _) => OnAutostartShown();
-        // Check silently at startup; prompt only when an update is available.
-        Shown += async (_, _) => await RunUpdateFlowAsync(manual: false);
+        SetStatus(L.T("Ready"), Theme.Success);
+        Shown += async (_, _) => await RunStartupAsync();
         Load += (_, _) => FitToScreen();
 
         Log.OnLine += line => _logQueue.Enqueue(line);
         _logTimer.Tick += OnLogTimer;
-        _offsetTimer.Tick += OnOffsetTimer;
         _logTimer.Start();
-        _offsetTimer.Start();
 
-        Log.Write("程序已启动");
+        Log.Write(L.T("Program started"));
+        if (eggUnlocked) Log.Write(L.T("Congratulations! Easter egg unlocked!"));
         if (Workspace.WasInterrupted())
         {
             var st = Workspace.LoadState();
             string resumeHint = st != null && st.TestMode == "SEQ" && !string.IsNullOrEmpty(st.SeqPhase)
-                ? $" · 将从中断的 {st.SeqPhase} 阶段继续"
+                ? L.F(" · continues from the interrupted {0} stage", st.SeqPhase)
                 : "";
             // A manual CO change after interruption takes ownership of the offsets; resume the stage without backoff.
             if (Journal.ReadLastEntry()?.Reason == Journal.ManualTakeover)
             {
-                SetStatus($"上次测试异常中断 · CO 已手动接管，开始后按此值续跑{resumeHint}", Theme.Warn);
-                Log.Write($"上次测试异常中断，手动接管 CO 后不再自动调整{resumeHint}", "WARN");
+                SetStatus(L.F("Last test was interrupted · CO taken over manually, Start continues with it{0}", resumeHint), Theme.Warn);
+                Log.Write(L.F("Last test was interrupted; CO was taken over manually and will not be adjusted automatically{0}", resumeHint), "WARN");
             }
             else
             {
-                SetStatus($"上次测试异常中断 · 开始后将自动回退恢复 CO{resumeHint}", Theme.Warn);
-                Log.Write($"上次测试异常中断（疑似死机/断电）：开始测试时崩溃前 CO +{Config.StepOnError}{resumeHint}", "WARN");
+                SetStatus(L.F("Last test was interrupted · Start backs off and restores CO{0}", resumeHint), Theme.Warn);
+                Log.Write(L.F("Last test was interrupted (likely a crash or power loss): Start uses the pre-crash CO +{0}{1}", Config.StepOnError, resumeHint), "WARN");
             }
+        }
+    }
+
+    /// <summary>Startup steps run in order so boot-apply and the silent update check never race the editor refresh.</summary>
+    private async Task RunStartupAsync()
+    {
+        try
+        {
+            await InitCoEditorAsync();
+            if (IsDisposed) return;
+            await OnAutostartShownAsync();
+            if (IsDisposed) return;
+            // Check silently; prompt only when an update is available. Skips itself once a resumed test runs.
+            if (AppSettings.Current.AutoCheckUpdate) await RunUpdateFlowAsync(manual: false);
+        }
+        catch (Exception e)
+        {
+            Log.Write(L.F("Startup error: {0}", e.Message), "ERROR");
         }
     }
 
     // UI construction
 
     private MonitorView? _monitorView;
-    private readonly HeaderBar _headerBar = new() { Dock = DockStyle.Top, Height = 64 };
+    private readonly SideRail _sideRail = new();
+    private Panel _workspaceHost = null!;
+    private TableLayoutPanel _rootLayout = null!;
+    private Panel _pageHost = null!;
+    private const int MonitorH = 256; // Keeps CCD rows tall enough to show the VID row.
+    private float _uiScale = 1f;      // Total layout scale applied by FitToScreen (DPI x fit).
+    private readonly HeaderBar _headerBar = new() { Dock = DockStyle.Top, Height = 42 };
     private Control _pboPanel = null!;
     private Control _testingPanel = null!;
     private Control _loggingPanel = null!;
-    private NavTabButton _navPboBtn = null!;
-    private NavTabButton _navTestingBtn = null!;
-    private NavTabButton _navLoggingBtn = null!;
 
-    private enum Page { Pbo, Testing, Logging }
+    private enum Page { Pbo, Testing, Memory, Logging }
+    private Page? _currentPage;
 
     /// <summary>Scales the layout for DPI, then shrinks it to fit the work area and centers it.
     /// Scale does not resize fonts, so font scaling is handled separately.</summary>
@@ -169,6 +183,19 @@ internal sealed partial class MainForm : Form
             ScaleAllFonts(this, fit);
             Scale(new SizeF(fit, fit));
         }
+        _uiScale = (dpi > 1.01f ? dpi : 1f) * Math.Min(fit, 1f);
+
+        // Pre-size hidden pages to their final bounds so the first and every later switch triggers no resize or layout.
+        PerformLayout();
+        _workspaceHost.PerformLayout();
+        _rootLayout.PerformLayout();
+        if (_workspaceHost.DisplayRectangle is { Width: > 0, Height: > 0 } wsRect)
+            _memoryPanel.Bounds = wsRect;
+        if (_pageHost.DisplayRectangle is { Width: > 0, Height: > 0 } pageRect)
+        {
+            _testingPanel.Bounds = pageRect;
+            _loggingPanel.Bounds = pageRect;
+        }
 
         Location = new Point(
             wa.Left + Math.Max(0, (wa.Width - Width) / 2),
@@ -179,47 +206,86 @@ internal sealed partial class MainForm : Form
     private static void ScaleAllFonts(Control root, float s)
     {
         foreach (Control c in root.Controls) ScaleAllFonts(c, s);
-        root.Font = new Font(root.Font.FontFamily, root.Font.Size * s, root.Font.Style);
+        root.Font = new Font(root.Font.FontFamily, Math.Max(1f, root.Font.Size * s), root.Font.Style);
     }
 
     private void BuildUi()
     {
-        var root = new TableLayoutPanel
+        var rightShell = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Bg,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+
+        _workspaceHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Bg,
+            Padding = new Padding(16, 10, 16, 14),
+            Margin = new Padding(0),
+        };
+
+        var workspace = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             BackColor = Theme.Bg,
-            Padding = new Padding(18, 8, 18, 18),
+            Padding = new Padding(0),
+            Margin = new Padding(0),
         };
-        // Keep CCD rows tall enough to show the VID row.
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 292));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, MonitorH));
+        workspace.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _rootLayout = workspace;
 
-        var monitorCard = BuildMonitorCard();
-        monitorCard.Margin = new Padding(0, 0, 0, 10);
+        var monitorArea = BuildMonitorArea();
+        monitorArea.Margin = new Padding(0, 0, 0, 10);
 
-        var host = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
+        _pageHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Margin = new Padding(0) };
         _pboPanel = BuildPboPanel();
         _pboPanel.Dock = DockStyle.Fill;
         _testingPanel = BuildTestingPanel();
         _testingPanel.Dock = DockStyle.Fill;
-        _loggingPanel = BuildLogCard(_logBox);
+        _memoryPanel = BuildMemoryPanel();
+        _memoryPanel.Dock = DockStyle.Fill;
+        _loggingPanel = BuildLogCard(_logBox, L.T("Full Run Log"), L.T("Clear log"));
         _loggingPanel.Dock = DockStyle.Fill;
-        host.Controls.Add(_pboPanel);
-        host.Controls.Add(_testingPanel);
-        host.Controls.Add(_loggingPanel);
+        _pageHost.Controls.Add(_pboPanel);
+        _pageHost.Controls.Add(_testingPanel);
+        _pageHost.Controls.Add(_loggingPanel);
 
-        root.Controls.Add(monitorCard, 0, 0);
-        root.Controls.Add(host, 0, 1);
-        root.Controls.Add(BuildNavBar(), 0, 2);
-        Controls.Add(root);
-        Controls.Add(_headerBar); // Later Dock=Top controls claim the top edge first.
+        workspace.Controls.Add(monitorArea, 0, 0);
+        workspace.Controls.Add(_pageHost, 0, 1);
+
+        // Keep _memoryPanel as a full-height sibling of _rootLayout so switching to/from Memory OC never resizes either.
+        _workspaceHost.Controls.Add(workspace);
+        _workspaceHost.Controls.Add(_memoryPanel);
+
+        rightShell.Controls.Add(_workspaceHost);
+        rightShell.Controls.Add(_headerBar); // Later Dock=Top claims the top edge of rightShell.
+
+        Controls.Add(rightShell);
+        Controls.Add(_sideRail); // Later Dock=Left claims the full height on the left edge.
+
+        InitBootApplyToggle();
         _infoDialog = BuildInfoDialog();
-        _headerBar.InfoClicked += (_, _) => _infoDialog.ShowDialog(this);
-        _headerBar.UpdateClicked += (_, _) => _ = RunUpdateFlowAsync(manual: true);
-        _headerBar.SponsorClicked += (_, _) =>
+        _headerBar.NoteLinkClicked += OpenUrl;
+        _sideRail.PboClicked += (_, _) => ShowPage(Page.Pbo);
+        _sideRail.TestingClicked += (_, _) => ShowPage(Page.Testing);
+        _sideRail.MemoryClicked += (_, _) => ShowPage(Page.Memory);
+        _sideRail.LoggingClicked += (_, _) => ShowPage(Page.Logging);
+        _sideRail.VersionShattered += (_, _) => _pboBiosStage1Armed = true;
+        _sideRail.InfoClicked += (_, _) =>
+        {
+            _pboBiosRestartPending = false;
+            _infoDialog.ShowDialog(this);
+            if (_pboBiosRestartPending) RestartApp("--egg-unlocked");
+        };
+        _sideRail.SettingsClicked += (_, _) => ShowSettingsDialog();
+        _sideRail.UpdateClicked += (_, _) => _ = RunUpdateFlowAsync(manual: true);
+        _sideRail.SponsorClicked += (_, _) =>
         {
             using var dlg = BuildSponsorDialog();
             dlg.ShowDialog(this);
@@ -228,9 +294,9 @@ internal sealed partial class MainForm : Form
         ShowPage(Page.Pbo);
     }
 
-    /// <summary>Builds the AMD PBO page with CO, CS, PBO limits, and source credit.</summary>
-    private const int FooterH = 28;
+    private const int PboFooterH = 26;
 
+    /// <summary>Builds the PBO tuning page with CO, CS, PBO limits, attribution, and a live log sidebar.</summary>
     private Control BuildPboPanel()
     {
         var page = new TableLayoutPanel
@@ -241,8 +307,9 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0),
         };
-        page.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 800)); // Leave room for PBO values with units and the CS grid.
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 800));
         page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var left = new TableLayoutPanel
         {
@@ -252,9 +319,9 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0, 0, 6, 0),
         };
-        left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));      // CO | CS
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, FooterH));
+        left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));        // CO | CS
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));         // PBO limits & Scalar
+        left.RowStyles.Add(new RowStyle(SizeType.Absolute, PboFooterH)); // Attribution
 
         var coCs = new TableLayoutPanel
         {
@@ -264,26 +331,21 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0, 0, 0, 8),
         };
-        coCs.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 414));
+        coCs.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 418));
         coCs.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        var coCard = BuildCoCard(); coCard.Margin = new Padding(0, 0, 6, 0); coCard.Padding = new Padding(16, 8, 16, 8);
-        var csCard = BuildCsCard(); csCard.Margin = new Padding(6, 0, 0, 0); csCard.Padding = new Padding(16, 8, 16, 8);
+        coCs.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var coCard = BuildCoCard();
+        coCard.Margin = new Padding(0, 0, 6, 0);
+        coCard.Padding = new Padding(16, 10, 16, 10);
+        var csCard = BuildCsCard();
+        csCard.Margin = new Padding(6, 0, 0, 0);
+        csCard.Padding = new Padding(16, 10, 16, 10);
         coCs.Controls.Add(coCard, 0, 0);
         coCs.Controls.Add(csCard, 1, 0);
 
-        var footer = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            BackColor = Theme.Bg,
-            Margin = new Padding(0),
-        };
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var credit = new Label
         {
-            Text = "Curve Optimizer / Curve Shaper 功能实现源码来自开源项目 ZenStates-Core / SMUDebugTool",
+            Text = L.T("Curve Optimizer / Curve Shaper are implemented with code from the open-source projects ZenStates-Core / SMUDebugTool"),
             Dock = DockStyle.Fill,
             ForeColor = Theme.TextLo,
             BackColor = Theme.Bg,
@@ -291,34 +353,54 @@ internal sealed partial class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(2, 0, 0, 0),
         };
-        var boot = BuildBootApplyCheckBox();
-        boot.Margin = new Padding(6, 2, 0, 2);
-        footer.Controls.Add(credit, 0, 0);
-        footer.Controls.Add(boot, 1, 0);
+
         left.Controls.Add(coCs, 0, 0);
         left.Controls.Add(BuildParamBar(), 0, 1);
-        left.Controls.Add(footer, 0, 2);
+        left.Controls.Add(credit, 0, 2);
 
-        var logCard = BuildLogCard(_logBoxPbo);
-        logCard.Margin = new Padding(6, 0, 0, FooterH);
-        logCard.Padding = new Padding(16, 8, 14, 12);
+        var logCard = BuildLogCard(_logBoxPbo, L.T("Run Log"), L.T("Clear log"));
+        logCard.Padding = new Padding(14, 10, 14, 12);
 
         page.Controls.Add(left, 0, 0);
-        page.Controls.Add(logCard, 1, 0);
+        if (AppSettings.Current.PboBiosUnlocked)
+        {
+            var right = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = Theme.Bg,
+                Margin = new Padding(6, 0, 0, 0),
+            };
+            right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));        // Run Log
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));         // Write to BIOS bar
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, PboFooterH)); // Aligns with attribution row
+
+            logCard.Margin = new Padding(0, 0, 0, 8);
+            right.Controls.Add(logCard, 0, 0);
+            right.Controls.Add(BuildPboBiosBar(), 0, 1);
+            page.Controls.Add(right, 1, 0);
+        }
+        else
+        {
+            logCard.Margin = new Padding(6, 0, 0, 0);
+            page.Controls.Add(logCard, 1, 0);
+        }
         return page;
     }
 
-    /// <summary>Builds the TESTING page with settings, measurement results, and status.</summary>
+    /// <summary>Builds the TESTING page with configuration console on the left and measurement results on the right.</summary>
     private Control BuildTestingPanel()
     {
         var cfg = BuildConfigCard();
         var results = NewCard();
-        results.Padding = new Padding(16, 8, 16, 8); // Match bottom padding so action buttons align.
-        results.Controls.Add(_resultsPanel);
-        results.Controls.Add(BuildMeasureRow((TestRowWidth - 10) / 2, 10));
+        results.Padding = new Padding(16, 12, 16, 12);
 
-        // Keep Start/Stop visible when the window narrows.
-        // The extra width covers padding, the column gap, and the scrollbar.
+        InitMeasureButtons();
+        _resultsPanel.HeaderActions.Controls.Add(_scbBtn);
+        _resultsPanel.HeaderActions.Controls.Add(_alignBtn);
+        results.Controls.Add(_resultsPanel);
+
         var top = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -327,119 +409,108 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Bg,
             Margin = new Padding(0),
         };
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, TestRowWidth + 60));
+        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 417));
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        cfg.Margin = new Padding(0, 0, 6, 0);
-        results.Margin = new Padding(6, 0, 0, 0);
+        top.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        cfg.Margin = new Padding(0, 0, 5, 0);
+        results.Margin = new Padding(5, 0, 0, 0);
         top.Controls.Add(cfg, 0, 0);
         top.Controls.Add(results, 1, 0);
-
-        _statusLabel.AutoSize = false;
-        _statusLabel.Dock = DockStyle.Fill;
-        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _statusLabel.Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold);
-        _statusLabel.BackColor = Theme.Bg;
-        var statusBar = new Panel { Dock = DockStyle.Bottom, Height = 28, BackColor = Theme.Bg, Padding = new Padding(4, 4, 0, 0) };
-        statusBar.Controls.Add(_statusLabel);
-
-        var holder = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg };
-        holder.Controls.Add(top);
-        holder.Controls.Add(statusBar);
-        return holder;
+        return top;
     }
 
-    /// <summary>Builds the bottom page navigation.</summary>
-    private Control BuildNavBar()
-    {
-        var bar = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1,
-            BackColor = Theme.Bg,
-            Padding = new Padding(0, 6, 0, 0),
-        };
-        for (int i = 0; i < 3; i++)
-            bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
+    /// <summary>Switches the content page; the monitor is hidden on the MEMORY page.</summary>
+    private PageFade? _pageFade;
 
-        _navPboBtn = NewNavButton("AMD PBO", () => ShowPage(Page.Pbo));
-        _navPboBtn.Margin = new Padding(0);
-        _navTestingBtn = NewNavButton("TESTING", () => ShowPage(Page.Testing));
-        _navTestingBtn.Margin = new Padding(0);
-        _navLoggingBtn = NewNavButton("LOGGING", () => ShowPage(Page.Logging));
-        _navLoggingBtn.Margin = new Padding(0);
-
-        bar.Controls.Add(_navPboBtn, 0, 0);
-        bar.Controls.Add(_navTestingBtn, 1, 0);
-        bar.Controls.Add(_navLoggingBtn, 2, 0);
-        return bar;
-    }
-
-    private static NavTabButton NewNavButton(string text, Action onClick)
-    {
-        var b = new NavTabButton
-        {
-            Text = text,
-            Size = new Size(170, 42),
-            Anchor = AnchorStyles.None,
-            Font = new Font(Theme.FontFamily, 11.5F, FontStyle.Bold),
-        };
-        b.Click += (_, _) => onClick();
-        return b;
-    }
-
-    /// <summary>Switches the content page while keeping the monitor visible.</summary>
     private void ShowPage(Page page)
     {
-        var panel = page switch { Page.Testing => _testingPanel, Page.Logging => _loggingPanel, _ => _pboPanel };
-        _pboPanel.Visible = page == Page.Pbo;
-        _testingPanel.Visible = page == Page.Testing;
-        _loggingPanel.Visible = page == Page.Logging;
-        panel.BringToFront();
+        if (_currentPage == page) return;
+        bool switchingMemory = _currentPage.HasValue && ((_currentPage == Page.Memory) != (page == Page.Memory));
+        var panel = page switch { Page.Testing => _testingPanel, Page.Memory => _memoryPanel, Page.Logging => _loggingPanel, _ => _pboPanel };
 
-        StyleNav(_navPboBtn, page == Page.Pbo);
-        StyleNav(_navTestingBtn, page == Page.Testing);
-        StyleNav(_navLoggingBtn, page == Page.Logging);
+        // Fade only the area that actually changes: skip the monitor bar when switching between PBO / Testing / Logging.
+        PageFade? fade = null;
+        if (_currentPage.HasValue && Visible && WindowState != FormWindowState.Minimized && ActiveForm == this)
+        {
+            _pageFade?.Close();
+            fade = PageFade.FromScreen(switchingMemory ? _workspaceHost : _pageHost);
+            if (fade != null)
+            {
+                _pageFade = fade;
+                fade.FormClosed += (_, _) => { if (_pageFade == fade) _pageFade = null; };
+                fade.Cover(this);
+            }
+        }
+
+        Control revealTarget;
+        if (page == Page.Memory)
+        {
+            _memoryPanel.Visible = true;
+            _memoryPanel.BringToFront();
+            _rootLayout.Visible = false;
+            revealTarget = _memoryPanel;
+        }
+        else
+        {
+            _pboPanel.Visible = page == Page.Pbo;
+            _testingPanel.Visible = page == Page.Testing;
+            _loggingPanel.Visible = page == Page.Logging;
+            panel.BringToFront();
+            if (!_rootLayout.Visible)
+            {
+                _rootLayout.Visible = true;
+                _rootLayout.BringToFront();
+            }
+            _memoryPanel.Visible = false;
+            revealTarget = switchingMemory ? _rootLayout : panel;
+        }
+
+        _currentPage = page;
+        _sideRail.SetActivePage((int)page);
+        _headerBar.PageTitle = page switch
+        {
+            Page.Testing => L.T("Stability Test"),
+            Page.Memory => L.T("Memory OC"),
+            Page.Logging => L.T("Run Log"),
+            _ => L.T("PBO Tuning"),
+        };
+        if (page == Page.Memory)
+            _headerBar.SetPageNote(L.T("Memory OC powered by Cat-girl-memoryOC"), CoDevHandle, CoDevDouyinUrl);
+        else
+            _headerBar.SetPageNote(null, null, null);
+
+        fade?.Reveal(revealTarget);
     }
 
-    private static void StyleNav(NavTabButton? b, bool active)
+    /// <summary>Builds the persistent telemetry deck (or an error card if hardware initialization failed).</summary>
+    private Control BuildMonitorArea()
     {
-        if (b == null) return;
-        b.Active = active;
-        b.Invalidate();
-    }
-
-    /// <summary>Builds the persistent per-core monitor card.</summary>
-    private Control BuildMonitorCard()
-    {
-        var card = NewCard();
-        card.Margin = new Padding(0);
-        card.Padding = new Padding(12, 10, 12, 10);
-
         try
         {
-            _monitorView = new MonitorView(_headerBar) { Dock = DockStyle.Fill };
-            card.Controls.Add(_monitorView);
+            _monitorView = new MonitorView(_headerBar, _sideRail) { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            return _monitorView;
         }
         catch (Exception ex)
         {
-            card.Controls.Add(new Label
+            var errCard = NewCard();
+            errCard.Margin = new Padding(0);
+            errCard.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
                 ForeColor = Theme.Warn,
                 BackColor = Theme.Surface,
                 TextAlign = ContentAlignment.MiddleCenter,
-                Text = "监控初始化失败：" + ex.Message,
+                Text = L.T("Monitor initialization failed: ") + ex.Message,
             });
+            return errCard;
         }
-        return card;
     }
 
     private Control BuildConfigCard()
     {
         var card = NewCard();
         card.Margin = new Padding(0);
-        card.Padding = new Padding(16, 8, 16, 8);
+        card.Padding = new Padding(16, 12, 16, 12);
 
         // Scroll on high-DPI screens instead of clipping Start/Stop.
         var body = new FlowLayoutPanel
@@ -452,14 +523,21 @@ internal sealed partial class MainForm : Form
             Padding = new Padding(0),
         };
 
-        var modeTitle = new Label { Text = "单项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 4), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        static Panel SectionDivider() => new()
+        {
+            Size = new Size(TestRowWidth, 1),
+            BackColor = Theme.Border,
+            Margin = new Padding(0, 9, 0, 8),
+        };
+
+        var modeTitle = new Label { Text = L.T("Single Test"), AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 5), Font = new Font(Theme.FontFamily, 9.5F, FontStyle.Bold) };
 
         _modeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         _modeCombo.FlatStyle = FlatStyle.Flat;
         _modeCombo.Width = TestRowWidth;
         _modeCombo.BackColor = Theme.SurfaceAlt;
         _modeCombo.ForeColor = Theme.TextHi;
-        _modeCombo.Font = new Font(Theme.FontFamily, 10F);
+        _modeCombo.Font = new Font(Theme.FontFamily, 9.5F);
         _modeCombo.Margin = new Padding(0);
         DarkCombo.Apply(_modeCombo);
         foreach (var opt in ModeOptions) _modeCombo.Items.Add(opt.display);
@@ -469,60 +547,94 @@ internal sealed partial class MainForm : Form
             _selectedMode = ModeOptions[_modeCombo.SelectedIndex].mode;
             RestyleModeButtons();
         };
-        var fields = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 6, 0, 6) };
-        AddFieldPair(fields, "每轮(秒)", _durationBox, 66);
-        AddFieldPair(fields, "轮数", _roundsBox, 60);
+        var fields = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 6, 0, 0) };
+        AddFieldPair(fields, L.T("Sec/round"), _durationBox, 66);
+        AddFieldPair(fields, L.T("Rounds"), _roundsBox, 60);
         _durationBox.Text = _durationSeconds.ToString();
         _roundsBox.Text = _singleRounds.ToString();
 
-        var comboTitle = new Label { Text = "多项测试", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
-        const int modeGap = 10;
-        _multiSetBtn = BuildMenuButton("设置顺序测试与组合测试的项目、轮数和每轮时间", ShowMultiTestDialog);
+        var comboTitle = new Label { Text = L.T("Multi-Test"), AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 5), Font = new Font(Theme.FontFamily, 9.5F, FontStyle.Bold) };
+        const int modeGap = 8;
+        _multiSetBtn = BuildMenuButton(L.T("Set the tests, rounds and time per round of the sequential and combined tests"), ShowMultiTestDialog);
         int modeBtnWidth = (TestRowWidth - _multiSetBtn.Width - 2 * modeGap) / 2;
-        _seqBtn = MakeModeButton("顺序测试", "SEQ", modeBtnWidth, SeqTip());
-        _comboBtn = MakeModeButton("组合测试", "COMBO", modeBtnWidth, ComboTip());
+        _seqBtn = MakeModeButton(L.T("Sequential"), "SEQ", modeBtnWidth, SeqTip());
+        _comboBtn = MakeModeButton(L.T("Combined"), "COMBO", modeBtnWidth, ComboTip());
         _seqBtn.Margin = new Padding(0, 0, modeGap, 0);
         _comboBtn.Margin = new Padding(0, 0, modeGap, 0);
-        var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
+        var modeRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0) };
         modeRow.Controls.Add(_seqBtn);
         modeRow.Controls.Add(_comboBtn);
         modeRow.Controls.Add(_multiSetBtn);
 
-        var adjTitle = new Label { Text = "CO 调整方式", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
-        const int adjGap = 10;
-        _stepSetBtn = BuildMenuButton("设置自动模式每次回退的 CO 步长", ShowStepDialog);
+        var adjTitle = new Label { Text = L.T("CO Adjustment"), AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 5), Font = new Font(Theme.FontFamily, 9.5F, FontStyle.Bold) };
+        const int adjGap = 8;
+        _stepSetBtn = BuildMenuButton(L.T("Set the CO step backed off in auto mode"), ShowStepDialog);
         int adjBtnWidth = (TestRowWidth - _stepSetBtn.Width - 2 * adjGap) / 2;
-        _autoAdjBtn   = MakeAdjustButton("自动模式", true, AutoAdjustTip());
-        _manualAdjBtn = MakeAdjustButton("手动模式", false,
-            "报错仅提示");
+        _autoAdjBtn = MakeAdjustButton(L.T("Auto"), true, AutoAdjustTip());
+        _manualAdjBtn = MakeAdjustButton(L.T("Manual"), false, L.T("Errors are only reported"));
         _autoAdjBtn.Width = adjBtnWidth;
         _manualAdjBtn.Width = adjBtnWidth;
         _autoAdjBtn.Margin = new Padding(0, 0, adjGap, 0);
-        _stepSetBtn.Margin = new Padding(0, 0, adjGap, 0);
-        _manualAdjBtn.Margin = new Padding(0);
-        var adjRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
+        _manualAdjBtn.Margin = new Padding(0, 0, adjGap, 0);
+        _stepSetBtn.Margin = new Padding(0);
+        var adjRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Margin = new Padding(0) };
         adjRow.Controls.Add(_autoAdjBtn);
-        adjRow.Controls.Add(_stepSetBtn);
         adjRow.Controls.Add(_manualAdjBtn);
+        adjRow.Controls.Add(_stepSetBtn);
 
-        var scopeTitle = new Label { Text = "测试范围", AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 2, 0, 2), Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold) };
+        var scopeTitle = new Label { Text = L.T("Test Scope"), AutoSize = true, ForeColor = Theme.TextLo, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 5), Font = new Font(Theme.FontFamily, 9.5F, FontStyle.Bold) };
         var scopeRow1 = BuildScopeRow(new (string, string, string)[]
         {
-            ("全部核心", "ALL", "所有核心参与压测"),
-            ("自定义…", "CUSTOM", "自行勾选参与压测的物理核心"),
+            (L.T("All cores"), "ALL", L.T("All cores are stress tested")),
+            (L.T("Custom…"), "CUSTOM", L.T("Pick the physical cores to stress test")),
         });
         var scopeRow2 = BuildCcdScopeRow();
-        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 4);
+        if (scopeRow2 != null) scopeRow1.Margin = new Padding(0, 0, 0, 6);
 
+        // Divider + primary Start / Stop actions docked at the bottom.
+        var bottomDock = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 56,
+            BackColor = Theme.Surface,
+            Padding = new Padding(0, 6, 0, 0),
+        };
+        var dividerHost = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 1,
+            BackColor = Theme.Surface,
+            WrapContents = false,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        var bottomDivider = SectionDivider();
+        bottomDivider.Margin = new Padding(0);
+        dividerHost.Controls.Add(bottomDivider);
         const int runGap = 10;
-        int runBtnWidth = (TestRowWidth - runGap) / 2;
-        var runRow = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 6, 0, 0) };
-        _startBtn.Normal = Theme.SurfaceAlt;
-        _startBtn.Hover = Theme.Border;
-        _startBtn.Outline = Theme.Accent;
-        _startBtn.ForeColor = Color.FromArgb(0xF2, 0x73, 0x6C);
-        _startBtn.Size = new Size(runBtnWidth, 32);
-        _stopBtn.Size = new Size(runBtnWidth, 32);
+        int stopWidth = 124;
+        int startWidth = TestRowWidth - stopWidth - runGap;
+        var runRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            BackColor = Theme.Surface,
+            WrapContents = false,
+            Dock = DockStyle.Bottom,
+            Padding = new Padding(0),
+        };
+        _startBtn.Normal = Theme.Accent;
+        _startBtn.Hover = Theme.AccentHover;
+        _startBtn.Outline = Color.Empty;
+        _startBtn.ForeColor = Theme.AccentText;
+        _startBtn.Radius = 8;
+        _startBtn.Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold);
+        _startBtn.Size = new Size(startWidth, 36);
+        _stopBtn.Size = new Size(stopWidth, 36);
+        _stopBtn.Radius = 8;
+        _stopBtn.Normal = Theme.SurfaceAlt;
+        _stopBtn.Hover = Theme.Danger;
+        _stopBtn.ForeColor = Theme.TextHi;
+        _stopBtn.Font = new Font(Theme.FontFamily, 9.5F, FontStyle.Bold);
         _startBtn.Margin = new Padding(0, 0, runGap, 0);
         _stopBtn.Margin = new Padding(0);
         _stopBtn.Enabled = false;
@@ -530,14 +642,19 @@ internal sealed partial class MainForm : Form
         _stopBtn.Click += StopTest;
         runRow.Controls.Add(_startBtn);
         runRow.Controls.Add(_stopBtn);
+        bottomDock.Controls.Add(runRow);
+        bottomDock.Controls.Add(dividerHost);
 
         body.Controls.Add(modeTitle);
         body.Controls.Add(_modeCombo);
         body.Controls.Add(fields);
+        body.Controls.Add(SectionDivider());
         body.Controls.Add(comboTitle);
         body.Controls.Add(modeRow);
+        body.Controls.Add(SectionDivider());
         body.Controls.Add(adjTitle);
         body.Controls.Add(adjRow);
+        body.Controls.Add(SectionDivider());
         body.Controls.Add(scopeTitle);
         body.Controls.Add(scopeRow1);
         if (scopeRow2 != null) body.Controls.Add(scopeRow2);
@@ -546,10 +663,10 @@ internal sealed partial class MainForm : Form
         RestyleAdjustButtons();
         RestyleScopeButtons();
 
-        // Dock order keeps the title at the top, buttons at the bottom, and body between them.
+        // Dock order keeps title at the top, divider + Start/Stop row fixed at the bottom, and body between them.
         card.Controls.Add(body);
-        card.Controls.Add(runRow);
-        card.Controls.Add(SectionTitle("测试设置"));
+        card.Controls.Add(bottomDock);
+        card.Controls.Add(SectionTitle(L.T("Test Settings")));
         return card;
     }
 
@@ -581,12 +698,14 @@ internal sealed partial class MainForm : Form
             var cores = CoreTopology.PhysicalCoresOfCcd(c)
                 .Select(RyzenSmu.OsCoreToSlot).OrderBy(x => x).ToList();
             specs.Add(($"CCD{c}", $"CCD{c}",
-                $"只压 CCD{c}（物理核 {string.Join(", ", cores)}）\n另一个 CCD 空闲时功耗预算全给被测 CCD，\n频率比全核负载时更高，结论不能直接套用到全核"));
+                L.F("Stress CCD{0} only (physical cores {1})\nWith the other CCD idle, the tested CCD gets the whole power budget\nand runs faster than under an all-core load, so results don't carry over to all cores", c, CoreList(cores))));
         }
-        specs.Add(("逐 CCD", "EACH",
-            "对每个 CCD 各跑一遍完整轮次（CCD0 → CCD1 …）"));
+        specs.Add((L.T("Each CCD"), "EACH",
+            L.T("Runs the full rounds on each CCD in turn (CCD0 → CCD1 …)")));
         return BuildScopeRow(specs);
     }
+
+    private static string CoreList(IEnumerable<int> cores) => string.Join(", ", cores);
 
     /// <summary>Changes the test scope; cancelling custom selection preserves the current scope.</summary>
     private PillButton MakeScopeButton(string text, string tag, int width, string tip)
@@ -595,15 +714,15 @@ internal sealed partial class MainForm : Form
         {
             Text = text,
             Tag = tag,
-            Font = new Font(Theme.FontFamily, 9.5F),
+            Font = new Font(Theme.FontFamily, 9.25F),
             Height = 30,
             Width = width,
             Radius = 8,
             AutoSize = false,
             BackColor = Theme.Surface,
             Normal = Theme.SurfaceAlt,
-            Hover = Theme.Border,
-            ForeColor = Theme.TextHi,
+            Hover = Theme.SurfaceHover,
+            ForeColor = Theme.TextMid,
             Margin = new Padding(0, 0, 0, 2),
         };
         _tips.SetToolTip(b, tip);
@@ -629,6 +748,20 @@ internal sealed partial class MainForm : Form
         return b;
     }
 
+    private static readonly Color ChoiceActiveBg = Color.FromArgb(0x10, 0x28, 0x1E);
+    private static readonly Color ChoiceActiveHover = Color.FromArgb(0x16, 0x35, 0x28);
+    private static readonly Color ChoiceActiveText = Color.FromArgb(0x4A, 0xDE, 0x80);
+
+    private static void StyleChoicePill(PillButton? b, bool selected)
+    {
+        if (b == null) return;
+        b.Normal = selected ? ChoiceActiveBg : Theme.SurfaceAlt;
+        b.Hover = selected ? ChoiceActiveHover : Theme.SurfaceHover;
+        b.Outline = selected ? Theme.Success : Color.Empty;
+        b.ForeColor = selected ? ChoiceActiveText : Theme.TextMid;
+        b.Invalidate();
+    }
+
     private void RestyleScopeButtons()
     {
         string active = _testScope switch
@@ -637,24 +770,18 @@ internal sealed partial class MainForm : Form
             _ => _testScope,
         };
         foreach (var b in _scopeBtns)
-        {
-            bool sel = (string)b.Tag! == active;
-            b.Normal = sel ? Theme.Accent : Theme.SurfaceAlt;
-            b.Hover = sel ? Theme.AccentHover : Theme.Border;
-            b.ForeColor = sel ? Theme.AccentText : Theme.TextHi;
-            b.Invalidate();
-        }
+            StyleChoicePill(b, (string)b.Tag! == active);
     }
 
     /// <summary>Selects physical cores, excluding fused-off slots; requires at least one selection.</summary>
     private bool PromptCustomCores()
     {
         int slots = _coSlotCount > 0 ? _coSlotCount : RyzenSmu.SlotCount;
-        if (slots <= 0) { ThemedDialog.Show(this, "未能读取核心拓扑，无法自定义测试范围。", "提示"); return false; }
+        if (slots <= 0) { ThemedDialog.Show(this, L.T("Cannot read the core topology, so a custom scope is unavailable."), L.T("Notice")); return false; }
 
         using var dlg = new Form
         {
-            Text = "选择测试核心",
+            Text = L.T("Select Cores"),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             MaximizeBox = false,
@@ -680,7 +807,7 @@ internal sealed partial class MainForm : Form
             bool disabled = RyzenSmu.IsSlotDisabled(i);
             var cb = new CheckBox
             {
-                Text = $"核心 {i}" + (disabled ? "（屏蔽）" : ""),
+                Text = L.F("Core {0}", i) + (disabled ? L.T(" (disabled)") : ""),
                 AutoSize = true,
                 Enabled = !disabled,
                 Checked = !disabled && (_customCores.Count == 0 || _customCores.Contains(i)),
@@ -692,11 +819,19 @@ internal sealed partial class MainForm : Form
             grid.Controls.Add(cb, i / rows, i % rows);
         }
 
-        var okBtn = new Button { Text = "确定", DialogResult = DialogResult.OK, Width = 88, Height = 30, FlatStyle = FlatStyle.Flat, BackColor = Theme.SurfaceAlt, ForeColor = Theme.TextHi };
-        okBtn.FlatAppearance.BorderColor = Theme.Border;
-        var cancelBtn = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Width = 88, Height = 30, FlatStyle = FlatStyle.Flat, BackColor = Theme.SurfaceAlt, ForeColor = Theme.TextHi };
-        cancelBtn.FlatAppearance.BorderColor = Theme.Border;
-        var btnRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Anchor = AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Surface, Margin = new Padding(14, 4, 14, 12) };
+        var okBtn = Primary(L.T("OK"));
+        okBtn.Size = new Size(92, 32);
+        okBtn.Radius = 8;
+        okBtn.BackColor = Theme.Surface;
+        okBtn.DialogResult = DialogResult.OK;
+        okBtn.Margin = new Padding(0);
+        var cancelBtn = Ghost(L.T("Cancel"));
+        cancelBtn.Size = new Size(88, 32);
+        cancelBtn.Radius = 8;
+        cancelBtn.BackColor = Theme.Surface;
+        cancelBtn.DialogResult = DialogResult.Cancel;
+        cancelBtn.Margin = new Padding(8, 0, 0, 0);
+        var btnRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Anchor = AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Surface, Margin = new Padding(14, 6, 14, 14) };
         btnRow.Controls.Add(okBtn);
         btnRow.Controls.Add(cancelBtn);
 
@@ -728,7 +863,7 @@ internal sealed partial class MainForm : Form
 
         if (picked.Count == 0)
         {
-            ThemedDialog.Show(this, "至少要选择一个核心。", "提示");
+            ThemedDialog.Show(this, L.T("Select at least one core."), L.T("Notice"));
             return false;
         }
         _customCores = picked;
@@ -742,15 +877,15 @@ internal sealed partial class MainForm : Form
         {
             Text = text,
             Tag = auto,
-            Font = new Font(Theme.FontFamily, 9.5F),
+            Font = new Font(Theme.FontFamily, 9.25F),
             Height = 30,
             Width = TestRowWidth,
             Radius = 8,
             AutoSize = false,
             BackColor = Theme.Surface,
             Normal = Theme.SurfaceAlt,
-            Hover = Theme.Border,
-            ForeColor = Theme.TextHi,
+            Hover = Theme.SurfaceHover,
+            ForeColor = Theme.TextMid,
             Margin = new Padding(0, 0, 0, 2),
         };
         _tips.SetToolTip(b, tip);
@@ -761,14 +896,7 @@ internal sealed partial class MainForm : Form
     private void RestyleAdjustButtons()
     {
         foreach (var b in new[] { _autoAdjBtn, _manualAdjBtn })
-        {
-            if (b == null) continue;
-            bool sel = (bool)b.Tag! == _autoAdjust;
-            b.Normal = sel ? Theme.Accent : Theme.SurfaceAlt;
-            b.Hover = sel ? Theme.AccentHover : Theme.Border;
-            b.ForeColor = sel ? Theme.AccentText : Theme.TextHi;
-            b.Invalidate();
-        }
+            if (b != null) StyleChoicePill(b, (bool)b.Tag! == _autoAdjust);
     }
 
     /// <summary>Reports a manual-mode error without changing CO offsets.</summary>
@@ -776,14 +904,15 @@ internal sealed partial class MainForm : Form
     {
         string cores = crashedPhysical.Count > 0
             ? string.Join(", ", crashedPhysical)
-            : "未指明（y-cruncher 崩溃）";
+            : L.T("unknown (y-cruncher crashed)");
         Ui(() =>
         {
-            SetStatus($"手动模式：物理核心 [{cores}] 报错，CO 未自动调整", Theme.Accent);
+            SetStatus(L.F("Manual mode: physical cores [{0}] failed, CO not adjusted", cores), Theme.Danger);
+            if (AppSettings.Current.ExpertMode) return;
             ThemedDialog.Show(this,
-                $"检测到报错，已停止测试。\n\n报错物理核心: {cores}\n\n" +
-                "当前为「手动模式」，CO 未做任何改动。请在 AMD PBO 页手动调整 CO 后重新开始测试。",
-                "手动模式 · 检测到报错");
+                L.F("An error was detected and the test stopped.\n\nFailing physical cores: {0}\n\n" +
+                    "Manual mode is on, so CO was not changed. Adjust CO on the PBO Tuning page, then start the test again.", cores),
+                L.T("Manual mode · error detected"));
         });
     }
 
@@ -794,15 +923,15 @@ internal sealed partial class MainForm : Form
         {
             Text = text,
             Tag = mode,
-            Font = new Font(Theme.FontFamily, 9.5F),
+            Font = new Font(Theme.FontFamily, 9.25F),
             Height = 30,
             Width = width,
             Radius = 8,
             AutoSize = false,
             BackColor = Theme.Surface,
             Normal = Theme.SurfaceAlt,
-            Hover = Theme.Border,
-            ForeColor = Theme.TextHi,
+            Hover = Theme.SurfaceHover,
+            ForeColor = Theme.TextMid,
             Margin = new Padding(0, 0, 0, 2),
         };
         _tips.SetToolTip(b, tip);
@@ -813,14 +942,7 @@ internal sealed partial class MainForm : Form
     private void RestyleModeButtons()
     {
         foreach (var b in new[] { _seqBtn, _comboBtn })
-        {
-            if (b == null) continue;
-            bool sel = (string)b.Tag! == _selectedMode;
-            b.Normal = sel ? Theme.Accent : Theme.SurfaceAlt;
-            b.Hover = sel ? Theme.AccentHover : Theme.Border;
-            b.ForeColor = sel ? Theme.AccentText : Theme.TextHi;
-            b.Invalidate();
-        }
+            if (b != null) StyleChoicePill(b, (string)b.Tag! == _selectedMode);
     }
 
     /// <summary>Builds the about dialog opened from the title bar.</summary>
@@ -836,7 +958,7 @@ internal sealed partial class MainForm : Form
 
         var dialog = new Form
         {
-            Text = "关于 AMD Ryzen PBO Studio",
+            Text = L.T("About AMD Ryzen PBO Studio"),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             MaximizeBox = false,
@@ -862,16 +984,21 @@ internal sealed partial class MainForm : Form
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, contentWidth));
 
         // Anchor None centers each row in the fixed-width column.
-        void Line(string text, float size, Color color, bool bold = false, int top = 0) => content.Controls.Add(new Label
+        Label Line(string text, float size, Color color, bool bold = false, int top = 0)
         {
-            Text = text,
-            AutoSize = true,
-            Anchor = AnchorStyles.None,
-            ForeColor = color,
-            BackColor = Theme.Surface,
-            Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
-            Margin = new Padding(0, top, 0, 2),
-        });
+            var lbl = new Label
+            {
+                Text = text,
+                AutoSize = true,
+                Anchor = AnchorStyles.None,
+                ForeColor = color,
+                BackColor = Theme.Surface,
+                Font = new Font(Theme.FontFamily, size, bold ? FontStyle.Bold : FontStyle.Regular),
+                Margin = new Padding(0, top, 0, 2),
+            };
+            content.Controls.Add(lbl);
+            return lbl;
+        }
 
         PillButton LinkButton(string text, string url)
         {
@@ -879,12 +1006,12 @@ internal sealed partial class MainForm : Form
             {
                 Text = text,
                 Size = new Size(170, 36),
-                Radius = 4,
+                Radius = 8,
                 Font = new Font(Theme.FontFamily, 10F),
                 BackColor = Theme.Surface,
                 Normal = Theme.SurfaceAlt,
-                Hover = Theme.Border,
-                Outline = Theme.TextLo,
+                Hover = Theme.SurfaceHover,
+                Outline = Theme.Border,
                 ForeColor = Theme.TextHi,
                 Margin = new Padding(4, 0, 4, 0),
             };
@@ -892,8 +1019,19 @@ internal sealed partial class MainForm : Form
             return b;
         }
 
-        Line("AMD Ryzen PBO Studio", 20F, Theme.Accent, bold: true);
-        Line($"{HeaderBar.DisplayVersion} · 构建 {buildDate}", 9.5F, Theme.TextLo);
+        var titleLbl = Line("AMD Ryzen PBO Studio", 20F, Theme.Accent, bold: true);
+        int aboutClicks = 0;
+        dialog.VisibleChanged += (_, _) => { if (dialog.Visible) aboutClicks = 0; };
+        titleLbl.MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || !_pboBiosStage1Armed || AppSettings.Current.PboBiosUnlocked) return;
+            if (++aboutClicks < 5) return;
+            AppSettings.Current.PboBiosUnlocked = true;
+            AppSettings.Current.Save();
+            _pboBiosRestartPending = true;
+            dialog.Close();
+        };
+        Line(L.F("{0} · Build {1}", HeaderBar.DisplayVersion, buildDate), 9.5F, Theme.TextLo);
 
         var links = new FlowLayoutPanel
         {
@@ -904,7 +1042,7 @@ internal sealed partial class MainForm : Form
             BackColor = Theme.Surface,
             Margin = new Padding(0, 14, 0, 0),
         };
-        links.Controls.Add(LinkButton("项目主页", Updater.HomePage));
+        links.Controls.Add(LinkButton(L.T("Project page"), Updater.HomePage));
         content.Controls.Add(links);
 
         content.Controls.Add(new Panel
@@ -915,29 +1053,39 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(0, 20, 0, 4),
         });
 
-        Line("开发者", 16F, Theme.Accent, bold: true, top: 10);
-        const string devName = "lengmo23 (", devHandle = "@冷漠OC";
-        var dev = new LinkLabel
+        LinkLabel LinkLine(string text, int start, int length, string url)
         {
-            Text = devName + devHandle + ")",
-            LinkArea = new LinkArea(devName.Length, devHandle.Length),
-            AutoSize = true,
-            Anchor = AnchorStyles.None,
-            ForeColor = Theme.TextHi,
-            BackColor = Theme.Surface,
-            Font = new Font(Theme.FontFamily, 10.5F),
-            LinkColor = Theme.AccentHover,
-            ActiveLinkColor = Theme.Accent,
-            VisitedLinkColor = Theme.AccentHover,
-            LinkBehavior = LinkBehavior.HoverUnderline,
-            Margin = new Padding(0, 0, 0, 2),
-        };
-        dev.LinkClicked += (_, _) => OpenUrl(DouyinUrl);
-        content.Controls.Add(dev);
-        Line("特别致谢", 16F, Theme.Accent, bold: true, top: 14);
-        Line("@古腾古腾咕咚咚（思路指导与建议）", 10.5F, Theme.TextHi);
-        Line("@阿肝（新功能建议与测试）", 10.5F, Theme.TextHi);
-        Line("@Yee（核心测试）", 10.5F, Theme.TextHi);
+            var link = new LinkLabel
+            {
+                Text = text,
+                LinkArea = new LinkArea(start, length),
+                AutoSize = true,
+                Anchor = AnchorStyles.None,
+                ForeColor = Theme.TextHi,
+                BackColor = Theme.Surface,
+                Font = new Font(Theme.FontFamily, 10.5F),
+                LinkColor = Theme.AccentHover,
+                ActiveLinkColor = Theme.Accent,
+                VisitedLinkColor = Theme.AccentHover,
+                LinkBehavior = LinkBehavior.HoverUnderline,
+                Margin = new Padding(0, 0, 0, 2),
+            };
+            link.LinkClicked += (_, _) => OpenUrl(url);
+            content.Controls.Add(link);
+            return link;
+        }
+
+        Line(L.T("Developer"), 16F, Theme.Accent, bold: true, top: 10);
+        const string devName = "lengmo23 (", devHandle = "@冷漠OC";
+        LinkLine(devName + devHandle + ")", devName.Length, devHandle.Length, DouyinUrl);
+
+        Line(L.T("Co-developer"), 16F, Theme.Accent, bold: true, top: 14);
+        LinkLine(CoDevHandle + L.T(" (Memory OC)"), 0, CoDevHandle.Length, CoDevDouyinUrl);
+
+        Line(L.T("Special Thanks"), 16F, Theme.Accent, bold: true, top: 14);
+        Line("@古腾古腾咕咚咚" + L.T(" (guidance and suggestions)"), 10.5F, Theme.TextHi);
+        Line("@阿肝" + L.T(" (feature ideas and testing)"), 10.5F, Theme.TextHi);
+        Line("@Yee" + L.T(" (core testing)"), 10.5F, Theme.TextHi);
         Line(copyright, 8.5F, Theme.TextLo, top: 26);
 
         dialog.Controls.Add(content);
@@ -945,6 +1093,8 @@ internal sealed partial class MainForm : Form
     }
 
     private const string DouyinUrl = "https://v.douyin.com/6VGnQBTxwIQ/";
+    private const string CoDevHandle = "@纯爱出演小猪";
+    private const string CoDevDouyinUrl = "https://v.douyin.com/yMpmAidKqdY/";
 
     private const int QrHeight = 420;
 
@@ -952,7 +1102,7 @@ internal sealed partial class MainForm : Form
     private static Form BuildSponsorDialog()
     {
         const int width = 640;   // fits both codes side by side at QrHeight
-        var dlg = NewDialog("赞助作者");
+        var dlg = NewDialog(L.T("Support the Author"));
         var root = new TableLayoutPanel
         {
             AutoSize = true,
@@ -977,14 +1127,14 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(0, top, 0, 0),
         };
 
-        root.Controls.Add(Para("请作者喝杯咖啡", 18F, Theme.Accent, bold: true));
+        root.Controls.Add(Para(L.T("Buy the author a coffee"), 18F, Theme.Accent, bold: true));
         root.Controls.Add(Para("Buy Me a Coffee", 9.5F, Theme.TextLo, top: 2));
         root.Controls.Add(Para(
-            "AMD Ryzen PBO Studio 是我利用业余时间独立开发的开源工具。每一个功能都是经过日夜不断打磨开发迭代的结果。" +
-            "如果它帮你省下了反复调参的时间，获得了更好的电脑性能，欢迎请我喝杯咖啡！\n" +
-            "你的每一份支持，都是我继续维护和更新它的动力，也让更多玩家能用上更好用的调参工具。",
+            L.T("AMD Ryzen PBO Studio is an open-source tool I develop on my own in my spare time; every feature is the result of many rounds of refinement. " +
+                "If it saved you hours of tuning or got more performance out of your PC, feel free to buy me a coffee!\n" +
+                "Every bit of support keeps me maintaining and improving it, and helps more people get a better tuning tool."),
             10F, Theme.TextHi, top: 18, body: true));
-        root.Controls.Add(Para("赞助完全自愿，不影响任何功能的使用。感谢每一位使用者！", 9F, Theme.TextLo, top: 14));
+        root.Controls.Add(Para(L.T("Support is entirely optional and doesn't unlock anything. Thanks to everyone who uses it!"), 9F, Theme.TextLo, top: 14));
 
         var codes = Flow(FlowDirection.LeftToRight);
         codes.Anchor = AnchorStyles.None;
@@ -1039,17 +1189,10 @@ internal sealed partial class MainForm : Form
     private async Task RunUpdateFlowAsync(bool manual)
     {
         if (_updateBusy) return;
-
-        // Do not exit for an update while a stress test is running.
-        if (_testTask is { IsCompleted: false })
-        {
-            if (manual)
-                ThemedDialog.Show(Form.ActiveForm ?? this, "测试进行中，无法更新。\n\n请先停止测试，待其安全收尾后再试。", "正在测试");
-            return;
-        }
+        if (UpdateBlocked(manual)) return;
 
         _updateBusy = true;
-        _headerBar.UpdateTip = "正在检查更新...";
+        _sideRail.UpdateTip = L.T("Checking for updates...");
         try
         {
             UpdateInfo? info;
@@ -1061,7 +1204,7 @@ internal sealed partial class MainForm : Form
             catch (Exception e)
             {
                 if (manual)
-                    ThemedDialog.Show(Form.ActiveForm ?? this, $"检查更新失败：{e.Message}", "检查更新");
+                    ThemedDialog.Show(Form.ActiveForm ?? this, L.F("Update check failed: {0}", e.Message), L.T("Check for Updates"));
                 return;
             }
             if (IsDisposed) return;
@@ -1079,7 +1222,7 @@ internal sealed partial class MainForm : Form
                 return;
             }
 
-            Log.Write($"发现新版本 {info.Tag}（当前 v{Updater.CurrentVersion}）");
+            Log.Write(L.F("New version {0} available (current v{1})", info.Tag, Updater.CurrentVersion));
             _knownNewVersion = info.Version;
             RefreshUpdateTip();
 
@@ -1094,6 +1237,7 @@ internal sealed partial class MainForm : Form
                 Updater.SkipVersion(info.Version);
                 return;
             }
+            if (UpdateBlocked(notify: true)) return;
 
             await DownloadAndApplyAsync(info);
         }
@@ -1102,6 +1246,25 @@ internal sealed partial class MainForm : Form
             _updateBusy = false;
             RefreshUpdateTip();
         }
+    }
+
+    /// <summary>True while a stress test, a single-core measurement or a BIOS memory write must not be cut short by the
+    /// exit an update needs.</summary>
+    private bool UpdateBlocked(bool notify)
+    {
+        if (_testTask is { IsCompleted: false })
+        {
+            if (notify)
+                ThemedDialog.Show(Form.ActiveForm ?? this, L.T("Cannot update while a test is running.\n\nStop the test, let it finish cleaning up, then try again."), L.T("Testing"));
+            return true;
+        }
+        if (_measureTask is { IsCompleted: false } || (_memOcPage?.IsWriting ?? false) || _pboBiosWriting)
+        {
+            if (notify)
+                ThemedDialog.Show(Form.ActiveForm ?? this, L.T("Cannot update while a measurement or a BIOS write is running.\n\nWait for it to finish, then try again."), L.T("Update"));
+            return true;
+        }
+        return false;
     }
 
     private const int MaxNotesHeight = 260; // Longer release notes scroll.
@@ -1151,7 +1314,7 @@ internal sealed partial class MainForm : Form
                     margin: new Padding(note.Title.Length > 0 ? 18 : 0, 0, 0, 10)));
         }
         if (releaseNotes.Count == 0)
-            notes.Controls.Add(NotesPara("本次更新未附说明。", 9.5F, Theme.TextLo, noteWidth, margin: new Padding(0, 0, 0, 10)));
+            notes.Controls.Add(NotesPara(L.T("This update has no release notes."), 9.5F, Theme.TextLo, noteWidth, margin: new Padding(0, 0, 0, 10)));
         var scroller = new Panel
         {
             AutoScroll = true,
@@ -1168,10 +1331,10 @@ internal sealed partial class MainForm : Form
     private static Form BuildUpToDateDialog(IReadOnlyList<ReleaseNote>? currentNotes)
     {
         const int width = NotesDialogWidth;
-        var dlg = NewDialog("检查更新");
+        var dlg = NewDialog(L.T("Check for Updates"));
         var root = NewNotesRoot();
-        root.Controls.Add(NotesPara("当前已是最新版本", 16F, Theme.Accent, width, bold: true));
-        root.Controls.Add(NotesPara($"v{Updater.CurrentVersion}" + (currentNotes != null ? " · 本版本更新内容" : ""),
+        root.Controls.Add(NotesPara(L.T("You're up to date"), 16F, Theme.Accent, width, bold: true));
+        root.Controls.Add(NotesPara($"v{Updater.CurrentVersion}" + (currentNotes != null ? L.T(" · What's new in this version") : ""),
             9F, Theme.TextLo, width, margin: new Padding(0, 4, 0, 0)));
         if (currentNotes != null)
         {
@@ -1179,7 +1342,7 @@ internal sealed partial class MainForm : Form
             root.Controls.Add(BuildNotesScroller(currentNotes));
         }
 
-        var ok = Pill("确定", 104, primary: true);
+        var ok = Pill(L.T("OK"), 104, primary: true);
         ok.DialogResult = DialogResult.OK;
         var buttons = Flow(FlowDirection.LeftToRight);
         buttons.Anchor = AnchorStyles.Right;
@@ -1198,19 +1361,20 @@ internal sealed partial class MainForm : Form
     private static Form BuildUpdatePrompt(UpdateInfo info)
     {
         const int width = NotesDialogWidth;
-        var dlg = NewDialog("发现新版本");
+        var dlg = NewDialog(L.T("New Version"));
         var root = NewNotesRoot();
 
-        root.Controls.Add(NotesPara($"{info.Tag} 已发布", 16F, Theme.Accent, width, bold: true));
-        root.Controls.Add(NotesPara($"当前版本 v{Updater.CurrentVersion} · 更新包约 {info.Size / 1024.0 / 1024.0:F1} MB",
+        root.Controls.Add(NotesPara(L.F("{0} is available", info.Tag), 16F, Theme.Accent, width, bold: true));
+        double sizeMb = info.Size / 1024.0 / 1024.0;
+        root.Controls.Add(NotesPara(L.F("Current version v{0} · update about {1:F1} MB", Updater.CurrentVersion, sizeMb),
             9F, Theme.TextLo, width, margin: new Padding(0, 4, 0, 0)));
         root.Controls.Add(new Panel { Size = new Size(width, 1), BackColor = Theme.Border, Margin = new Padding(0, 14, 0, 12) });
         root.Controls.Add(BuildNotesScroller(info.Notes));
 
-        root.Controls.Add(NotesPara("更新时会关闭程序，覆盖安装后自动重启。", 8.5F, Theme.TextLo, width, margin: new Padding(0, 6, 0, 0)));
+        root.Controls.Add(NotesPara(L.T("The program closes during the update and restarts when it's installed."), 8.5F, Theme.TextLo, width, margin: new Padding(0, 6, 0, 0)));
 
-        var ok = Pill("现在更新", 104, primary: true);
-        var later = Pill("暂不更新", 104);
+        var ok = Pill(L.T("Update now"), 104, primary: true);
+        var later = Pill(L.T("Later"), 104);
         ok.DialogResult = DialogResult.Yes;
         later.DialogResult = DialogResult.No;
         later.Margin = new Padding(8, 0, 0, 0);
@@ -1231,8 +1395,8 @@ internal sealed partial class MainForm : Form
     private void RefreshUpdateTip()
     {
         if (IsDisposed) return;
-        _headerBar.UpdateTip = _knownNewVersion != null ? $"有新版本 v{_knownNewVersion}" : "检查更新";
-        _headerBar.UpdateAvailable = _knownNewVersion != null;
+        _sideRail.UpdateTip = _knownNewVersion != null ? L.F("New version v{0}", _knownNewVersion) : L.T("Check for updates");
+        _sideRail.UpdateAvailable = _knownNewVersion != null;
     }
 
     /// <summary>Downloads and extracts an update before exiting for the replacement script.</summary>
@@ -1247,25 +1411,25 @@ internal sealed partial class MainForm : Form
             {
                 if (IsDisposed || p == lastPercent) return;
                 lastPercent = p;
-                _headerBar.UpdateTip = $"下载中 {p}%";
-                SetStatus($"正在下载更新 {info.Tag}（{source}） {p}%", Theme.Warn);
+                _sideRail.UpdateTip = L.F("Downloading {0}%", p);
+                SetStatus(L.F("Downloading update {0} ({1}) {2}%", info.Tag, source, p), Theme.Warn);
             });
-            SetStatus($"正在下载更新 {info.Tag}...", Theme.Warn);
+            SetStatus(L.F("Downloading update {0}...", info.Tag), Theme.Warn);
             zipPath = await Updater.DownloadAsync(info, progress,
                 s => { source = s; lastPercent = -1; },
                 // Show connection and source-switch stages when no byte progress is available.
                 stage => Ui(() =>
                 {
                     if (IsDisposed) return;
-                    _headerBar.UpdateTip = "下载中...";
-                    SetStatus($"更新 {info.Tag} · {stage}", Theme.Warn);
+                    _sideRail.UpdateTip = L.T("Downloading...");
+                    SetStatus(L.F("Update {0} · {1}", info.Tag, stage), Theme.Warn);
                 }));
         }
         catch (Exception e)
         {
             RefreshUpdateTip();
-            SetStatus("更新下载失败", Theme.Accent);
-            Log.Write($"更新下载失败：{e.Message}", "WARN");
+            SetStatus(L.T("Update download failed"), Theme.Danger);
+            Log.Write(L.F("Update download failed: {0}", e.Message), "WARN");
             using (var dlg = BuildDownloadFailedDialog(info.Tag))
                 dlg.ShowDialog(Form.ActiveForm ?? this);
             return;
@@ -1274,16 +1438,23 @@ internal sealed partial class MainForm : Form
         string newRoot;
         try
         {
-            _headerBar.UpdateTip = "解压中...";
-            SetStatus("正在解压更新...", Theme.Warn);
+            _sideRail.UpdateTip = L.T("Extracting...");
+            SetStatus(L.T("Extracting the update..."), Theme.Warn);
             newRoot = await Task.Run(() => Updater.ExtractAndVerify(zipPath));
         }
         catch (Exception e)
         {
             RefreshUpdateTip();
-            SetStatus("更新包校验失败", Theme.Accent);
-            Log.Write($"更新包解压/校验失败：{e.Message}", "WARN");
-            ThemedDialog.Show(Form.ActiveForm ?? this, $"更新包无法使用：{e.Message}\n\n当前版本未受影响。", "更新");
+            SetStatus(L.T("Update package verification failed"), Theme.Danger);
+            Log.Write(L.F("Failed to extract or verify the update: {0}", e.Message), "WARN");
+            ThemedDialog.Show(Form.ActiveForm ?? this, L.F("The update package can't be used: {0}\n\nThe installed version is unchanged.", e.Message), L.T("Update"));
+            return;
+        }
+
+        // A test, measurement or memory write started during the download keeps the installed version.
+        if (UpdateBlocked(notify: true))
+        {
+            RefreshUpdateTip();
             return;
         }
 
@@ -1295,11 +1466,12 @@ internal sealed partial class MainForm : Form
         catch (Exception e)
         {
             RefreshUpdateTip();
-            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法启动更新程序：{e.Message}\n\n当前版本未受影响。", "更新");
+            ThemedDialog.Show(Form.ActiveForm ?? this, L.F("Cannot start the updater: {0}\n\nThe installed version is unchanged.", e.Message), L.T("Update"));
             return;
         }
 
-        Log.Write("更新就绪，正在退出以完成替换");
+        Log.Write(L.T("Update ready, exiting to finish installing"));
+        _skipExitConfirm = true;
         Close();
     }
 
@@ -1307,7 +1479,7 @@ internal sealed partial class MainForm : Form
     private static Form BuildDownloadFailedDialog(string tag)
     {
         const int width = 400;
-        var dlg = NewDialog("下载更新失败");
+        var dlg = NewDialog(L.T("Download Failed"));
         var root = new TableLayoutPanel
         {
             AutoSize = true,
@@ -1330,13 +1502,13 @@ internal sealed partial class MainForm : Form
             Margin = new Padding(0, 0, 0, bottom),
         };
 
-        root.Controls.Add(Line($"无法下载 {tag}", 12F, Theme.TextHi, bold: true, bottom: 6));
-        root.Controls.Add(Line("GitHub 与各镜像源均无法连接，当前版本未受影响。\n请加入 QQ 群获取最新版本：", 9.5F, Theme.TextLo, bottom: 14));
-        root.Controls.Add(Line("QQ 群", 9F, Theme.TextLo, bottom: 2, center: true));
+        root.Controls.Add(Line(L.F("Cannot download {0}", tag), 12F, Theme.TextHi, bold: true, bottom: 6));
+        root.Controls.Add(Line(L.T("GitHub and every mirror are unreachable; the installed version is unchanged.\nJoin the QQ group to get the latest version:"), 9.5F, Theme.TextLo, bottom: 14));
+        root.Controls.Add(Line(L.T("QQ group"), 9F, Theme.TextLo, bottom: 2, center: true));
         root.Controls.Add(Line(Updater.QqGroup, 22F, Theme.Accent, bold: true, bottom: 6, center: true));
 
-        var copyBtn = Pill("复制群号", 104, primary: true);
-        var closeBtn = Pill("关闭", 84);
+        var copyBtn = Pill(L.T("Copy number"), 104, primary: true);
+        var closeBtn = Pill(L.T("Close"), 84);
         closeBtn.DialogResult = DialogResult.Cancel;
         closeBtn.Margin = new Padding(8, 0, 0, 0);
         copyBtn.Click += (_, _) =>
@@ -1344,12 +1516,12 @@ internal sealed partial class MainForm : Form
             try
             {
                 Clipboard.SetText(Updater.QqGroup);
-                copyBtn.Text = "已复制";
+                copyBtn.Text = L.T("Copied");
             }
             catch (Exception ex)
             {
-                Log.Write($"复制 QQ 群号失败：{ex.Message}", "WARN");
-                copyBtn.Text = "复制失败";
+                Log.Write(L.F("Failed to copy the QQ group number: {0}", ex.Message), "WARN");
+                copyBtn.Text = L.T("Copy failed");
             }
         };
         var buttons = Flow(FlowDirection.LeftToRight);
@@ -1373,17 +1545,46 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception e)
         {
-            ThemedDialog.Show(Form.ActiveForm ?? this, $"无法打开链接：{e.Message}\n\n{url}", "提示");
+            ThemedDialog.Show(Form.ActiveForm ?? this, L.F("Cannot open the link: {0}\n\n{1}", e.Message, url), L.T("Notice"));
         }
     }
 
     /// <summary>Builds a log card for either page; separate textboxes mirror the same log
     /// because one control cannot belong to two parents.</summary>
-    private Control BuildLogCard(TextBox box)
+    private Control BuildLogCard(TextBox box, string titleText, string clearText)
     {
         var card = NewCard();
         card.Margin = new Padding(0);
-        card.Padding = new Padding(14, 12, 14, 12);
+        card.Padding = new Padding(14, 10, 14, 12);
+
+        var header = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 32,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0, 0, 0, 6),
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        header.Controls.Add(new Label
+        {
+            Text = titleText,
+            Dock = DockStyle.Fill,
+            ForeColor = Theme.TextHi,
+            BackColor = Theme.Surface,
+            Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft,
+        }, 0, 0);
+
+        // Clearing the display does not remove the session log on disk.
+        var clearBtn = HeaderActionBtn(clearText, 50, primary: false, ClearLog);
+        clearBtn.Margin = new Padding(6, 3, 0, 0);
+        _tips.SetToolTip(clearBtn, L.T("Clears the displayed log; the log file on disk is unaffected"));
+        header.Controls.Add(clearBtn, 1, 0);
 
         box.Multiline = true;
         box.ReadOnly = true;
@@ -1391,27 +1592,47 @@ internal sealed partial class MainForm : Form
         box.WordWrap = true;
         box.MaxLength = 0;
         box.BorderStyle = BorderStyle.None;
-        box.BackColor = Theme.Bg;
-        box.ForeColor = Color.FromArgb(0xD4, 0xD4, 0xD4);
-        box.Font = new Font(Theme.MonoFamily, 10F);
+        box.BackColor = Theme.WellBg;
+        box.ForeColor = Color.FromArgb(0xD8, 0xDE, 0xE9);
+        box.Font = new Font(Theme.FontFamily, box == _logBoxPbo ? 9.25F : 9.75F);
         box.Dock = DockStyle.Fill;
         box.HandleCreated += (_, _) => DarkTitleBar.ApplyScrollBars(box.Handle);
 
-        // Clearing the display does not remove the session log on disk.
-        var btnBar = new Panel { Dock = DockStyle.Bottom, Height = 46, BackColor = Theme.Surface };
-        var clearBtn = Ghost("清除日志");
-        clearBtn.Size = new Size(118, 36);
-        clearBtn.Location = new Point(0, 8);
-        clearBtn.Anchor = AnchorStyles.Left | AnchorStyles.Top;
-        clearBtn.Click += (_, _) => ClearLog();
+        var terminal = new Card
+        {
+            Dock = DockStyle.Fill,
+            Fill = Theme.WellBg,
+            Stroke = Theme.BorderSubtle,
+            Radius = 8,
+            BackColor = Theme.Surface,
+            Padding = new Padding(10, 8, 6, 8),
+            Margin = new Padding(0),
+        };
+        terminal.Controls.Add(box);
 
-        btnBar.Controls.Add(clearBtn);
-
-        // Dock order keeps the title and buttons outside the filling log box.
-        card.Controls.Add(box);
-        card.Controls.Add(btnBar);
-        card.Controls.Add(SectionTitle("运行日志"));
+        card.Controls.Add(terminal);
+        card.Controls.Add(header);
         return card;
+    }
+
+    private static PillButton HeaderActionBtn(string text, int width, bool primary, Action onClick)
+    {
+        var b = new PillButton
+        {
+            Text = text,
+            Size = new Size(width, 26),
+            Radius = 6,
+            Font = new Font(Theme.FontFamily, 8.5F, primary ? FontStyle.Bold : FontStyle.Regular),
+            BackColor = Theme.Surface,
+            Normal = primary ? Theme.Accent : Theme.SurfaceAlt,
+            Hover = primary ? Theme.AccentHover : Theme.SurfaceHover,
+            ForeColor = primary ? Theme.AccentText : Theme.TextHi,
+            Margin = new Padding(0, 0, 4, 0),
+        };
+        // width is a minimum; the button grows with the translated text.
+        b.Width = Math.Max(width, TextRenderer.MeasureText(text, b.Font).Width + 20);
+        b.Click += (_, _) => onClick();
+        return b;
     }
 
     // Curve Optimizer editor
@@ -1430,13 +1651,13 @@ internal sealed partial class MainForm : Form
         var bodyTable = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
+            ColumnCount = 2,
             RowCount = 1,
             BackColor = Theme.Surface,
             Padding = new Padding(0, 4, 0, 0),
         };
         bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // The button column is centered in the space right of the grid (anchored Top only).
         bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bodyTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -1456,14 +1677,16 @@ internal sealed partial class MainForm : Form
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             BackColor = Theme.Surface,
             ColumnCount = 2,
-            Margin = new Padding(0, 0, 8, 0),
+            Margin = new Padding(0, 0, 6, 0),
         };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // The second column has no right margin, so the centered button column sees only visible space.
 
         grid.Controls.Add(MakeStepButton("+", () => StepRange(0, CoSlotsPerColumn, +1)), 0, 0);
         var ccd1Plus = MakeStepButton("+", () => StepRange(CoSlotsPerColumn, CoDisplaySlotCount, +1));
         ccd1Plus.Enabled = _coSlotCount > CoSlotsPerColumn;
+        ccd1Plus.Margin = ccd1Plus.Margin with { Right = 0 };
         grid.Controls.Add(ccd1Plus, 1, 0);
 
         for (int r = 0; r < CoSlotsPerColumn; r++)
@@ -1475,32 +1698,34 @@ internal sealed partial class MainForm : Form
         grid.Controls.Add(MakeStepButton("-", () => StepRange(0, CoSlotsPerColumn, -1)), 0, CoSlotsPerColumn + 1);
         var ccd1Minus = MakeStepButton("-", () => StepRange(CoSlotsPerColumn, CoDisplaySlotCount, -1));
         ccd1Minus.Enabled = _coSlotCount > CoSlotsPerColumn;
+        ccd1Minus.Margin = ccd1Minus.Margin with { Right = 0 };
         grid.Controls.Add(ccd1Minus, 1, CoSlotsPerColumn + 1);
         return grid;
     }
 
     private Control MakeCoreCell(int core)
     {
+        bool disabled = core >= _coSlotCount || RyzenSmu.IsSlotDisabled(core);
+        if (disabled)
+            _coCells[core].Enabled = false; // Fused-off or absent slots are fixed at zero.
+
         var f = new FlowLayoutPanel
         {
             AutoSize = true,
             BackColor = Theme.Surface,
             WrapContents = false,
-            Margin = new Padding(0, 0, 14, 0),
+            Margin = new Padding(0, 0, 12, 0),
         };
         f.Controls.Add(new Label
         {
             Text = $"Core {core}",
             AutoSize = false,
-            Width = 54,
-            ForeColor = Theme.TextHi,
+            Width = 56,
+            ForeColor = disabled ? Theme.TextLo : Theme.TextHi,
             BackColor = Theme.Surface,
-            Margin = new Padding(0, 6, 6, 0),
+            Font = new Font(Theme.FontFamily, 8.75F),
+            Margin = new Padding(0, 6, 4, 0),
         });
-        if (core >= _coSlotCount || RyzenSmu.IsSlotDisabled(core))
-        {
-            _coCells[core].Enabled = false; // Fused-off or absent slots are fixed at zero.
-        }
         f.Controls.Add(_coCells[core]);
         return f;
     }
@@ -1517,7 +1742,7 @@ internal sealed partial class MainForm : Form
             ForeColor = Theme.TextHi,
             BorderStyle = BorderStyle.FixedSingle,
             TextAlign = HorizontalAlignment.Center,
-            Font = new Font(Theme.MonoFamily, 10F),
+            Font = new Font(Theme.FontFamily, 10F),
             Margin = new Padding(0, 2, 0, 2),
         };
         DarkSpin.Apply(cell);
@@ -1527,9 +1752,11 @@ internal sealed partial class MainForm : Form
     private PillButton MakeStepButton(string text, Action onClick)
     {
         var b = Ghost(text);
+        b.BackColor = Theme.Surface;
         b.Size = new Size(58, 24);
-        b.Font = new Font(Theme.FontFamily, 11F, FontStyle.Bold);
-        b.Margin = new Padding(60, 0, 14, 4);
+        b.Radius = 6;
+        b.Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold);
+        b.Margin = new Padding(60, 0, 12, 4);
         b.Click += (_, _) => onClick();
         return b;
     }
@@ -1542,20 +1769,24 @@ internal sealed partial class MainForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             BackColor = Theme.Surface,
-            Margin = new Padding(8, 32, 0, 0),
+            Anchor = AnchorStyles.Top,
+            Margin = new Padding(0, 32, 0, 0),
         };
-        PillButton Btn(string text, Action click)
+        PillButton Btn(string text, Action click, string? tip = null)
         {
             var b = Ghost(text);
+            b.BackColor = Theme.Surface;
             b.Size = new Size(96, 32);
+            b.Radius = 7;
             b.Margin = new Padding(0, 0, 0, 8);
             b.Click += (_, _) => click();
+            if (tip != null) _tips.SetToolTip(b, tip);
             return b;
         }
-        flow.Controls.Add(Btn("Apply", OnCoApply));
-        flow.Controls.Add(Btn("Refresh", OnCoRefresh));
-        flow.Controls.Add(Btn("Save", OnCoSave));
-        flow.Controls.Add(Btn("Load", OnCoLoad));
+        flow.Controls.Add(Btn(L.T("Apply"), OnCoApply, tip: L.T("Write the current CO settings to the CPU")));
+        flow.Controls.Add(Btn(L.T("Refresh"), () => _ = OnCoRefresh(), tip: L.T("Read CO and FMax from the CPU again")));
+        flow.Controls.Add(Btn(L.T("Save"), OnCoSave, tip: L.T("Save the current CO settings to co_profile.json")));
+        flow.Controls.Add(Btn(L.T("Load"), OnCoLoad, tip: L.T("Load the saved CO settings (not written to the CPU)")));
         return flow;
     }
 
@@ -1581,15 +1812,15 @@ internal sealed partial class MainForm : Form
         _scalarBox.FlatStyle = FlatStyle.Flat;
         _scalarBox.BackColor = Theme.SurfaceAlt;
         _scalarBox.ForeColor = Theme.TextHi;
-        _scalarBox.Font = new Font(Theme.MonoFamily, 10F);
-        _scalarBox.Margin = new Padding(0, 5, 8, 0);
+        _scalarBox.Font = new Font(Theme.FontFamily, 10F);
+        _scalarBox.Margin = new Padding(0, 6, 6, 0);   // text centered level with the 23 px number boxes
         DarkCombo.Apply(_scalarBox, center: true);
         for (int x = 1; x <= 10; x++) _scalarBox.Items.Add($"{x}X");
         SelectScalar(1);
         _scalarBox.SelectedIndexChanged += (_, _) => { if (!_scalarLoading) _scalarDirty = true; };
         _tips.SetToolTip(_scalarBox,
-            "PBO Scalar：1X 对应 Auto。倍数越大，SMU 在 boost 时给的电压越高。\n" +
-            "只在选项改动后点 Apply 才写入；5000 系写入时会同时打开 PBO。");
+            L.T("PBO Scalar: 1X is Auto. A higher multiplier lets the SMU use more voltage when boosting.\n" +
+                "Written only when changed and Apply is clicked; on 5000 series, writing it also enables PBO."));
 
         var flow = new FlowLayoutPanel
         {
@@ -1601,14 +1832,17 @@ internal sealed partial class MainForm : Form
         };
         AddParamPair(flow, "FMax", _fmaxBox);
         AddParamPair(flow, "PPT (W)", _pptBox);
-        AddParamPair(flow, "EDC (A)", _edcBox);
         AddParamPair(flow, "TDC (A)", _tdcBox);
+        AddParamPair(flow, "EDC (A)", _edcBox);
         AddParamPair(flow, "Scalar", _scalarBox);
 
-        var apply = Primary("Apply");
+        var apply = Ghost(L.T("Apply"));
         apply.Size = new Size(84, 30);
-        apply.Margin = new Padding(0, 4, 0, 0);
+        apply.Radius = 7;
+        apply.BackColor = Theme.Surface;
+        apply.Margin = new Padding(12, 4, 0, 0);
         apply.Click += (_, _) => OnPboApply();
+        _tips.SetToolTip(apply, L.T("Writes FMax / PPT / EDC / TDC and Scalar to the CPU"));
         flow.Controls.Add(apply);
 
         card.Controls.Add(flow);
@@ -1632,8 +1866,8 @@ internal sealed partial class MainForm : Form
         box.ForeColor = Theme.TextHi;
         box.BorderStyle = BorderStyle.FixedSingle;
         box.TextAlign = HorizontalAlignment.Center;
-        box.Font = new Font(Theme.MonoFamily, 10F);
-        box.Margin = new Padding(0, 7, 10, 0);
+        box.Font = new Font(Theme.FontFamily, 10F);
+        box.Margin = new Padding(0, 7, 8, 0);
     }
 
     /// <summary>Selects and clamps the Scalar multiplier to 1–10.</summary>
@@ -1654,7 +1888,8 @@ internal sealed partial class MainForm : Form
             AutoSize = true,
             ForeColor = Theme.TextLo,
             BackColor = Theme.Surface,
-            Margin = new Padding(0, 11, 6, 0),
+            Font = new Font(Theme.FontFamily, 8.75F),
+            Margin = new Padding(0, 11, 4, 0),
         });
         parent.Controls.Add(box);
     }
@@ -1670,13 +1905,13 @@ internal sealed partial class MainForm : Form
         var bodyTable = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
+            ColumnCount = 2,
             RowCount = 1,
             BackColor = Theme.Surface,
             Padding = new Padding(0, 4, 0, 0),
         };
         bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // The button column is centered in the space right of the grid (anchored Top only).
         bodyTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bodyTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         bodyTable.Controls.Add(BuildCsGrid(), 0, 0);
@@ -1696,20 +1931,23 @@ internal sealed partial class MainForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             BackColor = Theme.Surface,
-            Margin = new Padding(18, 32, 0, 0),
+            Margin = new Padding(14, 32, 0, 0),
         };
-        PillButton Btn(string text, Action click)
+        PillButton Btn(string text, Action click, string? tip = null)
         {
             var b = Ghost(text);
+            b.BackColor = Theme.Surface;
             b.Size = new Size(96, 32);
+            b.Radius = 7;
             b.Margin = new Padding(0, 0, 0, 8);
             b.Click += (_, _) => click();
+            if (tip != null) _tips.SetToolTip(b, tip);
             return b;
         }
-        _csApplyBtn = Btn("Apply", OnCsApply);
-        _csRefreshBtn = Btn("Refresh", OnCsRefresh);
-        _csSaveBtn = Btn("Save", OnCsSave);
-        _csLoadBtn = Btn("Load", OnCsLoad);
+        _csApplyBtn = Btn(L.T("Apply"), OnCsApply, tip: L.T("Write the current Curve Shaper settings to the CPU"));
+        _csRefreshBtn = Btn(L.T("Refresh"), () => _ = OnCsRefresh(), tip: L.T("Read Curve Shaper from the CPU again"));
+        _csSaveBtn = Btn(L.T("Save"), OnCsSave, tip: L.T("Save the current CS settings to cs_state.json"));
+        _csLoadBtn = Btn(L.T("Load"), OnCsLoad, tip: L.T("Load the saved CS settings (not written to the CPU)"));
         flow.Controls.Add(_csApplyBtn);
         flow.Controls.Add(_csRefreshBtn);
         flow.Controls.Add(_csSaveBtn);
@@ -1750,7 +1988,7 @@ internal sealed partial class MainForm : Form
     private const int CsColumnGap = 10;
 
     /// <summary>Fits the CS grid and action buttons within the card.</summary>
-    private const int CsCellWidth = 46;
+    private const int CsCellWidth = 48;
 
     /// <summary>Omits trailing spacing after the last CS column.</summary>
     private static Label CsHeader(string text, bool last) => new()
@@ -1762,12 +2000,12 @@ internal sealed partial class MainForm : Form
         ForeColor = Theme.TextLo,
         BackColor = Theme.Surface,
         TextAlign = ContentAlignment.MiddleCenter,
-        Font = new Font(Theme.FontFamily, 8.5F),
+        Font = new Font(Theme.FontFamily, 8.25F, FontStyle.Bold),
         Margin = new Padding(0, 0, last ? 0 : CsColumnGap, 2),
     };
 
     /// <summary>Sets the width shared by CS row labels and the header spacer.</summary>
-    private const int CsRowLabelWidth = 40;
+    private const int CsRowLabelWidth = 50;
 
     private static Label CsRowLabel(string text) => new()
     {
@@ -1775,8 +2013,9 @@ internal sealed partial class MainForm : Form
         AutoSize = false,
         Width = CsRowLabelWidth,
         Height = 26,
-        ForeColor = Theme.TextLo,
+        ForeColor = Theme.TextMid,
         BackColor = Theme.Surface,
+        Font = new Font(Theme.FontFamily, 8.5F, FontStyle.Bold),
         TextAlign = ContentAlignment.MiddleRight,
         Margin = new Padding(0, 5, 6, 5),
     };
@@ -1793,7 +2032,7 @@ internal sealed partial class MainForm : Form
             ForeColor = Theme.TextHi,
             BorderStyle = BorderStyle.FixedSingle,
             TextAlign = HorizontalAlignment.Center,
-            Font = new Font(Theme.MonoFamily, 10F),
+            Font = new Font(Theme.FontFamily, 10F),
             Margin = new Padding(0, 5, last ? 0 : CsColumnGap, 5),
         };
         DarkSpin.Apply(cell);
@@ -1816,35 +2055,94 @@ internal sealed partial class MainForm : Form
         cell.Value = Math.Clamp(v, (int)cell.Minimum, (int)cell.Maximum);
     }
 
-    private void OnCoApply()
+    private bool _coApplying;
+    private bool _changePromptMuted; // The mid-test change prompt stays muted until the app exits.
+
+    private async void OnCoApply()
     {
-        var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
-        // Manual changes during a test do not take ownership; crash recovery still backs off one step.
-        bool testRunning = _testTask is { IsCompleted: false };
-        string reason = testRunning ? Journal.ManualInTest : Journal.ManualTakeover;
-        bool ok = Tuning.Apply(vals, "MANUAL", null, reason);
-        Log.WriteCo(ok ? "手动应用 CO：" : "手动应用 CO 写入失败：", vals, level: ok ? "INFO" : "ERROR");
-        if (ok && Workspace.WasInterrupted())
+        if (_coApplying || _bootApplying || !_editorsReady) return;
+        _coApplying = true;
+        try
         {
-            if (testRunning)
-                Log.Write("检测到手动应用 CO：后续回退以此值为基准", "WARN");
-            else
+            var vals = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList();
+            // Manual changes during a test do not take ownership; crash recovery still backs off one step.
+            bool testRunning = _testTask is { IsCompleted: false };
+            string reason = testRunning ? Journal.ManualInTest : Journal.ManualTakeover;
+            SetStatus(L.T("Writing CO..."), Theme.Warn);
+            Log.Write(L.T("Writing CO..."));
+            long started = Environment.TickCount64;
+            // Per-core write and readback can take seconds while the SMU is busy under load.
+            bool ok = await Task.Run(() => Tuning.Apply(vals, "MANUAL", null, reason));
+            double secs = (Environment.TickCount64 - started) / 1000.0;
+            Log.WriteCo(ok ? L.F("Manual CO apply ({0:F1} s):", secs) : L.F("Manual CO apply failed ({0:F1} s):", secs),
+                        vals, level: ok ? "INFO" : "ERROR");
+            if (IsDisposed) return;
+            if (ok && Workspace.WasInterrupted())
             {
-                // Resume the interrupted stage using the user’s offsets without another backoff.
-                Log.Write("检测到手动应用 CO，测试沿用手动设定续跑", "WARN");
-                SetStatus("已接管中断 CO · 开始后按此值续跑", Theme.Warn);
-                return;
+                if (testRunning)
+                    Log.Write(L.T("Manual CO apply detected: later back-offs start from these values"), "WARN");
+                else
+                {
+                    // Resume the interrupted stage using the user’s offsets without another backoff.
+                    Log.Write(L.T("Manual CO apply detected: the test continues with these values"), "WARN");
+                    SetStatus(L.T("Interrupted CO taken over · Start continues with it"), Theme.Warn);
+                    return;
+                }
             }
+            SetStatus(ok ? L.T("Curve Optimizer applied") : L.T("CO apply failed"), ok ? Theme.Success : Theme.Danger);
+
+            // The test may have ended while the write ran.
+            if (ok && testRunning && _testTask is { IsCompleted: false }) PromptRestartAfterManualChange("CO");
         }
-        SetStatus(ok ? "已手动应用 Curve Optimizer" : "CO 应用失败", ok ? Theme.Success : Theme.Accent);
+        catch (Exception e)
+        {
+            Log.Write(L.F("{0} error: {1}", "Curve Optimizer", e.Message), "ERROR");
+            if (!IsDisposed) SetStatus(L.T("CO apply failed"), Theme.Danger);
+        }
+        finally
+        {
+            _coApplying = false;
+        }
     }
 
-    private void OnCoRefresh()
+    /// <summary>After a manual CO or CS change during a test, asks whether to rerun it from the first step and round.</summary>
+    private void PromptRestartAfterManualChange(string what)
     {
-        var off = RyzenSmu.ReadOffsets(_coSlotCount);
-        for (int i = 0; i < _coSlotCount && i < off.Count; i++) SetCell(i, off[i]);
-        uint fmax = RyzenSmu.ReadFMax();
-        if (fmax > 0) _fmaxBox.Value = Math.Clamp(fmax, (uint)_fmaxBox.Minimum, (uint)_fmaxBox.Maximum);
+        if (_changePromptMuted) return;
+        if (AppSettings.Current.ExpertMode)
+        {
+            Log.Write(L.F("{0} was changed manually during the test; the test continues", what), "WARN");
+            return;
+        }
+        bool restart = ThemedDialog.Ask(this,
+            L.F("{0} was changed manually during the test. Restart the test?\nA restart begins at the first round of the first test.", what),
+            L.F("{0} changed manually", what), L.T("Restart"), L.T("Continue"),
+            L.T("Don't ask again this session, continue"), out _changePromptMuted);
+        if (restart && _testTask is { IsCompleted: false } && !_stopRequested)
+        {
+            _restartReason = what;
+            _restartRequested = true;
+            _cts?.Cancel();
+            _stopBtn.Enabled = false;
+            SetStatus(L.T("Restarting the test..."), Theme.Warn);
+        }
+    }
+
+    private async Task OnCoRefresh()
+    {
+        try
+        {
+            int n = _coSlotCount;
+            // Off the UI thread: the reads wait for IoLock, which a CO write or the monitor may hold.
+            var (off, fmax) = await Task.Run(() => (RyzenSmu.ReadOffsets(n), RyzenSmu.ReadFMax()));
+            if (IsDisposed) return;
+            for (int i = 0; i < _coSlotCount && i < off.Count; i++) SetCell(i, off[i]);
+            if (fmax > 0) _fmaxBox.Value = Math.Clamp(fmax, (uint)_fmaxBox.Minimum, (uint)_fmaxBox.Maximum);
+        }
+        catch (Exception e)
+        {
+            Log.Write(L.F("{0} error: {1}", "Curve Optimizer", e.Message), "ERROR");
+        }
     }
 
     private void OnCoSave()
@@ -1853,64 +2151,113 @@ internal sealed partial class MainForm : Form
         {
             Offsets = _coCells.Take(_coSlotCount).Select(c => (int)c.Value).ToList(),
         }.Save();
-        Log.Write("已保存 CO 配置到 co_profile.json");
-        SetStatus("已保存 CO 配置", Theme.Success);
+        Log.Write(L.T("CO profile saved to co_profile.json"));
+        SetStatus(L.T("CO profile saved"), Theme.Success);
     }
 
     private void OnCoLoad()
     {
         var p = CoProfile.Load();
         for (int i = 0; i < _coSlotCount && i < p.Offsets.Count; i++) SetCell(i, p.Offsets[i]);
-        Log.Write("已载入 CO 配置（未应用，确认后点 Apply）");
+        Log.Write(L.T("CO profile loaded (not applied; click Apply to confirm)"));
     }
 
     /// <summary>Applies FMax, PPT, EDC, and TDC limits together.</summary>
-    private void OnPboApply()
+    private bool _pboApplying;
+
+    private async void OnPboApply()
     {
-        uint fmax = (uint)_fmaxBox.Value;
-        uint ppt = (uint)_pptBox.Value;
-        uint edc = (uint)_edcBox.Value;
-        uint tdc = (uint)_tdcBox.Value;
-        // Zen3 has no FMax write message; sending message ID 0 would be unsafe.
-        bool okF = !_fmaxWritable || RyzenSmu.SetFMax(fmax);
-        bool okP = RyzenSmu.SetPptLimit(ppt);
-        bool okE = RyzenSmu.SetEdcLimit(edc);
-        bool okT = RyzenSmu.SetTdcLimit(tdc);
-        uint scalar = SelectedScalar();   // Auto = 1X
-        bool writeScalar = _scalarWritable && _scalarDirty;
-        bool okS = !writeScalar || RyzenSmu.SetPboScalar(scalar);
-        if (writeScalar && okS) _scalarDirty = false;
-        bool ok = okF && okP && okE && okT && okS;
-        // Record what was written so crash recovery restores the latest limits, even when changed mid-test.
-        var rec = PboJournal.ReadLast() ?? new PboSnapshot();
-        if (_fmaxWritable && okF) rec.FMax = fmax;
-        if (okP) rec.Ppt = (int)ppt;
-        if (okE) rec.Edc = (int)edc;
-        if (okT) rec.Tdc = (int)tdc;
-        PboJournal.Record(rec, PboJournal.ManualApply);
-        string fmaxPart = _fmaxWritable ? $"FMax {fmax} MHz / " : "FMax 跳过（不支持）/ ";
-        string scalarPart = !_scalarWritable ? " / Scalar 跳过（不支持）"
-                          : writeScalar ? $" / Scalar {_scalarBox.Text}" : " / Scalar 未改动";
-        Log.Write($"应用 PBO 限制: {fmaxPart}PPT {ppt} W / EDC {edc} A / TDC {tdc} A{scalarPart}" + (ok ? "" : "（部分写入失败，详见上方）"));
-        SetStatus(ok ? "已应用 PBO 限制（FMax/PPT/EDC/TDC/Scalar）" : "PBO 限制应用部分失败", ok ? Theme.Success : Theme.Accent);
+        if (_pboApplying || _bootApplying || !_editorsReady) return;
+        _pboApplying = true;
+        try
+        {
+            uint fmax = (uint)_fmaxBox.Value;
+            uint ppt = (uint)_pptBox.Value;
+            uint edc = (uint)_edcBox.Value;
+            uint tdc = (uint)_tdcBox.Value;
+            uint scalar = SelectedScalar();   // Auto = 1X
+            string scalarText = _scalarBox.Text;
+            bool writeScalar = _scalarWritable && _scalarDirty;
+            bool fmaxWritable = _fmaxWritable;
+            SetStatus(L.T("Writing PBO limits..."), Theme.Warn);
+            // Off the UI thread: the writes wait for IoLock, which a CO write or the monitor may hold.
+            var (okF, okP, okE, okT, okS) = await Task.Run(() =>
+            (
+                // Zen3 has no FMax write message; sending message ID 0 would be unsafe.
+                !fmaxWritable || RyzenSmu.SetFMax(fmax),
+                RyzenSmu.SetPptLimit(ppt),
+                RyzenSmu.SetEdcLimit(edc),
+                RyzenSmu.SetTdcLimit(tdc),
+                !writeScalar || RyzenSmu.SetPboScalar(scalar)
+            ));
+            if (writeScalar && okS) _scalarDirty = false;
+            bool ok = okF && okP && okE && okT && okS;
+            // Record what was written so crash recovery restores the latest limits, even when changed mid-test.
+            var rec = PboJournal.ReadLast() ?? new PboSnapshot();
+            if (fmaxWritable && okF) rec.FMax = fmax;
+            if (okP) rec.Ppt = (int)ppt;
+            if (okE) rec.Edc = (int)edc;
+            if (okT) rec.Tdc = (int)tdc;
+            PboJournal.Record(rec, PboJournal.ManualApply);
+            string fmaxPart = fmaxWritable ? $"FMax {fmax} MHz / " : L.T("FMax skipped (unsupported) / ");
+            string scalarPart = !_scalarWritable ? L.T(" / Scalar skipped (unsupported)")
+                              : writeScalar ? $" / Scalar {scalarText}" : L.T(" / Scalar unchanged");
+            Log.Write(L.T("Applied PBO limits: ") + $"{fmaxPart}PPT {ppt} W / EDC {edc} A / TDC {tdc} A{scalarPart}" +
+                      (ok ? "" : L.T(" (some writes failed, see above)")));
+            if (IsDisposed) return;
+            SetStatus(ok ? L.T("PBO limits applied (FMax/PPT/EDC/TDC/Scalar)") : L.T("PBO limits partly failed"),
+                      ok ? Theme.Success : Theme.Danger);
+        }
+        catch (Exception e)
+        {
+            Log.Write(L.F("{0} error: {1}", "PBO", e.Message), "ERROR");
+            if (!IsDisposed) SetStatus(L.T("PBO limits partly failed"), Theme.Danger);
+        }
+        finally
+        {
+            _pboApplying = false;
+        }
     }
 
     // Curve Shaper behavior
 
-    private void OnCsApply()
+    private bool _csApplying;
+
+    private async void OnCsApply()
     {
-        var g = CsGridFromCells();
-        bool ok = RyzenSmu.SetCurveShaper(g);
-        if (ok)
+        if (_csApplying || _bootApplying || !_editorsReady) return;
+        _csApplying = true;
+        try
         {
-            // Cache applied CS values because older BIOS versions cannot read them back.
-            _csState.FromGrid(g);
-            _csState.Save();
-            // Record what was written so crash recovery restores the latest CS, even when changed mid-test.
-            CsJournal.Record(new CsSnapshot { Margins = new List<int>(_csState.Margins) }, CsJournal.ManualApply);
+            var g = CsGridFromCells();
+            bool testRunning = _testTask is { IsCompleted: false };
+            SetStatus(L.T("Writing Curve Shaper..."), Theme.Warn);
+            // Off the UI thread: the write waits for IoLock, which a CO write or the monitor may hold.
+            bool ok = await Task.Run(() => RyzenSmu.SetCurveShaper(g));
+            if (ok)
+            {
+                // Cache applied CS values because older BIOS versions cannot read them back.
+                _csState.FromGrid(g);
+                _csState.Save();
+                // Record what was written so crash recovery restores the latest CS, even when changed mid-test.
+                CsJournal.Record(new CsSnapshot { Margins = new List<int>(_csState.Margins) }, CsJournal.ManualApply);
+            }
+            Log.Write(L.T("Manual Curve Shaper apply") + (_csState.ReadBroken ? L.T(" (fallback mode)") : "") +
+                      (ok ? "" : L.T(" (write error, see above)")));
+            if (IsDisposed) return;
+            SetStatus(ok ? L.T("Curve Shaper applied") : L.T("Curve Shaper apply failed"), ok ? Theme.Success : Theme.Danger);
+            // The test may have ended while the write ran.
+            if (ok && testRunning && _testTask is { IsCompleted: false }) PromptRestartAfterManualChange("Curve Shaper");
         }
-        Log.Write("手动应用 Curve Shaper" + (_csState.ReadBroken ? "（备用模式）" : "") + (ok ? "" : "（写入异常，详见上方）"));
-        SetStatus(ok ? "已应用 Curve Shaper" : "Curve Shaper 应用失败", ok ? Theme.Success : Theme.Accent);
+        catch (Exception e)
+        {
+            Log.Write(L.F("{0} error: {1}", "Curve Shaper", e.Message), "ERROR");
+            if (!IsDisposed) SetStatus(L.T("Curve Shaper apply failed"), Theme.Danger);
+        }
+        finally
+        {
+            _csApplying = false;
+        }
     }
 
     private int[,] CsGridFromCells()
@@ -1922,31 +2269,40 @@ internal sealed partial class MainForm : Form
         return g;
     }
 
-    private void OnCsRefresh()
+    private async Task OnCsRefresh()
     {
-        var g = RyzenSmu.ReadCurveShaper(out bool hasInterface);
-
-        if (!hasInterface)
+        try
         {
-            // On older BIOS versions, all-zero readback does not mean the applied CS values were cleared.
-            if (!_csState.ReadBroken) { _csState.ReadBroken = true; _csState.Save(); }
-            _csTitleLabel.Text = "Curve Shaper（备用模式）";
-            if (!_csState.HasMargins)
-                return; // Keep editor values when no saved CS values exist.
-            g = _csState.ToGrid();
-        }
-        else
-        {
-            if (_csState.ReadBroken) { _csState.ReadBroken = false; _csState.Save(); }
-            _csTitleLabel.Text = "Curve Shaper";
-        }
+            // Off the UI thread: the read waits for IoLock, which a CO write or the monitor may hold.
+            var (g, hasInterface) = await Task.Run(() => (RyzenSmu.ReadCurveShaper(out bool h), h));
+            if (IsDisposed) return;
 
-        for (int t = 0; t < 5; t++)
-            for (int c = 0; c < 3; c++)
+            if (!hasInterface)
             {
-                var cell = _csCells[t, c];
-                cell.Value = Math.Clamp(g[t, c], (int)cell.Minimum, (int)cell.Maximum);
+                // On older BIOS versions, all-zero readback does not mean the applied CS values were cleared.
+                if (!_csState.ReadBroken) { _csState.ReadBroken = true; _csState.Save(); }
+                _csTitleLabel.Text = L.T("Curve Shaper (fallback mode)");
+                if (!_csState.HasMargins)
+                    return; // Keep editor values when no saved CS values exist.
+                g = _csState.ToGrid();
             }
+            else
+            {
+                if (_csState.ReadBroken) { _csState.ReadBroken = false; _csState.Save(); }
+                _csTitleLabel.Text = "Curve Shaper";
+            }
+
+            for (int t = 0; t < 5; t++)
+                for (int c = 0; c < 3; c++)
+                {
+                    var cell = _csCells[t, c];
+                    cell.Value = Math.Clamp(g[t, c], (int)cell.Minimum, (int)cell.Maximum);
+                }
+        }
+        catch (Exception e)
+        {
+            Log.Write(L.F("{0} error: {1}", "Curve Shaper", e.Message), "ERROR");
+        }
     }
 
     /// <summary>Loads saved CS values into the editor without writing hardware.</summary>
@@ -1954,7 +2310,7 @@ internal sealed partial class MainForm : Form
     {
         if (!_csState.HasMargins)
         {
-            SetStatus("没有可载入的 CS 配置", Theme.Accent);
+            SetStatus(L.T("No CS profile to load"), Theme.Warn);
             return;
         }
         var g = _csState.ToGrid();
@@ -1964,8 +2320,8 @@ internal sealed partial class MainForm : Form
                 var cell = _csCells[t, c];
                 cell.Value = Math.Clamp(g[t, c], (int)cell.Minimum, (int)cell.Maximum);
             }
-        Log.Write("已载入 CS 配置（未应用，确认后点 Apply）");
-        SetStatus("已载入 CS 配置", Theme.Success);
+        Log.Write(L.T("CS profile loaded (not applied; click Apply to confirm)"));
+        SetStatus(L.T("CS profile loaded"), Theme.Success);
     }
 
     /// <summary>Saves editor CS values without writing hardware.</summary>
@@ -1973,12 +2329,13 @@ internal sealed partial class MainForm : Form
     {
         _csState.FromGrid(CsGridFromCells());
         _csState.Save();
-        Log.Write("已保存 CS 配置到 cs_state.json");
-        SetStatus("已保存 CS 配置", Theme.Success);
+        Log.Write(L.T("CS profile saved to cs_state.json"));
+        SetStatus(L.T("CS profile saved"), Theme.Success);
     }
 
-    /// <summary>Enables CS only on supported CPUs and populates the editor.</summary>
-    private void InitCsEditor()
+    /// <summary>Enables CS only on supported CPUs and loads the saved CS state; returns whether CS is supported.
+    /// Runs before the first await at startup so an unsupported CPU never has CS controls enabled.</summary>
+    private bool InitCsEditor()
     {
         bool ok = RyzenSmu.IsCurveShaperSupported();
         foreach (var cell in _csCells) cell.Enabled = ok;
@@ -1986,46 +2343,72 @@ internal sealed partial class MainForm : Form
         _csRefreshBtn.Enabled = ok;
         _csSaveBtn.Enabled = ok;
         _csLoadBtn.Enabled = ok;
-        _csTitleLabel.Text = ok ? "Curve Shaper" : "Curve Shaper（当前 CPU 不支持）";
-        if (ok)
-        {
-            _csState = CsState.Load();
-            OnCsRefresh();
-        }
+        _csTitleLabel.Text = ok ? "Curve Shaper" : L.T("Curve Shaper (not supported on this CPU)");
+        if (ok) _csState = CsState.Load();
+        return ok;
     }
 
     /// <summary>Populates the editor from current CPU values at startup.</summary>
-    private void InitCoEditor()
+    private async Task InitCoEditorAsync()
     {
-        OnCoRefresh();
-        InitCsEditor();
-        InitPboBoxes();
+        try
+        {
+            bool cs = InitCsEditor();
+            await OnCoRefresh();
+            if (cs && !IsDisposed) await OnCsRefresh();
+            if (!IsDisposed) await InitPboBoxesAsync();
+        }
+        finally
+        {
+            _editorsReady = true;
+        }
     }
 
+    // Apply and Start stay blocked until the startup read has filled the editors and the FMax / Scalar write support,
+    // so editor defaults are never written and Zen3 never gets an FMax write.
+    private bool _editorsReady;
+
     /// <summary>Initializes PPT, EDC, and TDC controls from current CPU limits.</summary>
-    private void InitPboBoxes()
+    private async Task InitPboBoxesAsync()
     {
-        var (ppt, edc, tdc) = RyzenSmu.ReadPboLimits();
-        if (ppt > 0) _pptBox.Value = Math.Clamp(ppt, (int)_pptBox.Minimum, (int)_pptBox.Maximum);
-        if (edc > 0) _edcBox.Value = Math.Clamp(edc, (int)_edcBox.Minimum, (int)_edcBox.Maximum);
-        if (tdc > 0) _tdcBox.Value = Math.Clamp(tdc, (int)_tdcBox.Minimum, (int)_tdcBox.Maximum);
-
-        // Zen3 cannot write FMax; leave the other PBO limits available.
-        _fmaxWritable = RyzenSmu.IsFMaxWriteSupported();
-        if (!_fmaxWritable)
+        try
         {
-            _fmaxBox.Enabled = false;
-            Log.Write("当前 CPU 的 SMU 无 FMax 写入命令，已禁用该项；PPT / TDC / EDC 不受影响");
+            // Off the UI thread: the reads wait for IoLock, which the monitor may hold.
+            var (limits, fmaxWritable, s, scalarWritable) = await Task.Run(() =>
+                (RyzenSmu.ReadPboLimits(), RyzenSmu.IsFMaxWriteSupported(), RyzenSmu.ReadPboScalar(), RyzenSmu.IsPboScalarWriteSupported()));
+            if (IsDisposed) return;
+
+            var (ppt, edc, tdc) = limits;
+            if (ppt > 0) _pptBox.Value = Math.Clamp(ppt, (int)_pptBox.Minimum, (int)_pptBox.Maximum);
+            if (edc > 0) _edcBox.Value = Math.Clamp(edc, (int)_edcBox.Minimum, (int)_edcBox.Maximum);
+            if (tdc > 0) _tdcBox.Value = Math.Clamp(tdc, (int)_tdcBox.Minimum, (int)_tdcBox.Maximum);
+
+            // Zen3 cannot write FMax; leave the other PBO limits available.
+            _fmaxWritable = fmaxWritable;
+            if (!_fmaxWritable)
+            {
+                _fmaxBox.Enabled = false;
+                Log.Write(L.T("This CPU's SMU has no FMax write command, so FMax is disabled; PPT / TDC / EDC are unaffected"));
+            }
+
+            // Scalar zero means OC mode or an unavailable reading, so show Auto.
+            SelectScalar(s >= 1 ? (int)Math.Round(s) : 1);
+            _scalarWritable = scalarWritable;
+            if (!_scalarWritable)
+            {
+                _scalarBox.Enabled = false;
+                Log.Write(L.T("This CPU's SMU has no PBO Scalar write command, so Scalar is disabled"));
+            }
         }
-
-        // Scalar zero means OC mode or an unavailable reading, so show Auto.
-        float s = RyzenSmu.ReadPboScalar();
-        SelectScalar(s >= 1 ? (int)Math.Round(s) : 1);
-        _scalarWritable = RyzenSmu.IsPboScalarWriteSupported();
-        if (!_scalarWritable)
+        catch (Exception e)
         {
+            // Write support unknown: never send FMax / Scalar.
+            _fmaxWritable = false;
+            _scalarWritable = false;
+            Log.Write(L.F("{0} error: {1}", "PBO", e.Message), "ERROR");
+            if (IsDisposed) return;
+            _fmaxBox.Enabled = false;
             _scalarBox.Enabled = false;
-            Log.Write("当前 CPU 的 SMU 无 PBO Scalar 写入命令，已禁用该项");
         }
     }
 
@@ -2043,10 +2426,10 @@ internal sealed partial class MainForm : Form
         Text = text,
         Dock = DockStyle.Top,
         Height = 26,
-        ForeColor = Theme.TextLo,
+        ForeColor = Theme.TextHi,
         BackColor = Theme.Surface,
-        Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold),
-        Padding = new Padding(2, 2, 0, 0),
+        Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold),
+        Padding = new Padding(0, 0, 0, 2),
     };
 
     private static PillButton Primary(string text) => new()
@@ -2055,9 +2438,9 @@ internal sealed partial class MainForm : Form
         Normal = Theme.Accent,
         Hover = Theme.AccentHover,
         ForeColor = Theme.AccentText,
-        Font = new Font(Theme.FontFamily, 10.5F, FontStyle.Bold),
-        Size = new Size(140, 40),
-        Radius = 10,
+        Font = new Font(Theme.FontFamily, 10F, FontStyle.Bold),
+        Size = new Size(140, 38),
+        Radius = 8,
         BackColor = Theme.Bg,
         AutoSize = false,
     };
@@ -2066,11 +2449,11 @@ internal sealed partial class MainForm : Form
     {
         Text = text,
         Normal = Theme.SurfaceAlt,
-        Hover = Theme.Border,
+        Hover = Theme.SurfaceHover,
         ForeColor = Theme.TextHi,
-        Font = new Font(Theme.FontFamily, 10F),
-        Size = new Size(130, 40),
-        Radius = 10,
+        Font = new Font(Theme.FontFamily, 9.5F),
+        Size = new Size(130, 38),
+        Radius = 8,
         BackColor = Theme.Bg,
         AutoSize = false,
     };
@@ -2135,7 +2518,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception e)
         {
-            Log.Write($"加载图标失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to load the icon: {0}", e.Message), "WARN");
         }
     }
 
@@ -2159,7 +2542,7 @@ internal sealed partial class MainForm : Form
     {
         base.OnSizeChanged(e);
         if (Width <= 0 || Height <= 0) return;
-        using var path = Theme.RoundRect(new Rectangle(0, 0, Width, Height), 8);
+        using var path = Theme.RoundRect(new Rectangle(0, 0, Width, Height), 10);
         var previous = Region;
         Region = new Region(path);
         previous?.Dispose();
@@ -2169,9 +2552,10 @@ internal sealed partial class MainForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+        if (ClientSize.Width <= 1 || ClientSize.Height <= 1) return;
         using var pen = new Pen(Theme.Border);
         e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        using var path = Theme.RoundRect(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), 8);
+        using var path = Theme.RoundRect(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), 10);
         e.Graphics.DrawPath(pen, path);
     }
 
@@ -2194,30 +2578,19 @@ internal sealed partial class MainForm : Form
         }
     }
 
-    private void OnOffsetTimer(object? sender, EventArgs e)
-    {
-        Task.Run(() =>
-        {
-            try
-            {
-                int n = RyzenSmu.SlotCount;
-                var off = RyzenSmu.ReadOffsets(n);
-                Ui(() => _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", off)}]");
-            }
-            catch
-            {
-            }
-        });
-    }
-
     // Test control
 
     private void StartTest(object? sender, EventArgs e)
     {
+        // FMax support is still unknown until the startup reads finish.
+        if (!_editorsReady) return;
         _startBtn.Enabled = false;
 
         if (!TryReadSettings(out int duration, out int singleRounds))
+        {
+            _startBtn.Enabled = true;
             return;
+        }
 
         // Check for y-cruncher before starting a stress test and show placement instructions if absent.
         try
@@ -2226,7 +2599,7 @@ internal sealed partial class MainForm : Form
         }
         catch (FileNotFoundException ex)
         {
-            ThemedDialog.Show(this, ex.Message, "缺少 y-cruncher");
+            ThemedDialog.Show(this, ex.Message, L.T("y-cruncher missing"));
             _startBtn.Enabled = true;
             return;
         }
@@ -2247,8 +2620,9 @@ internal sealed partial class MainForm : Form
 
         SetControlsEnabled(false);
         _stopBtn.Enabled = true;
-        string perRound = _testMode is "SEQ" or "COMBO" ? "" : $" · 每轮 {duration} 秒";
-        SetStatus($"运行中 · 模式 {_testMode} · 范围 {ScopeLabel(_testScope, _scopeCcd)}{perRound}", Theme.Warn);
+        string perRound = _testMode is "SEQ" or "COMBO" ? "" : L.F(" · {0} s per round", duration);
+        string scopeText = ScopeLabel(_testScope, _scopeCcd);
+        SetStatus(L.F("Running · Mode {0} · Scope {1}{2}", _testMode, scopeText, perRound), Theme.Warn);
 
         if (sender == _startBtn) AutoStart.ResetResumeCount();   // manual start resets the auto-resume streak
         _testTask = Task.Run(RunTestThread);
@@ -2257,9 +2631,10 @@ internal sealed partial class MainForm : Form
     private void StopTest(object? sender, EventArgs e)
     {
         _stopRequested = true;
+        _restartRequested = false;
         _cts?.Cancel();
         _measureCts?.Cancel();
-        SetStatus("正在停止...", Theme.Accent);
+        SetStatus(L.T("Stopping..."), Theme.Warn);
         _stopBtn.Enabled = false;
     }
 
@@ -2284,7 +2659,7 @@ internal sealed partial class MainForm : Form
         if (s.Ppt is { } p) parts.Add($"PPT {p} W");
         if (s.Edc is { } e) parts.Add($"EDC {e} A");
         if (s.Tdc is { } t) parts.Add($"TDC {t} A");
-        return parts.Count > 0 ? string.Join(" / ", parts) : "未读到";
+        return parts.Count > 0 ? string.Join(" / ", parts) : L.T("not read");
     }
 
     /// <summary>
@@ -2298,7 +2673,7 @@ internal sealed partial class MainForm : Form
     {
         if (saved.FMax == null && saved.Ppt == null && saved.Edc == null && saved.Tdc == null)
         {
-            Log.Write($"{context}：没有可核对的 PBO 记录，未写入 PBO 参数");
+            Log.Write(L.F("{0}: no PBO record to compare, PBO values not written", context));
             return true;
         }
         var now = ReadPboSnapshot();
@@ -2333,11 +2708,17 @@ internal sealed partial class MainForm : Form
         Limit("TDC", "A", saved.Tdc, now.Tdc, RyzenSmu.SetTdcLimit, _tdcBox);
 
         if (!compared)
-            Log.Write($"{context}：未能读取当前 PBO 参数，未写入 PBO 参数", "WARN");
+            Log.Write(L.F("{0}: cannot read the current PBO values, PBO values not written", context), "WARN");
         else if (changes.Count == 0)
-            Log.Write($"{context}：PBO 参数与记录一致（{DescribePbo(now)}），未写入");
+            {
+                string pboNow = DescribePbo(now);
+                Log.Write(L.F("{0}: PBO values match the record ({1}), not written", context, pboNow));
+            }
         else
-            Log.Write($"{context}：PBO 参数已写入 {string.Join("、", changes)}" + (ok ? "" : "（部分写入失败）"), ok ? "INFO" : "WARN");
+            {
+                string changed = string.Join(L.T(", "), changes);
+                Log.Write(L.F("{0}: PBO values written: {1}", context, changed) + (ok ? "" : L.T(" (some writes failed)")), ok ? "INFO" : "WARN");
+            }
 
         if (written.Count > 0)
             Ui(() =>
@@ -2367,17 +2748,17 @@ internal sealed partial class MainForm : Form
         if (!RyzenSmu.IsCurveShaperSupported() || CsJournal.ReadLast() is not { } saved) return;
         if (saved.Margins is not { Count: >= 15 } want)
         {
-            Log.Write("死机恢复：最后一次 CS 记录无法读回，未写入 CS");
+            Log.Write(L.T("Crash recovery: the last CS record cannot be read back, CS not written"));
             return;
         }
         if (ReadCsSnapshot().Margins is { } now && now.SequenceEqual(want))
         {
-            Log.Write("死机恢复：CS 与记录一致，未写入");
+            Log.Write(L.T("Crash recovery: CS matches the record, not written"));
             return;
         }
         var g = new CsState { Margins = want }.ToGrid();
         bool ok = RyzenSmu.SetCurveShaper(g);
-        Log.Write(ok ? "死机恢复：CS 已写入最后一次记录" : "死机恢复：CS 写入失败，详见上方", ok ? "INFO" : "WARN");
+        Log.Write(ok ? L.T("Crash recovery: CS restored from the last record") : L.T("Crash recovery: CS write failed, see above"), ok ? "INFO" : "WARN");
         if (ok)
             Ui(() =>
             {
@@ -2399,7 +2780,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception e)
         {
-            Log.Write($"测试异常: {e.Message}", "ERROR");
+            Log.Write(L.F("Test error: {0}", e.Message), "ERROR");
         }
         finally
         {
@@ -2430,8 +2811,8 @@ internal sealed partial class MainForm : Form
         {
             bool hardReset = Workspace.RecentKernelPowerEvent();
             Log.Write(hardReset
-                ? "上次测试异常中断 + 内核电源事件（疑似死机/断电），执行恢复"
-                : "上次测试未正常结束，执行恢复", "WARN");
+                ? L.T("Last test was interrupted with a kernel power event (likely a crash or power loss), recovering")
+                : L.T("Last test did not end normally, recovering"), "WARN");
 
             // Prefer the last persisted CO record over the state file after a crash.
             offsets = lastApplied is { Count: > 0 }
@@ -2457,39 +2838,37 @@ internal sealed partial class MainForm : Form
             var preRecovery = new List<int>(offsets);
             if (manualTakeover)
             {
-                Log.WriteCo("沿用手动应用的 CO：", offsets, level: "WARN");
+                Log.WriteCo(L.T("Keeping the manually applied CO:"), offsets, level: "WARN");
             }
             else
             {
                 var enabled = Enumerable.Range(0, offsets.Count).Where(i => !RyzenSmu.IsSlotDisabled(i)).ToList();
                 if (enabled.All(i => offsets[i] >= Config.CoMax))
                 {
-                    Log.Write($"死机恢复：所有核心 CO 已达上限 +{Config.CoMax}（无可回退空间），大概率非 CO 不稳定导致，停止测试", "ERROR");
+                    Log.Write(L.F("Crash recovery: every core is already at the +{0} CO limit (no room to back off); the cause is most likely not CO, stopping the test", Config.CoMax), "ERROR");
                     return false;
                 }
                 foreach (int i in enabled) offsets[i] = Math.Min(Config.CoMax, offsets[i] + Config.StepOnError);
-                Log.WriteCo($"死机恢复，所有核心 CO +{Config.StepOnError}：", offsets, preRecovery, "WARN");
+                Log.WriteCo(L.F("Crash recovery, all cores CO +{0}:", Config.StepOnError), offsets, preRecovery, "WARN");
             }
 
             if (!Tuning.Apply(offsets, _testMode, seqResumePhase, "crash-recovery"))
             {
-                Log.Write("死机恢复设置 CO 失败", "ERROR");
+                Log.Write(L.T("Crash recovery failed to set CO"), "ERROR");
                 return false;
             }
             RestoreCsAfterCrash();
-            if (PboJournal.ReadLast() is { } savedPbo) RestorePbo(savedPbo, "死机恢复");
+            if (PboJournal.ReadLast() is { } savedPbo) RestorePbo(savedPbo, L.T("Crash recovery"));
 
             if (_testMode == "SEQ" && !string.IsNullOrEmpty(seqResumePhase))
-                Log.Write($"恢复测试模式: 顺序测试，从中断的 {seqResumePhase} 阶段继续");
+                Log.Write(L.F("Resuming: sequential test from the interrupted {0} stage", seqResumePhase));
             else
-                Log.Write($"恢复测试模式: {_testMode}，从第 {testRound} 轮继续");
-            _initialOffsets = preRecovery;
+                Log.Write(L.F("Resuming: {0} from round {1}", _testMode, testRound));
             Ui(() =>
             {
                 SelectMode(_testMode);
                 ApplySettingsToUi();
                 RestyleScopeButtons();
-                _initialOffsetsLabel.Text = $"初始 CO: [{string.Join(", ", preRecovery)}]";
             });
         }
         else
@@ -2500,11 +2879,11 @@ internal sealed partial class MainForm : Form
             if (_testScope == "EACH") _scopeCcd = 0;
             offsets = RyzenSmu.ReadOffsets(numCores);
             testRound = 0;
-            Log.WriteCo("当前 CO 值：", offsets);
+            Log.WriteCo(L.T("Current CO:"), offsets);
             var pbo = ReadPboSnapshot();
             PboJournal.Record(pbo, PboJournal.TestStart);
             if (RyzenSmu.IsCurveShaperSupported()) CsJournal.Record(ReadCsSnapshot(), CsJournal.TestStart);
-            Log.Write($"当前 PBO 参数：{DescribePbo(pbo)}");
+            Log.Write(L.T("Current PBO values: ") + DescribePbo(pbo));
 
             // Persist baseline offsets for recovery before the first test callback.
             Journal.Record(offsets, _testMode, null, "baseline");
@@ -2513,18 +2892,13 @@ internal sealed partial class MainForm : Form
         // The Pi benchmark always runs on all cores
         if (_testMode == YCruncher.BenchMode && _testScope != "ALL")
         {
-            Log.Write($"YC018 基准测试固定使用全部核心，已忽略所选测试范围（{ScopeLabel(_testScope, _scopeCcd)}）", "WARN");
+            {
+                string ignored = ScopeLabel(_testScope, _scopeCcd);
+                Log.Write(L.F("YC018 always uses all cores; the selected scope ({0}) is ignored", ignored), "WARN");
+            }
             _testScope = "ALL";
             Ui(RestyleScopeButtons);
         }
-
-        _initialOffsets = new List<int>(offsets);
-        var initSnapshot = new List<int>(offsets);
-        Ui(() =>
-        {
-            _initialOffsetsLabel.Text = $"初始 CO: [{string.Join(", ", initSnapshot)}]";
-            _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", initSnapshot)}]";
-        });
 
         var token = _cts!.Token;
 
@@ -2537,7 +2911,7 @@ internal sealed partial class MainForm : Form
         bool allPassed = true;
         for (int pass = scopeStart; pass <= scopeEnd; pass++)
         {
-            if (_stopRequested) break;
+            if (_stopRequested || _restartRequested) break;
             if (eachCcd) _scopeCcd = pass;
             int ccd = eachCcd ? pass : _scopeCcd;
             var (scopeLogical, scopeCores) = ResolveScope(eachCcd ? "CCD" : _testScope, ccd);
@@ -2552,7 +2926,7 @@ internal sealed partial class MainForm : Form
             }
             if (pass < scopeEnd)
             {
-                Log.Write($">>> CCD{pass} 测试完成，清理进程...");
+                Log.Write(L.F(">>> CCD{0} test done, cleaning up...", pass));
                 YCruncher.Kill();
             }
         }
@@ -2574,11 +2948,11 @@ internal sealed partial class MainForm : Form
 
                 for (int pi = startIdx; pi < phases.Count; pi++)
                 {
-                    if (_stopRequested) break;
+                    if (_stopRequested || _restartRequested) break;
                     string name = phases[pi].Test;
                     int iters = phases[pi].Rounds;
 
-                    Log.Write($"\n>>> 开始 {name} 测试 ({iters} 轮)");
+                    Log.Write(L.F("\n>>> Starting {0} ({1} rounds)", name, iters));
                     Workspace.SaveState(new TestState
                     {
                         Offsets = offsets,
@@ -2597,7 +2971,7 @@ internal sealed partial class MainForm : Form
                     (ok, offsets) = YCruncher.RunStressTest(new[] { AlgoOf(name) }, iters, offsets, phases[pi].Seconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
                     if (!ok)
                     {
-                        Log.Write($"{name} 测试未完成", "WARN");
+                        Log.Write(L.F("{0} not completed", name), "WARN");
                         passOk = false;
                         break;
                     }
@@ -2605,14 +2979,17 @@ internal sealed partial class MainForm : Form
 
                     if (pi < phases.Count - 1)
                     {
-                        Log.Write($">>> {name} 测试完成，清理进程...");
+                        Log.Write(L.F(">>> {0} done, cleaning up...", name));
                         YCruncher.Kill();
                     }
                 }
             }
             else if (_testMode == "COMBO")
             {
-                Log.Write($"\n>>> 开始组合测试 {string.Join("+", _runPlan.ComboTests)} ({_runPlan.ComboRounds} 轮)");
+                {
+                    string comboNames = string.Join("+", _runPlan.ComboTests);
+                    Log.Write(L.F("\n>>> Starting combined test {0} ({1} rounds)", comboNames, _runPlan.ComboRounds));
+                }
                 Workspace.SaveState(new TestState
                 {
                     Offsets = offsets,
@@ -2629,7 +3006,7 @@ internal sealed partial class MainForm : Form
                 bool ok;
                 var comboAlgos = _runPlan.ComboTests.Select(AlgoOf).ToArray();
                 (ok, offsets) = YCruncher.RunStressTest(comboAlgos, _runPlan.ComboRounds, offsets, _runPlan.ComboSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
-                if (ok) Log.Write("组合测试全部完成！");
+                if (ok) Log.Write(L.T("Combined test complete!"));
                 else passOk = false;
             }
             else
@@ -2651,25 +3028,43 @@ internal sealed partial class MainForm : Form
                 (ok, offsets) = _testMode == YCruncher.BenchMode
                     ? YCruncher.RunPiBench(iters, offsets, _testMode, token, _autoAdjust, NotifyManualError)
                     : YCruncher.RunStressTest(new[] { algo }, iters, offsets, _durationSeconds, _testMode, token, _autoAdjust, NotifyManualError, scopeLogical, scopeCores, scopeLabel);
-                if (ok) Log.Write("测试全部完成！");
+                if (ok) Log.Write(L.T("All tests complete!"));
                 else passOk = false;
             }
             return passOk;
         }
 
-        // An incomplete run must not produce final results unless the user stopped it.
-        if (!allPassed && !_stopRequested)
+        // Include CO applied manually during the test, which the stress loop only reads back on backoff.
+        YCruncher.RefreshBaselineFromCpu(offsets, log: false);
+
+        if (_restartRequested)
         {
-            Log.WriteCo("测试未完成，未生成最终结果。当前 CO：", offsets, level: "WARN");
+            Log.WriteCo(_restartReason == "Curve Shaper" ? L.T("Curve Shaper changed manually, restarting the test. Current CO:")
+                                                         : L.T("CO changed manually, restarting the test:"), offsets, level: "WARN");
             Workspace.ClearState();
-            Workspace.ClearInProgress(); // Clear the marker to avoid a false backoff next run.
-            var partialSnapshot = new List<int>(offsets);
-            Ui(() => _offsetsLabel.Text = $"当前 CO: [{string.Join(", ", partialSnapshot)}]");
+            Workspace.ClearInProgress();
             return false;
         }
 
+        // An incomplete run must not produce final results unless the user stopped it.
+        if (!allPassed && !_stopRequested)
+        {
+            Log.WriteCo(L.T("Test not completed, no final result. Current CO:"), offsets, level: "WARN");
+            Workspace.ClearState();
+            Workspace.ClearInProgress(); // Clear the marker to avoid a false backoff next run.
+            return false;
+        }
+
+        // A stopped run has not passed: no pass summary and no final result.
+        if (_stopRequested)
+        {
+            Workspace.ClearState();
+            Workspace.ClearInProgress();
+            return true;
+        }
+
         Log.Write("\n" + new string('=', 50));
-        Log.WriteCo("过测 PBO 参数：", offsets);
+        Log.WriteCo(L.T("Passing PBO values:"), offsets);
         if (RyzenSmu.IsCurveShaperSupported())
         {
             int[,]? cs = RyzenSmu.ReadCurveShaper(out bool csReadable);
@@ -2687,51 +3082,64 @@ internal sealed partial class MainForm : Form
         try
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"测试完成时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine($"测试模式: {_testMode}");
-            sb.AppendLine($"测试范围: {ScopeLabel(_testScope, _scopeCcd)}");
+            sb.AppendLine(L.T("Finished: ") + $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine(L.T("Mode: ") + _testMode);
+            sb.AppendLine(L.T("Scope: ") + ScopeLabel(_testScope, _scopeCcd));
             sb.AppendLine();
             sb.AppendLine(_testMode switch
             {
-                "SEQ" => "测试项目: 顺序 " + string.Join(" → ", _runPlan.Sequence.Select(st => $"{st.Test} {st.Rounds} 轮 × {st.Seconds} 秒")),
-                "COMBO" => $"测试项目: 组合 {string.Join("+", _runPlan.ComboTests)}，{_runPlan.ComboRounds} 轮，每项每轮 {_runPlan.ComboSeconds} 秒",
-                _ => $"每轮时间: {_durationSeconds} 秒{Environment.NewLine}测试轮数: {_singleRounds}",
+                "SEQ" => L.T("Tests: sequential ") +
+                         string.Join(" → ", _runPlan.Sequence.Select(st => L.F("{0} {1} rounds × {2} s", st.Test, st.Rounds, st.Seconds))),
+                "COMBO" => L.T("Tests: combined ") + string.Join("+", _runPlan.ComboTests) +
+                           L.F(", {0} rounds, {1} s per test per round", _runPlan.ComboRounds, _runPlan.ComboSeconds),
+                _ => L.F("Time per round: {0} s", _durationSeconds) + Environment.NewLine +
+                     L.F("Rounds: {0}", _singleRounds),
             });
             sb.AppendLine();
             for (int i = 0; i < offsets.Count; i++)
-                sb.AppendLine($"物理核心 {i}: {offsets[i]}");
+                sb.AppendLine(L.F("Physical core {0}: {1}", i, offsets[i]));
             File.WriteAllText(Workspace.FinalOffsets, sb.ToString(), Encoding.UTF8);
-            Log.Write($"最终结果已保存到 {Workspace.FinalOffsets}");
+            Log.Write(L.T("Final result saved to ") + Workspace.FinalOffsets);
         }
         catch (Exception e)
         {
-            Log.Write($"保存结果失败: {e.Message}", "WARN");
+            Log.Write(L.F("Failed to save the result: {0}", e.Message), "WARN");
         }
 
         Workspace.ClearState();
-        Workspace.ClearInProgress(); // Normal completion or manual stop clears the marker.
+        Workspace.ClearInProgress(); // Normal completion clears the marker.
 
-        var finalSnapshot = new List<int>(offsets);
-        Ui(() => _offsetsLabel.Text = $"最终 CO: [{string.Join(", ", finalSnapshot)}]");
         return true;
     }
 
     private void TestFinished()
     {
-        SetStatus("正在清理进程...", Theme.Warn);
+        SetStatus(L.T("Cleaning up processes..."), Theme.Warn);
         YCruncher.Kill();
 
         SetControlsEnabled(true);
         _stopBtn.Enabled = false;
-        SetStatus("就绪", Theme.Success);
+        if (_restartRequested)
+        {
+            _restartRequested = false;
+            StartTest(null, EventArgs.Empty);
+            return;
+        }
+        SetStatus(L.T("Ready"), Theme.Success);
         OnTestFinishedForAutostart();
 
-        if (_testCompletedNormally && !_stopRequested)
-            ThemedDialog.Show(this, "测试已完成！", "完成");
+        if (AppSettings.Current.ExpertMode && !_stopRequested)
+        {
+            bool ok = _testCompletedNormally;
+            Log.Write(ok ? L.T("Test complete!") : L.T("Test Not Completed"), ok ? "INFO" : "WARN");
+            SetStatus(ok ? L.T("Test complete!") : L.T("Test Not Completed"), ok ? Theme.Success : Theme.Warn);
+        }
+        else if (_testCompletedNormally && !_stopRequested)
+            ThemedDialog.Show(this, L.T("Test complete!"), L.T("Done"));
         else if (!_stopRequested)
-            ThemedDialog.Show(this, "测试未跑完，未生成最终结果，原因见运行日志。", "测试未完成");
+            ThemedDialog.Show(this, L.T("The test did not finish and produced no final result; see the run log."), L.T("Test Not Completed"));
         else
-            ThemedDialog.Show(this, "测试已停止，进程已清理完成。", "已停止");
+            Log.Write(L.T("Test stopped and processes cleaned up"));
     }
 
     // Single Core Boost and voltage alignment
@@ -2742,28 +3150,40 @@ internal sealed partial class MainForm : Form
     private Task? _measureTask;
     private readonly ResultsPanel _resultsPanel = new() { Dock = DockStyle.Fill };
 
-    private FlowLayoutPanel BuildMeasureRow(int btnWidth, int gap)
+    private void InitMeasureButtons()
     {
-        var row = new FlowLayoutPanel { AutoSize = true, BackColor = Theme.Surface, WrapContents = false, Dock = DockStyle.Bottom, Padding = new Padding(0, 6, 0, 0) };
-        _scbBtn = Ghost("Single Core Boost");
-        _alignBtn = Ghost("电压对齐");
-        _scbBtn.Size = _alignBtn.Size = new Size(btnWidth, 32);
-        _scbBtn.Margin = new Padding(0, 0, gap, 0);
+        // Width follows the translated text so longer languages are not clipped.
+        PillButton MeasureBtn(string text, int minWidth)
+        {
+            var font = new Font(Theme.FontFamily, 8.75F, FontStyle.Bold);
+            return new PillButton
+            {
+                Text = text,
+                Size = new Size(Math.Max(minWidth, TextRenderer.MeasureText(text, font).Width + 24), 30),
+                Radius = 7,
+                Font = font,
+                BackColor = Theme.Surface,
+                Normal = Theme.AccentSoft,
+                Hover = Theme.AccentSoftHover,
+                Outline = Theme.Accent,
+                ForeColor = Theme.TextHi,
+            };
+        }
+        _scbBtn = MeasureBtn(L.T("Single Core Boost"), 88);
+        _alignBtn = MeasureBtn(L.T("Voltage Align"), 88);
+        _scbBtn.Margin = new Padding(0, 0, 8, 0);
         _alignBtn.Margin = new Padding(0);
-        _tips.SetToolTip(_scbBtn, "逐核运行单核负载，测量当前 CO 下各核能跑到的频率 / 有效频率 / 电压");
-        _tips.SetToolTip(_alignBtn, "全部核心 CO 统一设为起点（默认 0，检测到外频时可自定义）后逐核测量频率与电压，各 CCD 以 CPPC 最高核心中同频电压最低者为基准核，逐步降低 CO 对齐电压\n再以 CCD 为单位整体降低 CO 探明单核频率平台，复测全部核心后微调频率偏低的核心；出现计算错误的核心会回退并停止下调");
-        _scbBtn.Click += (_, _) => StartMeasure("Single Core Boost", (win, ct) => SingleCoreBoost.Run(_monitorView, win, ct));
+        _tips.SetToolTip(_scbBtn, L.T("Runs a single-core load on each core and measures its frequency / effective frequency / voltage at the current CO"));
+        _tips.SetToolTip(_alignBtn, L.T("Sets every core's CO to the start value (0 by default, adjustable when a raised BCLK is detected) and measures each core's frequency and voltage; per CCD, the CPPC-top core with the lowest voltage at the same frequency is the reference, and CO is lowered step by step to align voltages\nThen lowers CO per CCD to find the single-core frequency plateau, re-measures all cores and fine-tunes cores that run low; cores with computation errors are backed off and no longer lowered"));
+        _scbBtn.Click += (_, _) => StartMeasure(L.T("Single Core Boost"), (win, ct) => SingleCoreBoost.Run(_monitorView, win, ct));
         _alignBtn.Click += (_, _) => OnAlignClick();
-        row.Controls.Add(_scbBtn);
-        row.Controls.Add(_alignBtn);
-        return row;
     }
 
     private void OnAlignClick()
     {
         if (!VoltageAlign.Confirm(this, _monitorView, out int startCo)) return;
         int editorMin = (int)_coCells[0].Minimum;
-        StartMeasure("电压对齐", (win, ct) =>
+        StartMeasure(L.T("Voltage Alignment"), (win, ct) =>
         {
             var final = VoltageAlign.Run(_monitorView, editorMin, startCo, win, ct);
             if (final == null) return false;
@@ -2779,7 +3199,7 @@ internal sealed partial class MainForm : Form
         if (_testTask is { IsCompleted: false } || _measureTask is { IsCompleted: false }) return;
         if (!SingleCoreBoost.IsSupported)
         {
-            ThemedDialog.Show(this, "CPU 不支持 AVX2 / FMA，无法运行单核负载。", title);
+            ThemedDialog.Show(this, L.T("The CPU does not support AVX2 / FMA, so the single-core load cannot run."), title);
             return;
         }
 
@@ -2790,25 +3210,23 @@ internal sealed partial class MainForm : Form
 
         SetControlsEnabled(false);
         _stopBtn.Enabled = true;
-        _offsetTimer.Stop();
-        SetStatus($"{title} 运行中", Theme.Warn);
+        SetStatus(L.F("{0} running", title), Theme.Warn);
 
         _measureTask = Task.Run(() =>
         {
             bool ok = false;
             try { ok = work(win, cts.Token); }
-            catch (Exception e) { Log.Write($"{title} 异常: {e.Message}", "ERROR"); }
+            catch (Exception e) { Log.Write(L.F("{0} error: {1}", title, e.Message), "ERROR"); }
             finally
             {
                 bool cancelled = cts.IsCancellationRequested;
-                if (cancelled) Log.Write($"{title} 已取消", "WARN");
-                win.Finish(cancelled ? "已取消" : ok ? "完成" : "失败，原因见运行日志", ok && !cancelled);
+                if (cancelled) Log.Write(L.F("{0} cancelled", title), "WARN");
+                win.Finish(cancelled ? L.T("Cancelled") : ok ? L.T("Done") : L.T("Failed, see the run log"), ok && !cancelled);
                 Ui(() =>
                 {
                     SetControlsEnabled(true);
                     _stopBtn.Enabled = false;
-                    _offsetTimer.Start();
-                    SetStatus("就绪", Theme.Success);
+                    SetStatus(L.T("Ready"), Theme.Success);
                 });
             }
         });
@@ -2817,8 +3235,7 @@ internal sealed partial class MainForm : Form
 
     private void SetStatus(string text, Color color)
     {
-        _statusLabel.Text = text;
-        _statusLabel.ForeColor = color;
+        _headerBar.SetStatus(text, color);
     }
 
     private (string algo, int iters) GetTestConfig(string mode)
@@ -2834,13 +3251,13 @@ internal sealed partial class MainForm : Form
         singleRounds = 0;
         try
         {
-            duration = ReadPositiveInt(_durationBox.Text, "每轮时间");
-            singleRounds = ReadPositiveInt(_roundsBox.Text, "轮数");
+            duration = ReadPositiveInt(_durationBox.Text, L.T("Time per round"));
+            singleRounds = ReadPositiveInt(_roundsBox.Text, L.T("Rounds"));
             return true;
         }
         catch (Exception ex)
         {
-            ThemedDialog.Show(this, ex.Message, "参数错误");
+            ThemedDialog.Show(this, ex.Message, L.T("Invalid Value"));
             return false;
         }
     }
@@ -2848,9 +3265,9 @@ internal sealed partial class MainForm : Form
     private static int ReadPositiveInt(string raw, string label)
     {
         if (!int.TryParse(raw.Trim(), out int v))
-            throw new InvalidOperationException($"{label} 必须是正整数");
+            throw new InvalidOperationException(L.F("{0} must be a positive integer", label));
         if (v <= 0)
-            throw new InvalidOperationException($"{label} 必须大于 0");
+            throw new InvalidOperationException(L.F("{0} must be greater than 0", label));
         return v;
     }
 
@@ -2891,9 +3308,9 @@ internal sealed partial class MainForm : Form
     private string ScopeLabel(string scope, int ccd) => scope switch
     {
         "CCD" => $"CCD{ccd}",
-        "CUSTOM" => $"自定义核心 [{string.Join(", ", _customCores)}]",
-        "EACH" => "逐 CCD 依次",
-        _ => "全部核心",
+        "CUSTOM" => L.T("Custom cores ") + $"[{string.Join(", ", _customCores)}]",
+        "EACH" => L.T("Each CCD in turn"),
+        _ => L.T("All cores"),
     };
 
     private string SelectedMode() => _selectedMode;
@@ -2947,12 +3364,32 @@ internal sealed partial class MainForm : Form
         // Only user-initiated close is a normal exit; preserve recovery state on shutdown or termination.
         bool userClosing = e.CloseReason is CloseReason.UserClosing or CloseReason.ApplicationExitCall;
 
+        // A BIOS write is never cut off by a user close.
+        if (userClosing && ((_memOcPage?.IsWriting ?? false) || _pboBiosWriting))
+        {
+            ThemedDialog.Show(this, L.T("Settings are being written to the BIOS. Exit after the write finishes."), L.T("Confirm"));
+            e.Cancel = true;
+            return;
+        }
+
+        // A single-core measurement or voltage alignment may be writing CO: stop it first, then exit once it has ended.
+        if (userClosing && _measureTask is { IsCompleted: false } measure)
+        {
+            e.Cancel = true;
+            if (!ThemedDialog.Ask(this, L.T("A measurement is running. Stop it and exit?"), L.T("Confirm"), L.T("Exit"), L.T("Cancel")))
+                return;
+            _measureCts?.Cancel();
+            SetStatus(L.T("Stopping..."), Theme.Danger);
+            _ = measure.ContinueWith(_ => Ui(Close), TaskScheduler.Default);
+            return;
+        }
+
         if (_testTask is { IsCompleted: false })
         {
             // Do not block system shutdown with a confirmation dialog.
             if (userClosing)
             {
-                if (!ThemedDialog.Ask(this, "测试正在运行，确定要退出吗？", "确认", "退出", "取消"))
+                if (!ThemedDialog.Ask(this, L.T("A test is running. Exit anyway?"), L.T("Confirm"), L.T("Exit"), L.T("Cancel")))
                 {
                     e.Cancel = true;
                     return;
@@ -2960,6 +3397,11 @@ internal sealed partial class MainForm : Form
             }
             _stopRequested = true;
             _cts?.Cancel();
+        }
+        else if (userClosing && !ConfirmExit())
+        {
+            e.Cancel = true;
+            return;
         }
 
         _measureCts?.Cancel();
