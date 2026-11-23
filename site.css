@@ -113,19 +113,6 @@ main { min-width: 0; }
 main:focus { outline: none; }
 
 .hero { padding: clamp(2.15rem, 5vw, 4.25rem) 0 1.9rem; }
-.eyebrow {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: .55rem;
-  margin: 0 0 1rem;
-  color: var(--accent);
-  font-size: .8rem;
-  letter-spacing: .095em;
-  font-weight: 750;
-}
-.eyebrow > span:first-child { display: inline-block; width: 1.4rem; height: 2px; background: currentColor; }
-.version { border-radius: .25rem; background: var(--tint); padding: .12rem .45rem; letter-spacing: .015em; }
 h1, h2, h3 { line-height: 1.26; }
 h1 { margin: 0; font-size: clamp(2.65rem, 6.1vw, 5.65rem); letter-spacing: -.055em; font-weight: 800; }
 .intro { max-width: 39rem; margin: 1.15rem 0 1.35rem; font-size: clamp(1rem, 1.65vw, 1.22rem); color: var(--muted); }
