@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="AMD Ryzen PBO Studio MEMOC 4.0 中文手册。从安装 PawnIO 到填写 EXPO、写入 BIOS、验证内存稳定性与恢复。">
+  <meta name="description" content="AMD Ryzen PBO Studio 中文使用手册。查看 Ryzen 实时监控、PBO 与 CO / CS 调参、稳定性测试、内存超频、日志与恢复的操作方法。">
   <meta name="theme-color" content="#f8f7f4">
-  <title>MEMOC 4.0 使用说明 · AMD Ryzen PBO Studio</title>
+  <title>AMD Ryzen PBO Studio · 中文使用手册</title>
+  <link rel="icon" href="studio.ico">
   <link rel="stylesheet" href="site.css">
 </head>
 <body id="top">
@@ -13,7 +14,7 @@
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="./">
-        <span class="brand-mark" aria-hidden="true">M</span>
+        <img class="brand-mark" src="studio.ico" alt="" width="32" height="32">
         <span>AMD Ryzen PBO Studio</span>
       </a>
       <div class="header-links">
@@ -25,38 +26,41 @@
 
   <div class="layout">
     <aside class="sidebar">
-      <p class="nav-label">MEMOC 4.0 手册</p>
+      <p class="nav-label">使用手册</p>
       <nav aria-label="手册导航">
         <a href="#main">概览</a>
         <a href="#install">下载与安装</a>
-        <a href="#memory">内存超频</a>
+        <a href="#monitor">实时监控</a>
+        <a href="#pbo">PBO 调参</a>
         <a href="#testing">稳定性测试</a>
-        <a href="#recovery">排查与恢复</a>
+        <a href="#memory">内存超频</a>
+        <a href="#recovery">日志与恢复</a>
+        <a href="#settings">设置与更新</a>
+        <a href="#faq">常见问题</a>
       </nav>
     </aside>
 
     <main id="main" tabindex="-1">
       <section class="hero" aria-labelledby="title">
         <p class="eyebrow"><span aria-hidden="true"></span> <span class="version">V4.0.0 Beta</span></p>
-        <h1 id="title">MEMOC 4.0<br>使用说明</h1>
-        <p class="intro">在 Windows 查看内存 SPD 和实时读数，填写 EXPO 或导入配置，再将目标参数写入 BIOS。重启完成内存训练后，验证系统稳定性。</p>
+        <h1 id="title">AMD Ryzen<br>PBO Studio</h1>
+        <p class="intro">适用于 AMD Ryzen 5000、7000 和 9000 系列的 Windows 调参工具。查看 CPU 与内存读数，调整 PBO、Curve Optimizer 和 Curve Shaper，运行 y-cruncher 稳定性测试，或编辑内存参数并写入 BIOS。</p>
         <div class="hero-links">
           <a class="button primary" href="#install">下载与安装</a>
-          <a class="button secondary" href="#memory">查看超频流程</a>
+          <a class="button secondary" href="#pbo">查看 PBO 调参</a>
         </div>
       </section>
 
       <figure class="screenshot">
-        <a href="memory-oc.png" aria-label="查看内存超频界面大图">
-          <img src="memory-oc.png" alt="MEMOC 4.0 中文界面。上方是内存 SPD 信息和配置按钮，下方三栏分别显示电压、内存时序和信号控制。"
-               width="1420" height="790">
+        <a href="pbo-tuning.png" aria-label="查看 PBO 调参界面大图">
+          <img src="pbo-tuning.png" alt="AMD Ryzen PBO Studio 的 PBO 调参页。顶部显示按 CCD 分组的实时监控，下方是 CO、Curve Shaper、PBO 参数和运行日志。" width="1420" height="790">
         </a>
-        <figcaption>MEMOC 4.0 Beta 的「内存超频」页。图中读数来自示例机器。</figcaption>
+        <figcaption>「PBO 调参」页。手册中的截图展示示例机器的设置与读数。</figcaption>
       </figure>
 
       <section class="chapter" id="install" aria-labelledby="install-title">
         <h2 id="install-title">下载与安装</h2>
-        <p>手册对应 V4.0.0 Beta。请核对下载包或程序「关于」中的版本号。若 GitHub Releases 只列出 3.x，可使用手头已有的 4.0 Beta 安装包，或等待 4.0 发布。</p>
+        <p>本手册对应 V4.0.0 Beta。请在程序「关于」中核对版本。GitHub Releases 会列出已公开的版本，3.x 与本手册中的界面和功能有差异。</p>
         <h3 id="requirements">运行要求</h3>
         <dl class="specs">
           <div><dt>系统</dt><dd>Windows 10 / 11 x64，管理员权限</dd></div>
@@ -64,6 +68,21 @@
           <div><dt>内存超频</dt><dd>本手册以 AM5 / DDR5 为例。可写项目由主板及当前 BIOS 暴露的 AMD Overclocking 接口决定。</dd></div>
           <div><dt>驱动</dt><dd><a href="https://pawnio.eu/">PawnIO</a>，启动前必须安装</dd></div>
         </dl>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="处理器功能支持表">
+          <table>
+            <caption>CPU 调参功能支持范围</caption>
+            <thead>
+              <tr><th scope="col">功能</th><th scope="col">5000 · Zen 3</th><th scope="col">7000 · Zen 4</th><th scope="col">9000 · Zen 5</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Curve Optimizer</th><td>支持</td><td>支持</td><td>支持</td></tr>
+              <tr><th scope="row">Curve Shaper</th><td>—</td><td>—</td><td>支持</td></tr>
+              <tr><th scope="row">PPT / EDC / TDC</th><td>支持</td><td>支持</td><td>支持</td></tr>
+              <tr><th scope="row">修改 FMax</th><td>—</td><td>支持</td><td>支持</td></tr>
+              <tr><th scope="row">CPPC 核心排名</th><td>需在 BIOS 开启 CPPC</td><td>支持</td><td>支持</td></tr>
+            </tbody>
+          </table>
+        </div>
 
         <h3 id="package">选择发布包</h3>
         <p>如果发布页列有以下文件，首次安装选择 <code>lite</code> 或 <code>net8contained</code>。</p>
@@ -76,58 +95,162 @@
         <ol>
           <li>安装 PawnIO。如果选择了 <code>lite</code> 包，确认已安装 .NET 8 Desktop Runtime x64。</li>
           <li>完整解压软件包，保留 EXE、随附 DLL 和子目录。</li>
-          <li>以管理员身份运行 <code>AMD Ryzen PBO Studio.exe</code>。先确认「PBO 调参」页能显示 CPU 监控读数，再打开「内存超频」。</li>
+          <li>以管理员身份运行 <code>AMD Ryzen PBO Studio.exe</code>，确认「PBO 调参」页能够显示 CPU 读数。</li>
         </ol>
+      </section>
+
+      <section class="chapter" id="monitor" aria-labelledby="monitor-title">
+        <h2 id="monitor-title">实时监控</h2>
+        <p>左侧「系统概况」显示 CPU、内存容量和实时 FCLK / UCLK、主板型号、BIOS 与 AGESA 版本、显卡与驱动以及 Windows 版本。顶部监控在「PBO 调参」「稳定性测试」和「运行日志」页可见，切到「内存超频」时收起。</p>
+        <dl class="specs">
+          <div><dt>功耗、电流与温度</dt><dd>PPT（封装功耗）、TDC（持续电流）、EDC（峰值电流）和 THM（温度）的当前值与上限。</dd></div>
+          <div><dt>电压与频率</dt><dd>TEL / VID、Vdroop、FMax 和 BCLK。异步外频平台会分别显示 BCLK 与 BCLK2。</dd></div>
+          <div><dt>CCD 与每核状态</dt><dd>按 CCD 显示平均占用率和热点温度。各核心显示 CPPC 排名（金核、银核标记）、频率、有效频率（EFF）、CO 和 Core VID。</dd></div>
+        </dl>
+        <p>想确认核心在一次测试中实际工作的频率，优先查看 <strong>EFF</strong>。Ryzen 5000 的 CPPC 一栏为空时，可检查 BIOS 是否已开启 CPPC。</p>
+      </section>
+
+      <section class="chapter" id="pbo" aria-labelledby="pbo-title">
+        <h2 id="pbo-title">PBO 调参</h2>
+        <h3 id="curves">Curve Optimizer 与 Curve Shaper</h3>
+        <p><strong>Curve Optimizer（CO）</strong>按物理核心调整曲线偏移。可以逐核编辑，也可以用每列的 <code>+</code> / <code>−</code> 一起微调。<strong>Curve Shaper（CS）</strong>在支持的 Ryzen 9000 系上，按 5 个频率档（MIN、LOW、MED、HIGH、MAX）和 3 个温度档（LOW、MED、HIGH）调整曲线。</p>
+        <dl class="specs">
+          <div><dt>应用</dt><dd>写入当前编辑值，使本次运行生效。</dd></div>
+          <div><dt>刷新</dt><dd>从硬件重新读取当前值。</dd></div>
+          <div><dt>保存</dt><dd>将编辑值保存至 <code>profiles\co_profile.json</code> 或 <code>profiles\cs_state.json</code>。</dd></div>
+          <div><dt>读取</dt><dd>将已保存的配置载入编辑器。需要立即生效时再点「应用」。</dd></div>
+        </dl>
+
+        <h3 id="limits">频率、功耗、电流与 Scalar</h3>
+        <p>页面底部可设置 FMax（MHz）、PPT（W）、EDC（A）、TDC（A）和 PBO Scalar（1X–10X），再点同行的「应用」。FMax 和 Scalar 依处理器及固件能力开放。测试开始时会记录当前 FMax / PPT / EDC / TDC，手动应用这些限制时也会更新记录，以便续跑恢复。</p>
+
+        <h3 id="boot-apply">开机自动应用 PBO</h3>
+        <p>稳定性测试通过后，先保存与当前 CPU 核心数匹配的 CO 配置，需要时保存 CS，再打开左侧「开机自动应用PBO」。每次登录 Windows 时，程序应用已保存的 CO 和支持的 CS，以及上次在 PBO 栏应用的 FMax / PPT / EDC / TDC。限制只写入与当前值有差异的项目，Scalar 由当前固件设置保留。</p>
+        <p>如果上次开机应用后不久发生异常重启，程序会跳过下一次应用。可在「运行日志」查看跳过原因并检查所保存的配置。</p>
+
+        <h3 id="pbo-bios">PBO 固件写入</h3>
+        <p>「PBO 调参」中的「写入 BIOS」仅在台式机上提供。程序内解锁后，还需开启专家模式并停止测试或测量。程序会探测主板接口，预览可写的 PBO、CO、CS 项和跳过原因，确认后逐项下发，重启生效。以固件实际支持为准，非 Zen 5 平台会提示实验性支持。</p>
+        <p>部分固件在重启后可能无法保留正 CO 的符号。写入途中报错时，已接受的命令可能仍有效，请核对日志和 BIOS 后再操作。</p>
+      </section>
+
+      <section class="chapter" id="testing" aria-labelledby="testing-title">
+        <h2 id="testing-title">稳定性测试</h2>
+        <figure class="screenshot chapter-shot">
+          <a href="stability-test.png" aria-label="查看稳定性测试界面大图">
+            <img src="stability-test.png" alt="稳定性测试页左侧为测试设置，右侧为电压对齐的逐核结果和汇总。" width="1420" height="790" loading="lazy">
+          </a>
+          <figcaption>「稳定性测试」页。选好测试计划、CO 调整方式和核心范围后，点击「开始测试」。</figcaption>
+        </figure>
+
+        <h3 id="test-plans">y-cruncher 测试计划</h3>
+        <dl class="specs">
+          <div><dt>单项测试</dt><dd>选择 VT3、BKT、SVT、BBP、SFTv4、SNT、FFTv4、N63 或 YC018。常规项目可设每轮秒数和轮数。</dd></div>
+          <div><dt>顺序测试</dt><dd>完成一个项目的全部轮次后再进入下一项。默认依次运行 VT3 20 轮、BKT 10 轮、SVT 10 轮。可调整项目、顺序、轮数和每轮时长。</dd></div>
+          <div><dt>组合测试</dt><dd>每轮依次运行所选项目。默认轮换 VT3、BKT、SVT，共 10 轮。可调整项目、总轮数和统一的每轮时长。</dd></div>
+        </dl>
+        <p>测试范围可选<strong>全部核心</strong>或<strong>自定义</strong>物理核心。多 CCD 处理器还可指定<strong>单个 CCD</strong>或选择<strong>逐 CCD</strong>，依次完成各 CCD 的测试。多项计划和回退步长各有独立的设置按钮。运行时可点「停止测试」。</p>
+
+        <h3 id="co">CO 自动与手动模式</h3>
+        <p>先在「PBO 调参」应用要验证的 CO，再切到「稳定性测试」。</p>
+        <dl class="specs">
+          <div><dt>自动模式</dt><dd>y-cruncher 提供报错核心时，程序将逻辑核心映射回物理核心，将对应 CO 加一个回退步长（默认 +2，可设 +1 至 +5），然后重跑当前项目或组合计划。若测试继续失败且触及 CO +30 上限，程序停止继续回退。</dd></div>
+          <div><dt>手动模式</dt><dd>检测到错误时提示并停止，保留当前 CO，便于手动排查 CPU 或内存设置。</dd></div>
+        </dl>
+        <p>全部轮次通过后，「运行日志」列出最终 CO 和可用的 Curve Shaper 数据。<code>profiles\final_offsets.txt</code> 保存测试计划、范围与通过的逐核 CO。单 CCD 测试通过后，再用全核测试验证整体配置。</p>
+
+        <h3 id="measure">单核测量与电压对齐</h3>
+        <p>两项功能在测试页右侧，需要 CPU 支持 AVX2 / FMA。开始前请停下正在运行的压力测试。</p>
+        <dl class="specs">
+          <div><dt>单核测量</dt><dd>以当前 CO 逐核施加负载，记录频率、有效频率、VID 与 Core VID。测量保留当前调参值。</dd></div>
+          <div><dt>电压对齐</dt><dd>先统一起始 CO，再在各 CCD 选参考核心，逐步调整其他核心的 CO，使同频电压趋于一致，并寻找该 CCD 的单核频率平台。检测到运算错误的核心会回退。程序在过程中实时写入 CO，最后将结果填回编辑器。请通过压力测试验证后手动保存。</dd></div>
+        </dl>
+        <p>标准外频平台从 CO 0 开始。检测到升高的 CPU 外频时，可在确认窗口设置起始 CO。结果表和日志会显示每核测量与对齐状态，运行中可点「停止测试」。</p>
+
+        <h3 id="memory-test">YC018 与内存配置验证</h3>
+        <p>YC018 是仅用于单项测试的内存密集型 Pi 基准，程序根据内存容量选择 25 亿、50 亿或 100 亿位规模，固定使用全核。轮数决定运行次数，每轮秒数和所选核心范围对 YC018 无效。若要单独排查内存配置，可固定 CO、使用手动模式，在重启后先确认实时频率与时序，再结合适合内存的稳定性测试验证。</p>
       </section>
 
       <section class="chapter" id="memory" aria-labelledby="memory-title">
         <h2 id="memory-title">内存超频</h2>
+        <figure class="screenshot chapter-shot">
+          <a href="memory-oc.png" aria-label="查看内存超频界面大图">
+            <img src="memory-oc.png" alt="内存超频页上方显示 SPD 与配置按钮，下方分为电压、内存时序和信号控制三栏。" width="1420" height="790" loading="lazy">
+          </a>
+          <figcaption>「内存超频」页并排显示当前值和目标值，蓝色文字表示待写入的更改。</figcaption>
+        </figure>
         <aside class="notice">
           <strong>写入前先确认主板的恢复方法</strong>
           <p>内存参数不稳定可能导致数据错误、死机或开机黑屏。保存重要资料，查阅本机手册中的清除 CMOS 或 BIOS 恢复说明，再开始修改。</p>
         </aside>
 
+        <h3 id="memory-readings">读数与可调参数</h3>
+        <dl class="specs">
+          <div><dt>内存 SPD 信息</dt><dd>容量、通道数、频率、主时序、Cmd2T、各插槽型号和容量、颗粒厂商，以及从 SPD 读取的 EXPO 档位。</dd></div>
+          <div><dt>电压与其他</dt><dd>SoC、VDDP、VDDG CCD / IOD、VDD MISC、CPU VDDIO、DRAM VDD / VDDQ / VPP 与 FCLK OC Mode。还显示只读的 BGS、BGS Alt、GDM、Cmd2T，以及硬件可提供的 DIMM 平均温度和功耗。悬停可查看单条 DIMM 读数。</dd></div>
+          <div><dt>内存时序控制</dt><dd>内存频率、FCLK、UCLK DIV1 MODE、PowerDown Enable、Refresh Mode，以及控制器读出的主、次和其他时序。显示可编辑项取决于 BIOS。</dd></div>
+          <div><dt>信号控制</dt><dd>ProcODT、驱动强度、Rtt 终端电阻、Nitro RX / TX / Ctrl Line、Robust Training 和 Interleave 等。</dd></div>
+        </dl>
+        <p>实时电压与 DIMM 数据根据硬件可用性显示，内存页约每 2 秒更新。可调项目数量与操作状态显示在「内存写入与配置」区。</p>
+
         <h3 id="targets">读取 SPD，填写目标值</h3>
         <ol>
           <li>打开「内存超频」，查看内存型号、颗粒、EXPO 配置和已加载的可调项目。表格并排显示「当前」和「目标」，蓝色目标值表示待写入修改。</li>
-          <li>可以点击 SPD 区的 <strong>EXPO</strong> 填入频率、主要时序与相关电压，或点击「导入配置」载入本程序的 JSON 或 Cat-girl memoryOC 的内存配置。也可以逐项编辑目标值。</li>
-          <li>核对目标频率、时序、电压和导入时跳过的项目。再次点击同一 EXPO 可撤销这次填充。「重置目标」将编辑区恢复为当前 BIOS 设置。</li>
-          <li>需要留存这组参数时，点击「导出配置」。默认目录为 <code>dram\</code>。</li>
+          <li>点击 SPD 区的 <strong>EXPO</strong>，可填入可用的内存频率、主时序、刷新时序、DRAM VDD / VDDQ、CPU VDDIO 和 Nitro 参数。再次点击同一档位可撤销这次填充。</li>
+          <li>也可逐项编辑，或点「导入配置」载入本程序导出的 JSON、Cat-girl memoryOC 独立内存配置或组合配置中的内存部分。状态栏会列出未被载入的项目。「重置目标」将编辑区恢复为当前 BIOS 设置。</li>
+          <li>点「导出配置」将目标值保存为 JSON，默认目录为 <code>dram\</code>。文件名按可用信息带上平台、内存频率、CL 与颗粒厂商。</li>
         </ol>
         <p>EXPO、导入和编辑都只更新目标值。预设能否稳定运行取决于处理器、主板、BIOS 和内存条组合。</p>
 
         <h3 id="write">写入 BIOS 并重启</h3>
         <ol>
           <li>打开左下角齿轮「设置」，在「常规」中开启「专家模式」。</li>
-          <li>如果 <code>CPU VDDIO</code> 目标仍是 <code>Auto</code>，先按本机配置指定目标值。点击「写入 BIOS」，核对确认弹窗中的变更后再确认。程序会先校验并备份当前 BIOS 参数，再逐项写入和回读。</li>
+          <li>如果 <code>CPU VDDIO</code> 目标仍是 <code>Auto</code>，先按本机配置指定目标值。程序的 CPU VDDIO 上限为 <code>1.500 V</code>。点击「写入 BIOS」，核对确认窗口列出的改动及异常值提示。</li>
+          <li>确认后，程序会核对固件接口与相关参数，保存 <code>profiles\memory_backup_&lt;时间&gt;.json</code>，再通过主板的 AMD_ACPI WMI 接口逐项写入和回读。校验或备份失败时，程序会在写入前停止。</li>
           <li>确认写入结果后重启电脑，等待内存训练完成。回到软件查看频率、时序等实时读数，再进行稳定性测试。</li>
         </ol>
         <p>若中途报错，之前的部分项目可能已写入。先根据「运行日志」和回读结果确认状态，再决定如何恢复。</p>
       </section>
 
-      <section class="chapter" id="testing" aria-labelledby="testing-title">
-        <h2 id="testing-title">稳定性测试</h2>
-        <h3 id="memory-test">检查内存配置</h3>
-        <p>重新进入 Windows 后，先确认实时频率与时序，再运行适用于内存的稳定性测试。程序内可以在「稳定性测试」选择 y-cruncher 测试项目。若只排查内存设置，建议保持 CO 固定并选择「手动模式」。一次通过只能说明当前测试条件下未观察到错误。</p>
-
-        <h3 id="co">测试 Curve Optimizer</h3>
-        <p>如需同时使用 CPU 调参功能，先在「PBO 调参」应用 CO，再切到「稳定性测试」。可以选择单项、顺序或组合测试，并设置核心范围。</p>
+      <section class="chapter" id="recovery" aria-labelledby="recovery-title">
+        <h2 id="recovery-title">日志与恢复</h2>
+        <h3 id="logs">查看日志和配置文件</h3>
+        <p>「运行日志」提供完整日志，「PBO 调参」页右侧同步显示。日志记录 y-cruncher 的轮次、耗时与速度、出错核心映射、CO 回退和 BIOS 写入结果。「清除日志」只清空界面显示，磁盘日志仍可在 <code>logs\</code> 中查看。</p>
         <dl class="specs">
-          <div><dt>手动模式</dt><dd>检测到错误后提示并停止，保留当前 CO。</dd></div>
-          <div><dt>自动模式</dt><dd>将错误映射至物理核心，回退该核心的 CO 后重新测试。</dd></div>
+          <div><dt><code>logs\</code></dt><dd>程序会话、y-cruncher 输出，以及 <code>acpi-command-trace.jsonl</code> 中的固件命令和返回结果。</dd></div>
+          <div><dt><code>profiles\</code></dt><dd>CO 与 CS 配置、测试计划和最终结果、写入历史、恢复点、程序设置及内存 BIOS 备份。</dd></div>
+          <div><dt><code>dram\</code></dt><dd>内存 JSON 的默认导入与导出目录。若软件包带预设，也在此目录。</dd></div>
         </dl>
-        <p>调参完成后使用全核测试验证。最终 CO 可在「运行日志」及 <code>profiles\final_offsets.txt</code> 中查看。确认稳定后再启用「开机自动应用 PBO」。</p>
+
+        <h3 id="resume">异常重启后继续测试</h3>
+        <p>程序会保存测试计划、阶段、核心范围和 CO 历史。遇到死机或断电，登录 Windows 后，启动任务会尝试恢复测试。程序优先处理未完成的测试，恢复中断阶段、已记录的 PBO 限制与支持的 CS，并将启用核心的 CO 各回退一步。如果重启后手动应用过 CO，再续跑会沿用手动值。</p>
+        <p>常规模式下，自动恢复前有 30 秒倒计时，可以取消。连续自动续跑 10 次仍异常重启后，需要手动处理。取消续跑会保留恢复点，也可以在「稳定性测试」点「开始测试」继续。无人值守续跑需要 Windows 能自动登录。</p>
       </section>
 
-      <section class="chapter" id="recovery" aria-labelledby="recovery-title">
-        <h2 id="recovery-title">排查与恢复</h2>
+      <section class="chapter" id="settings" aria-labelledby="settings-title">
+        <h2 id="settings-title">设置与更新</h2>
+        <h3 id="preferences">常规、监控与数据</h3>
+        <p>点左下角齿轮打开「设置」。</p>
+        <dl class="specs">
+          <div><dt>常规</dt><dd>选择界面语言和退出前确认。专家模式会跳过常规测试、恢复和开机应用提示，并解锁内存页的「写入 BIOS」。写入确认仍会显示。</dd></div>
+          <div><dt>监控</dt><dd>设置 CPU 监控刷新间隔，范围 100–10,000 ms，默认 500 ms。</dd></div>
+          <div><dt>数据</dt><dd>快捷打开 <code>profiles</code> 与 <code>logs</code> 文件夹。</dd></div>
+        </dl>
+        <p>程序默认跟随 Windows 显示语言，内置英文，并随附简体中文、繁体中文、日语、韩语、德语、西班牙语、法语、巴西葡萄牙语和俄语。找不到对应翻译时使用英文，切换语言后需重启程序。</p>
+
+        <h3 id="updates">检查更新与工具栏</h3>
+        <p>设置中可开启「启动时自动检查更新」，也可用左下角的下载图标手动检查。程序读取 GitHub 的最新正式版本与更新说明，可选择升级或跳过该版本。更新器按有无内置 .NET 8 选包，完成后重启程序，保留日志和配置。覆盖失败时尝试从备份恢复。</p>
+        <p>左下角的「关于」显示软件版本与作者信息。咖啡杯图标打开自愿赞助窗口。</p>
+      </section>
+
+      <section class="chapter" id="faq" aria-labelledby="faq-title">
+        <h2 id="faq-title">常见问题</h2>
         <div class="faq">
           <details>
             <summary>软件无法启动</summary>
             <p>确认使用 Windows x64，已安装 PawnIO，并以管理员身份运行。若使用 <code>lite</code>，确认安装的是 .NET 8 <strong>Desktop Runtime x64</strong>。若缺少 DLL，请完整重新解压。</p>
           </details>
           <details>
-            <summary>写入按钮不可用，或可调项目为零</summary>
+            <summary>内存写入按钮不可用，或可调项目为零</summary>
             <p>先确认已开启「专家模式」。若仍无可调项目，请查看状态栏与「运行日志」中的 BIOS 接口探测结果，核对主板型号与 BIOS 版本。不同主板及固件可写项目不同。</p>
           </details>
           <details>
@@ -140,13 +263,13 @@
           </details>
         </div>
 
-        <h3 id="logs">日志与反馈</h3>
-        <p>「运行日志」记录测试与 BIOS 写入结果。BIOS 写入追踪可在 <code>logs\acpi-command-trace.jsonl</code> 中查看。反馈时请提供软件版本、CPU、主板、BIOS 版本、复现步骤及相关日志片段。</p>
+        <h3 id="feedback">反馈问题</h3>
+        <p>反馈时请提供软件版本、CPU、主板、BIOS 版本、复现步骤及相关日志片段。</p>
         <p><a href="https://github.com/lengmo23/RyzenPboStudio/issues">在 GitHub Issues 反馈</a></p>
       </section>
 
       <footer class="footer">
-        <p>内存超频功能由 <a href="https://v.douyin.com/yMpmAidKqdY/">Cat-girl-memoryOC（@纯爱出演小猪）</a> 提供支持。</p>
+        <p>开发者 <a href="https://github.com/lengmo23">@lengmo23</a> · 内存超频由 <a href="https://v.douyin.com/yMpmAidKqdY/">Cat-girl-memoryOC（@纯爱出演小猪）</a> 支持 · <a href="https://github.com/lengmo23/RyzenPboStudio/blob/main/LICENSE">GPL-3.0</a></p>
         <a href="#top">返回顶部</a>
       </footer>
     </main>
@@ -155,12 +278,15 @@
       <p class="nav-label">本页目录</p>
       <nav aria-label="本页目录">
         <a href="#requirements">运行要求</a>
-        <a href="#package">选择发布包</a>
+        <a href="#curves">CO 与 Curve Shaper</a>
+        <a href="#boot-apply">开机自动应用</a>
+        <a href="#pbo-bios">PBO 固件写入</a>
+        <a href="#test-plans">y-cruncher 测试计划</a>
+        <a href="#measure">单核测量与电压对齐</a>
         <a href="#targets">读取 SPD 与填写目标</a>
-        <a href="#write">写入 BIOS 并重启</a>
-        <a href="#memory-test">检查内存配置</a>
-        <a href="#co">测试 Curve Optimizer</a>
-        <a href="#logs">日志与反馈</a>
+        <a href="#write">内存写入 BIOS</a>
+        <a href="#resume">异常重启后继续测试</a>
+        <a href="#updates">检查更新</a>
       </nav>
     </aside>
   </div>
